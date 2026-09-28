@@ -85,7 +85,9 @@ on_worktree_add() {
   mkdir -p "$PINS" && printf '%s\n' "$wt" >"$PINS/$(field session_id).root"
   [ "${RAMIFY_AUTOSTART:-1}" = 1 ] || return 0
 
-  log="${RAMIFY_STATE_DIR:-/tmp/ramify}/$(basename "$wt").autostart.log"
+  # Under the project's state dir, like the CLI's own logs: two repos may both have a `feat` tree.
+  log="$(conf "$wt" STATE_DIR)/$(basename "$wt").autostart.log"
+  [ "$how" = new ] && log="$(conf "$wt" STATE_DIR)/$(basename "$wt").bootstrap.log"
   if [ "$how" = git ]; then
     # A second install racing the agent's own in the same directory corrupts it, so wait for the
     # config's ready marker instead of bootstrapping here. Gives up after 15 minutes; the Stop
@@ -145,9 +147,8 @@ on_stop() {
   configured "$root" || return 0
   [ "${RAMIFY_AUTOSTART:-1}" = 1 ] || return 0
   RAMIFY_ROOT="$root" "$RAMIFY" ping >/dev/null 2>&1 && return 0
-  mkdir -p "${RAMIFY_STATE_DIR:-/tmp/ramify}"
   RAMIFY_ROOT="$root" nohup "$RAMIFY" up \
-    >"${RAMIFY_STATE_DIR:-/tmp/ramify}/$(basename "$root").autostart.log" 2>&1 </dev/null &
+    >"$(conf "$root" STATE_DIR)/$(basename "$root").autostart.log" 2>&1 </dev/null &
   disown 2>/dev/null
 }
 

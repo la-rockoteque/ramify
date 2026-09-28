@@ -54,9 +54,10 @@ done
 services=""; body=""; bootstrap=""; ready=""; webdirs=""
 add() { services="$services $1"; body="$body"$'\n'"$2"$'\n'; }
 
-# Node dev servers, at the root or one level down.
-for pj in "$P/package.json" "$P"/*/package.json; do
+# Node dev servers, at the root or up to two levels down (apps/web, packages/ui).
+for pj in "$P/package.json" "$P"/*/package.json "$P"/*/*/package.json; do
   [ -f "$pj" ] || continue
+  case "$pj" in */node_modules/*) continue ;; esac
   dir="$(dirname "$pj")"; rel="${dir#"$P"}"; rel="${rel#/}"
   scripts="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1])).get("scripts",{}).keys()))' "$pj" 2>/dev/null)"
   deps="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join({**d.get("dependencies",{}),**d.get("devDependencies",{})}.keys()))' "$pj" 2>/dev/null)"
@@ -64,7 +65,7 @@ for pj in "$P/package.json" "$P"/*/package.json; do
   pm=npm; lock="node_modules/.package-lock.json"
   [ -f "$dir/pnpm-lock.yaml" ] && { pm=pnpm; lock="node_modules/.modules.yaml"; }
   [ -f "$dir/yarn.lock" ] && { pm=yarn; lock="node_modules/.yarn-integrity"; }
-  bootstrap="${bootstrap:+$bootstrap && }(cd ${rel:-.} && $pm install)"
+  bootstrap="${bootstrap:+$bootstrap && }(cd \"${rel:-.}\" && $pm install)"
   ready="${ready:-${rel:+$rel/}$lock}"
   webdirs="$webdirs ${rel:+$rel/}"
   # The first dev server is `web`; others are named after their directory.

@@ -132,11 +132,13 @@ check "behind hook denies a stale push"         grep -q '"permissionDecision": "
 # ── setup drafts a config from what the repo shows ──
 S="$T/drafted"; git init -q -b trunk "$S"; mkdir -p "$S/ui"
 echo '{"scripts":{"dev":"vite","storybook":"storybook dev"}}' >"$S/ui/package.json"
+mkdir -p "$S/apps/site" "$S/ui/node_modules/dep"; echo '{"scripts":{"dev":"next dev"},"dependencies":{"next":"1"}}' >"$S/apps/site/package.json"
+echo '{"scripts":{"dev":"x"}}' >"$S/ui/node_modules/dep/package.json"
 printf 'services:\n  db:\n    container_name: drafted-db\n' >"$S/compose.yaml"
 git -C "$S" commit -q --allow-empty -m init; for b in feat/a feat/b fix/c; do git -C "$S" branch "$b"; done
 RAMIFY_ROOT="$S" "$RAMIFY" setup >/dev/null 2>&1
 check "setup writes .ramify.conf"               test -f "$S/.ramify.conf"
-check "setup detects the dev server + storybook" grep -qx 'RAMIFY_SERVICES="web storybook"' "$S/.ramify.conf"
+check "setup detects dev servers two levels deep" grep -qx 'RAMIFY_SERVICES="web storybook apps_site"' "$S/.ramify.conf"
 check "setup finds the branch prefix"           grep -qx 'RAMIFY_BRANCH_PREFIX=feat/' "$S/.ramify.conf"
 check "setup finds the main branch"             grep -qx 'RAMIFY_MAIN=trunk' "$S/.ramify.conf"
 check "setup finds the compose containers"      grep -qx 'RAMIFY_CONTAINERS="drafted-db"' "$S/.ramify.conf"

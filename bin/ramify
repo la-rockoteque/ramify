@@ -157,7 +157,12 @@ ensure_containers() {
   for c in $RAMIFY_CONTAINERS; do
     docker ps --filter "name=^${c}\$" --filter status=running -q | grep -q . || missing=1
   done
-  if [ -n "$RAMIFY_CONTAINERS" ] && [ "$missing" = 0 ]; then
+  # Without named containers, ask compose whether every service of the fixed project runs.
+  if [ -z "$RAMIFY_CONTAINERS" ]; then
+    [ "$(docker compose -p "$RAMIFY_COMPOSE_PROJECT" -f "$PRIMARY/$RAMIFY_COMPOSE_FILE" ps --services --status running 2>/dev/null | sort)" \
+      = "$(docker compose -f "$PRIMARY/$RAMIFY_COMPOSE_FILE" config --services 2>/dev/null | sort)" ] || missing=1
+  fi
+  if [ "$missing" = 0 ]; then
     echo "  containers      already up (shared)"; return
   fi
   [ -n "$RAMIFY_COMPOSE_FILE" ] || die "containers down and no RAMIFY_COMPOSE_FILE to start them"
@@ -429,9 +434,10 @@ prune() { # [--apply]
     printf '  prune  %-45s %s%s\n' "$b" "$reason" "${path:+ + worktree $(basename "$path")}"
     n=$((n + 1))
     [ "$apply" = --apply ] || continue
+    # Remove first: a failed remove must leave the tree's stack and state as they were.
     if [ -n "$path" ] && [ -d "$path" ]; then
+      git -C "$PRIMARY" worktree remove "$path" || { echo "    worktree remove failed — branch and stack kept"; continue; }
       forget_worktree "$(basename "$path")"
-      git -C "$PRIMARY" worktree remove "$path" || { echo "    worktree remove failed — branch kept"; continue; }
     fi
     git -C "$PRIMARY" branch -D -q "$b"
   done < <(git -C "$PRIMARY" for-each-ref --format='%(refname:short)' refs/heads)
@@ -462,8 +468,8 @@ force_delete() { # worktree name or path, [--yes]
     choose "Delete it? This cannot be undone." "Delete" "Back"
     [ "$CHOICE" = 0 ] || return 0
   fi
-  forget_worktree "$(basename "$path")"
   git -C "$PRIMARY" worktree remove --force --force "$path" || return 1
+  forget_worktree "$(basename "$path")"
   [ -n "$b" ] && git -C "$PRIMARY" branch -D -q "$b"
   echo "deleted $(basename "$path")${b:+ and $b}"
 }
