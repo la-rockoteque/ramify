@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Claude Code hook dispatcher: ramify-hook worktree-add | push | behind | stop | session-end
+#
+# Installed as a plugin, these fire in every repo. Each one exits 0 silently unless the checkout
+# has a ramify config, and none of them ever fails a turn.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RAMIFY="$HERE/../bin/ramify"
+PINS="${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions"
+INPUT="$(cat 2>/dev/null)"
+
+field() { # dotted path into the hook's JSON input
+  printf '%s' "$INPUT" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for k in sys.argv[1].split("."):
+    d = d.get(k, "") if isinstance(d, dict) else ""
+print(d if isinstance(d, str) else json.dumps(d))' "$1" 2>/dev/null
+}
+
+context() { # event, text
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": sys.argv[1], "additionalContext": sys.argv[2]}}))' "$1" "$2"
+}
+
+configured() { RAMIFY_ROOT="$1" "$RAMIFY" config -q >/dev/null 2>&1; }
+conf() { RAMIFY_ROOT="$1" "$RAMIFY" config get "$2" 2>/dev/null; } # root, VAR
+
+# A session that created a worktree follows it, not CLAUDE_PROJECT_DIR — otherwise a session
+# rooted in the primary checkout keeps main up and never the tree being edited.
+session_root() {
+  local pin="$PINS/$(field session_id).root"
+  if [ -n "${RAMIFY_ROOT:-}" ]; then echo "$RAMIFY_ROOT"
+  elif [ -f "$pin" ]; then cat "$pin"
+  else git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${CLAUDE_PROJECT_DIR:-$PWD}"
+  fi
+}
+
+is_push() { grep -qE '(^|[;&|[:space:]])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)' <<<"$1"; }
+
+# The worktree a Bash command just created: `ramify new` prints it, a raw `git worktree add`
+# names it as its first positional argument.
+new_worktree() {
+  local out; out="$(field tool_response.stdout)"
+  if grep -q '^ramify: worktree ' <<<"$out"; then
+    sed -n 's/^ramify: worktree //p' <<<"$out" | tail -1; echo new; return
+  fi
+  printf '%s' "$INPUT" | python3 -c '
+import json, os, shlex, sys
+d = json.load(sys.stdin)
+cmd, cwd = d.get("tool_input", {}).get("command", ""), d.get("cwd") or os.getcwd()
+try:
+    toks = shlex.split(cmd, posix=True)
+except ValueError:
+    sys.exit(1)
+here = lambda base, t: os.path.normpath(os.path.join(base, os.path.expanduser(t)))
+SEP = ("&&", ";", "||", "|")
+i = 0
+while i < len(toks):
+    t = toks[i]
+    if t == "cd" and i + 1 < len(toks) and toks[i + 1] not in SEP:
+        cwd = here(cwd, toks[i + 1]); i += 2; continue
+    if t == "git":
+        base, j = cwd, i + 1
+        while j + 1 < len(toks) and toks[j] == "-C":
+            base = here(base, toks[j + 1]); j += 2
+        if toks[j:j + 2] == ["worktree", "add"]:
+            j += 2
+            while j < len(toks) and toks[j] not in SEP:
+                if toks[j] in ("-b", "-B", "--reason"):
+                    j += 2; continue
+                if toks[j].startswith("-"):
+                    j += 1; continue
+                print(here(base, toks[j])); print("git")
+                sys.exit(0)
+    i += 1
+sys.exit(1)' 2>/dev/null
+}
+
+on_worktree_add() {
+  local wt how ready log
+  { read -r wt; read -r how; } < <(new_worktree) || return 0
+  [ -n "${wt:-}" ] && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  configured "$wt" || return 0
+  mkdir -p "$PINS" && printf '%s\n' "$wt" >"$PINS/$(field session_id).root"
+  [ "${RAMIFY_AUTOSTART:-1}" = 1 ] || return 0
+
+  log="${RAMIFY_STATE_DIR:-/tmp/ramify}/$(basename "$wt").autostart.log"
+  if [ "$how" = git ]; then
+    # A second install racing the agent's own in the same directory corrupts it, so wait for the
+    # config's ready marker instead of bootstrapping here. Gives up after 15 minutes; the Stop
+    # hook retries on the next turn.
+    ready="$(conf "$wt" RAMIFY_READY)"
+    RAMIFY_ROOT="$wt" nohup bash -c '
+      [ -z "$3" ] || for _ in $(seq 180); do [ -e "$1/$3" ] && break; sleep 5; done
+      [ -z "$3" ] || [ -e "$1/$3" ] || { echo "$3 never appeared in $1 — bootstrap it, then ramify up"; exit 1; }
+      exec "$2" up' _ "$wt" "$RAMIFY" "$ready" >"$log" 2>&1 </dev/null &
+    disown 2>/dev/null
+  fi
+  context PostToolUse "Worktree $wt created — QA starts now, not at the push. Its stack comes up in the background once it is bootstrapped (log: ${log}); do not start a second install. Run every command in this session from $wt (absolute path in each one). Once \`RAMIFY_ROOT=$wt ramify card\` answers, invoke the \`ramify:ask-for-qa\` skill in kickoff mode: URLs and the checklist, then keep implementing."
+}
+
+on_push() {
+  is_push "$(field tool_input.command)" || return 0
+  local root head; root="$(field cwd)"; root="${root:-$PWD}"
+  configured "$root" || return 0
+  head="$(git -C "$root" rev-parse HEAD 2>/dev/null)" || return 0
+  # git writes progress to stderr, so the remote-tracking ref is the only honest success signal.
+  [ "$(git -C "$root" rev-parse '@{upstream}' 2>/dev/null)" = "$head" ] || return 0
+  context PostToolUse "Push landed (${head:0:8}). Invoke the \`ramify:ask-for-qa\` skill now to bring the branch up and hand it over with the checklist of what changed."
+}
+
+# A branch behind main is a PR whose diff carries other people's work and whose green build
+# proves nothing about the merge. Denies and hands the merge back: resolving it is a judgement call.
+on_behind() {
+  is_push "$(field tool_input.command)" || return 0
+  local root main remote branch behind missing more reason
+  root="$(field cwd)"; root="${root:-$PWD}"
+  configured "$root" || return 0
+  [ "$(conf "$root" RAMIFY_GATE_BEHIND)" = 0 ] && return 0
+  main="$(conf "$root" RAMIFY_MAIN)"; remote="$(conf "$root" RAMIFY_REMOTE)"
+  branch="$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
+  [ "$branch" = "$main" ] || [ "$branch" = HEAD ] && return 0
+  # No `timeout` on macOS; a perl alarm caps a slow remote. A stale ref is still checked below.
+  perl -e 'alarm 15; exec @ARGV' git -C "$root" fetch --quiet "$remote" "$main" 2>/dev/null
+  git -C "$root" rev-parse --verify --quiet "$remote/$main" >/dev/null || return 0
+  behind="$(git -C "$root" rev-list --count "HEAD..$remote/$main" 2>/dev/null)" || return 0
+  [ "$behind" -eq 0 ] && return 0
+  missing="$(git -C "$root" log --oneline --no-decorate -5 "HEAD..$remote/$main" | sed 's/^/  /')"
+  more=$((behind > 5 ? behind - 5 : 0))
+  [ "$more" -gt 0 ] && missing="$missing"$'\n'"  …and $more more"
+  reason="This branch is $behind commit(s) behind $remote/$main.
+
+It does not carry what $main already has:
+$missing
+
+Merge $main in, make the tests pass on the result, then push:
+  git merge $remote/$main"
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}))' "$reason"
+}
+
+# Fires after every turn, so the fast path — already answering — is one curl per service.
+on_stop() {
+  local root; root="$(session_root)"
+  configured "$root" || return 0
+  [ "${RAMIFY_AUTOSTART:-1}" = 1 ] || return 0
+  RAMIFY_ROOT="$root" "$RAMIFY" ping >/dev/null 2>&1 && return 0
+  mkdir -p "${RAMIFY_STATE_DIR:-/tmp/ramify}"
+  RAMIFY_ROOT="$root" nohup "$RAMIFY" up \
+    >"${RAMIFY_STATE_DIR:-/tmp/ramify}/$(basename "$root").autostart.log" 2>&1 </dev/null &
+  disown 2>/dev/null
+}
+
+# Synchronous on purpose: backgrounded, the hook exits, the child is orphaned mid-kill, and the
+# stack survives a session that reported itself closed. `prompt_input_exit` is escape at the
+# prompt, not the end of the work.
+on_session_end() {
+  [ "$(field reason)" = prompt_input_exit ] && return 0
+  local root; root="$(session_root)"
+  configured "$root" || return 0
+  RAMIFY_ROOT="$root" "$RAMIFY" down >/dev/null 2>&1
+  rm -f "$PINS/$(field session_id).root"
+}
+
+case "${1:-}" in
+  worktree-add) on_worktree_add ;;
+  push) on_push ;;
+  behind) on_behind ;;
+  stop) on_stop ;;
+  session-end) on_session_end ;;
+esac
+exit 0

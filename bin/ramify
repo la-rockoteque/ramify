@@ -1,0 +1,726 @@
+#!/usr/bin/env bash
+# ramify — one branch per worktree, one QA stack per worktree, many at once.
+#
+# Usage:  ramify setup [--print | --force] [--local] | config [-q | get VAR]
+#         ramify new <slug> | label [slug]
+#         ramify up | down | ping | card | dash | watch [seconds] | status | shared-down
+#         ramify cleanup | prune [--apply] | delete <worktree> [--yes]
+#         ramify write-set <file> | write-set --self-test
+#
+# THE CONTAINERS ARE SHARED AND THE APPS ARE NOT. Databases and emulators are expensive, stateful
+# and identical for every branch, so they run once under a fixed compose project. The services a
+# branch changes run per worktree, on a numbered port slot from a machine-wide registry.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$d/$src" ;; esac
+done
+RAMIFY_HOME="$(cd "$(dirname "$src")/.." && pwd)"
+SELF="$RAMIFY_HOME/bin/ramify"
+
+die() { echo "ramify: $*" >&2; exit 1; }
+
+# `RAMIFY_ROOT` wins over the working directory: hooks run from the session's project directory,
+# not from the worktree under test, and a `down` aimed at the wrong tree kills nothing and
+# reports success.
+REPO_ROOT="${RAMIFY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+case "${1:-}" in ''|-h|--help|help) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in write-set) exec "$RAMIFY_HOME/libexec/write-set.sh" "${@:2}" ;; esac
+[ -n "$REPO_ROOT" ] || die "not inside a git checkout (or set RAMIFY_ROOT)"
+PRIMARY="$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+[ -n "$PRIMARY" ] || die "$REPO_ROOT is not a git checkout"
+WORKTREE="$(basename "$REPO_ROOT")"
+
+CONFIG=""
+for d in "$REPO_ROOT" "$PRIMARY"; do
+  for f in .ramify.conf .claude/ramify.conf; do
+    [ -f "$d/$f" ] && { CONFIG="$d/$f"; break 2; }
+  done
+done
+# shellcheck disable=SC1090
+[ -n "$CONFIG" ] && . "$CONFIG"
+
+: "${RAMIFY_PROJECT:=$(basename "$PRIMARY")}"
+: "${RAMIFY_REMOTE:=origin}"
+: "${RAMIFY_MAIN:=main}"
+: "${RAMIFY_WORKTREES:=../$(basename "$PRIMARY")-wt}"
+: "${RAMIFY_BRANCH_PREFIX:=}"
+: "${RAMIFY_COPY:=}"
+: "${RAMIFY_COPY_EXCLUDE:=worktrees/}"
+: "${RAMIFY_BOOTSTRAP:=}"
+: "${RAMIFY_READY:=}"
+: "${RAMIFY_COMPOSE_FILE:=}"
+: "${RAMIFY_COMPOSE_PROJECT:=$RAMIFY_PROJECT}"
+: "${RAMIFY_CONTAINERS:=}"
+: "${RAMIFY_SERVICES:=}"
+: "${RAMIFY_MAX_SLOT:=10}"
+: "${RAMIFY_SKIP:=}"
+: "${RAMIFY_QA_PLAN:=}"
+: "${RAMIFY_QA_RESULTS:=}"
+: "${RAMIFY_QA_NOTES:=}"
+
+# A fixed /tmp, not $TMPDIR: a sandboxed agent shell and a hook see different $TMPDIRs, and the
+# registry only works if every session on the machine reads the same one.
+STATE_ROOT="${RAMIFY_STATE_DIR:-/tmp/ramify}"
+STATE_DIR="$STATE_ROOT/$RAMIFY_PROJECT"
+SLOTS="$STATE_DIR/slots"
+STATE="$STATE_DIR/$WORKTREE.env"
+mkdir -p "$SLOTS" "$STATE_DIR/shared"
+
+# ── Config access ────────────────────────────────────────────────────────────
+sv() { local n="${1}_$2"; printf '%s' "${!n:-}"; }            # service, key
+upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+envget() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }   # file, key
+skipped() { case " $RAMIFY_SKIP " in *" $1 "*) return 0 ;; esac; return 1; }
+has_shared() { [ -n "$(sv "$1" shared_port)" ]; }
+
+need_config() {
+  [ -n "$CONFIG" ] || die "no .ramify.conf or .claude/ramify.conf in $REPO_ROOT or $PRIMARY — see $RAMIFY_HOME/examples/"
+  [ -n "$RAMIFY_SERVICES" ] || die "$CONFIG declares no RAMIFY_SERVICES"
+  local s
+  for s in $RAMIFY_SERVICES; do
+    [[ "$s" =~ ^[a-z_][a-z0-9_]*$ ]] || die "service name '$s' must match [a-z_][a-z0-9_]*"
+    [ -n "$(sv "$s" port)" ] && [ -n "$(sv "$s" cmd)" ] || die "service '$s' needs ${s}_port and ${s}_cmd"
+  done
+}
+
+port_of() { echo $(( $(sv "$1" port) + $2 )); }                # service, slot
+slot_ports() { local s; for s in $RAMIFY_SERVICES; do port_of "$s" "$1"; done; }
+bound() { lsof -ti:"$1" >/dev/null 2>&1; }
+branch_of() { git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'; }
+
+# ── Slots ────────────────────────────────────────────────────────────────────
+# A claim whose pid is gone and whose ports answer nobody is a crash, not a claim.
+slot_is_stale() {
+  local holder pid p
+  holder="$(cat "$SLOTS/$1" 2>/dev/null)" || return 1
+  pid="${holder##* }"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 1
+  for p in $(slot_ports "$1"); do bound "$p" && return 1; done
+  return 0
+}
+
+# `set -o noclobber` with `>` is the lock: create-or-fail in one kernel call. `[ -f ]` then write
+# has a window, and two sessions starting together is exactly when it is open.
+claim_slot() {
+  local slot p busy
+  for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
+    if [ -f "$SLOTS/$slot" ]; then
+      slot_is_stale "$slot" || continue
+      rm -f "$SLOTS/$slot"
+    fi
+    # A port held by something outside the registry (another project, macOS ControlCenter on
+    # :5000) makes the slot unusable, whoever holds it.
+    busy=0; for p in $(slot_ports "$slot"); do bound "$p" && busy=1; done
+    [ "$busy" = 1 ] && continue
+    if (set -o noclobber; echo "$WORKTREE $$" >"$SLOTS/$slot") 2>/dev/null; then
+      echo "$slot"; return 0
+    fi
+  done
+  return 1
+}
+
+# Releases only a claim still in our name: a stale one someone else reclaimed is theirs now.
+release_slot() { # slot, worktree
+  [ -n "${1:-}" ] || return 0
+  [ "$(cut -d' ' -f1 "$SLOTS/$1" 2>/dev/null)" = "$2" ] || return 0
+  rm -f "$SLOTS/$1"
+  echo "  slot $1 released"
+}
+
+holds_a_slot() {
+  local s
+  for s in $(seq 1 "$RAMIFY_MAX_SLOT"); do
+    [ "$(cut -d' ' -f1 "$SLOTS/$s" 2>/dev/null)" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# ── Starting things ──────────────────────────────────────────────────────────
+wait_for() { # url, seconds
+  local deadline=$(( $(date +%s) + ${2:-90} ))
+  until curl -sf -o /dev/null "$1" 2>/dev/null; do
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+}
+
+health_url() { echo "http://localhost:$2$(sv "$1" health)"; } # service, port
+
+ensure_containers() {
+  [ -n "$RAMIFY_CONTAINERS$RAMIFY_COMPOSE_FILE" ] || return 0
+  # Fail here rather than three steps later on a service that cannot reach its database.
+  docker info >/dev/null 2>&1 || die "Docker is not running. Start it, then run this again."
+  local c missing=0
+  for c in $RAMIFY_CONTAINERS; do
+    docker ps --filter "name=^${c}\$" --filter status=running -q | grep -q . || missing=1
+  done
+  if [ -n "$RAMIFY_CONTAINERS" ] && [ "$missing" = 0 ]; then
+    echo "  containers      already up (shared)"; return
+  fi
+  [ -n "$RAMIFY_COMPOSE_FILE" ] || die "containers down and no RAMIFY_COMPOSE_FILE to start them"
+  # Never `down`: another session is likely mid-QA against these. The fixed -p is what stops a
+  # worktree from creating a second, conflicting set named after its own directory.
+  echo "  containers      starting under project '$RAMIFY_COMPOSE_PROJECT'…"
+  docker compose -p "$RAMIFY_COMPOSE_PROJECT" -f "$PRIMARY/$RAMIFY_COMPOSE_FILE" up -d >/dev/null \
+    || die "docker compose up failed"
+}
+
+# What this branch changed, committed or not — the point is what runs, not what is pushed.
+changed_paths() {
+  local base
+  base="$(git -C "$REPO_ROOT" merge-base HEAD "$RAMIFY_REMOTE/$RAMIFY_MAIN" 2>/dev/null \
+       || git -C "$REPO_ROOT" merge-base HEAD "$RAMIFY_MAIN" 2>/dev/null)"
+  { [ -n "$base" ] && git -C "$REPO_ROOT" diff --name-only "$base"...HEAD
+    git -C "$REPO_ROOT" status --porcelain | cut -c4- | sed 's/.* -> //'
+  } 2>/dev/null
+}
+
+# A shared service stays shared while every changed path matches `<svc>_shared_when`: a branch
+# that does not touch it compiles to the same thing as main, and that build is the slow part.
+is_shared() {
+  has_shared "$1" || return 1
+  local re; re="$(sv "$1" shared_when)"
+  [ -z "$re" ] && return 0
+  ! changed_paths | grep -vE "$re" | grep -q .
+}
+
+start_service() { # service, port, root, pidfile, logfile, cmd
+  local dir="$3/$(sv "$1" dir)"
+  (cd "$dir" && PORT="$2" nohup bash -c "$6" >"$5" 2>&1 </dev/null & echo $! >"$4")
+}
+
+ensure_shared() { # service
+  local s="$1" port; port="$(sv "$1" shared_port)"
+  if curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$port")"; then
+    printf '  %-15s http://localhost:%s  (shared, already up)\n' "$s" "$port"; return 0
+  fi
+  printf '  %-15s starting shared instance from %s…\n' "$s" "$(basename "$PRIMARY")"
+  start_service "$s" "$port" "$PRIMARY" "$STATE_DIR/shared/$s.pid" "$STATE_DIR/shared/$s.log" \
+    "$(sv "$s" shared_cmd)"
+  if wait_for "$(health_url "$s" "$port")" "$(sv "$s" timeout || true)"; then
+    printf '  %-15s http://localhost:%s  (shared, ready)\n' "$s" "$port"
+  else
+    printf '  %-15s shared instance NOT READY — see %s\n' "$s" "$STATE_DIR/shared/$s.log"; return 1
+  fi
+}
+
+smoke() { # service, port — prints the http code when it is not one the config accepts
+  local spec path codes got
+  spec="$(sv "$1" smoke)"; [ -n "$spec" ] || return 0
+  path="${spec%% *}"; codes="${spec#* }"
+  got="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:$2$path" 2>/dev/null)"
+  [[ "$got" =~ ^($codes)$ ]] || { echo "$path returned $got"; return 1; }
+}
+
+up() {
+  need_config
+  echo "Stack for $WORKTREE ($(branch_of "$REPO_ROOT"))"
+  ensure_containers
+
+  local slot s U port cmd late=""
+  slot="$(claim_slot)" || die "all $RAMIFY_MAX_SLOT slots taken — 'ramify status' shows who holds them"
+  echo "  slot            $slot"
+  printf 'SLOT=%s\n' "$slot" >"$STATE"
+
+  for s in $RAMIFY_SERVICES; do
+    skipped "$s" && continue
+    U="$(upper "$s")"
+    if is_shared "$s"; then
+      port="$(sv "$s" shared_port)"
+      ensure_shared "$s" || { release_slot "$slot" "$WORKTREE"; exit 1; }
+      printf '%s_PORT=%s\n%s_SHARED=1\n' "$U" "$port" "$U" >>"$STATE"
+    else
+      port="$(port_of "$s" "$slot")"
+      cmd="$(sv "$s" prepare)"
+      if [ -n "$cmd" ]; then
+        printf '  %-15s preparing\n' "$s"
+        (cd "$REPO_ROOT/$(sv "$s" dir)" && bash -c "$cmd") >"$STATE_DIR/$WORKTREE.$s.prepare.log" 2>&1 \
+          || { printf '  %-15s prepare FAILED — see %s\n' "$s" "$STATE_DIR/$WORKTREE.$s.prepare.log"
+               down >/dev/null; exit 1; }
+      fi
+      start_service "$s" "$port" "$REPO_ROOT" "$STATE_DIR/$WORKTREE.$s.pid" "$STATE_DIR/$WORKTREE.$s.log" \
+        "$(sv "$s" cmd)"
+      printf '%s_PORT=%s\n%s_SHARED=0\n' "$U" "$port" "$U" >>"$STATE"
+      # Readiness is an answered request, not a started process. Optional services boot last and
+      # nothing waits on them.
+      if [ -n "$(sv "$s" optional)" ]; then
+        late="$late $s"
+      elif wait_for "$(health_url "$s" "$port")" "$(sv "$s" timeout || true)"; then
+        printf '  %-15s http://localhost:%s  (ready)\n' "$s" "$port"
+      else
+        printf '  %-15s http://localhost:%s  NOT READY — see %s\n' "$s" "$port" "$STATE_DIR/$WORKTREE.$s.log"
+      fi
+    fi
+    # Later services read earlier ports: `VITE_API_TARGET=http://localhost:$API_PORT`.
+    export "${U}_PORT=$port"
+  done
+
+  for s in $RAMIFY_SERVICES; do
+    port="$(envget "$STATE" "$(upper "$s")_PORT")"; [ -n "$port" ] || continue
+    smoke "$s" "$port" >/dev/null || printf '  %-15s smoke %s  <-- check the wiring\n' "$s" "$(smoke "$s" "$port")"
+  done
+  for s in $late; do
+    port="$(envget "$STATE" "$(upper "$s")_PORT")"
+    if wait_for "$(health_url "$s" "$port")" "$(sv "$s" timeout || true)"; then
+      printf '  %-15s http://localhost:%s  (ready)\n' "$s" "$port"
+    else
+      printf '  %-15s http://localhost:%s  still starting — see %s\n' "$s" "$port" "$STATE_DIR/$WORKTREE.$s.log"
+    fi
+  done
+  echo
+  tile "$WORKTREE"
+}
+
+# ── Stopping things ──────────────────────────────────────────────────────────
+# Stops one worktree's own processes. Shared instances and containers are never touched here:
+# killing by port where a service was shared would tear down what every other worktree uses.
+kill_worktree() { # worktree
+  local wt="$1" env="$STATE_DIR/$1.env" pidfile s U port
+  for pidfile in "$STATE_DIR/$wt".*.pid; do
+    [ -f "$pidfile" ] || continue
+    pkill -P "$(cat "$pidfile")" 2>/dev/null
+    kill "$(cat "$pidfile")" 2>/dev/null
+    rm -f "$pidfile"
+  done
+  for s in $RAMIFY_SERVICES; do
+    U="$(upper "$s")"
+    [ "$(envget "$env" "${U}_SHARED")" = 1 ] && continue
+    port="$(envget "$env" "${U}_PORT")"
+    [ -n "$port" ] && lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null
+  done
+  release_slot "$(envget "$env" SLOT)" "$wt"
+  rm -f "$env"
+}
+
+down() {
+  need_config
+  kill_worktree "$WORKTREE"
+  echo "$WORKTREE stopped. Shared containers and instances left running on purpose."
+}
+
+shared_down() {
+  need_config
+  local s pidfile port
+  for s in $RAMIFY_SERVICES; do
+    has_shared "$s" || continue
+    pidfile="$STATE_DIR/shared/$s.pid"
+    [ -f "$pidfile" ] && { pkill -P "$(cat "$pidfile")" 2>/dev/null; kill "$(cat "$pidfile")" 2>/dev/null; rm -f "$pidfile"; }
+    port="$(sv "$s" shared_port)"
+    lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null
+    echo "shared $s :$port stopped — every worktree pointed at it now reaches nothing"
+  done
+}
+
+worktree_root() {
+  git -C "$PRIMARY" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' \
+    | while read -r p; do [ "$(basename "$p")" = "$1" ] && { echo "$p"; break; }; done
+}
+
+stack_is_down() { # worktree
+  local env="$STATE_DIR/$1.env" s U port
+  [ -f "$env" ] || return 0
+  for s in $RAMIFY_SERVICES; do
+    U="$(upper "$s")"
+    [ "$(envget "$env" "${U}_SHARED")" = 1 ] && continue
+    port="$(envget "$env" "${U}_PORT")"
+    [ -n "$port" ] && bound "$port" && return 1
+  done
+  return 0
+}
+
+# Takes back what a week of sessions leaks: crashed claims, orphans (a stack on a slot its own
+# state no longer points at), and state of worktrees deleted under a running stack. Anything
+# alive, the containers and the shared instances stay where they are.
+cleanup() {
+  need_config
+  local slot holder held found=0 wt port pidfile removed
+  # Without a worktree list every holder looks deleted. Refuse rather than kill the machine's QA.
+  [ "$(git -C "$PRIMARY" worktree list --porcelain 2>/dev/null | grep -c '^worktree ')" -gt 0 ] \
+    || { echo "cannot read the worktree list from $PRIMARY — refusing to clean" >&2; return 1; }
+
+  for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
+    [ -f "$SLOTS/$slot" ] || continue
+    holder="$(cut -d' ' -f1 "$SLOTS/$slot")"
+    held="$(envget "$STATE_DIR/$holder.env" SLOT)"
+    if slot_is_stale "$slot"; then
+      rm -f "$SLOTS/$slot"; found=1
+      echo "  slot $slot        released — $holder left it claimed with nothing running"
+    elif [ -n "$held" ] && [ "$held" != "$slot" ]; then
+      # No pid file points at an orphan any more; the port is the only way in.
+      for port in $(slot_ports "$slot"); do lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null; done
+      rm -f "$SLOTS/$slot"; found=1
+      echo "  slot $slot        orphan of $holder killed — its state had moved to slot $held"
+    elif [ -z "$(worktree_root "$holder")" ]; then
+      echo "  slot $slot        $holder stopped — its worktree no longer exists"
+      kill_worktree "$holder"; found=1
+    fi
+  done
+
+  while read -r wt; do
+    [ -n "$wt" ] || continue
+    if [ -z "$(worktree_root "$wt")" ]; then
+      kill_worktree "$wt" >/dev/null
+      rm -f "$STATE_DIR/$wt".*.log "$STATE_DIR/$wt".*.pid "$STATE_DIR/$wt.env"
+      echo "  state          $wt removed — its worktree no longer exists"; found=1
+    elif ! holds_a_slot "$wt" && stack_is_down "$wt"; then
+      # Logs stay as the post-mortem; only state that lies about what runs goes.
+      removed=0
+      for pidfile in "$STATE_DIR/$wt".*.pid; do
+        [ -f "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null && continue
+        rm -f "$pidfile"; removed=1
+      done
+      [ -f "$STATE_DIR/$wt.env" ] && { rm -f "$STATE_DIR/$wt.env"; removed=1; }
+      [ "$removed" = 1 ] && { echo "  state          $wt cleared — its stack is not running any more"; found=1; }
+    fi
+  done < <(ls "$STATE_DIR" 2>/dev/null | sed -n -E 's/\.(env|[a-z0-9_]+(\.prepare)?\.(log|pid))$//p' | sort -u)
+
+  [ "$found" = 0 ] && echo "nothing to clean — every claimed slot has a live stack behind it"
+  return 0
+}
+
+# ── Branches ─────────────────────────────────────────────────────────────────
+# Why a branch is safe to delete, or nothing. Hosts that rewrite main around a merge make "is an
+# ancestor" miss most merged branches, so three tests:
+#  - ancestor of main with its remote gone (a bare ancestor may be a fresh branch, not a merged one);
+#  - its content already in main, and it has commits of its own;
+#  - main carries its merge commit (Bitbucket « Merged in <b> (pull request », GitHub
+#    « Merge pull request #N from <owner>/<b> ») and nothing on it is newer.
+merged_reason() { # branch
+  local b="$1" main="$RAMIFY_REMOTE/$RAMIFY_MAIN" track merge re
+  track="$(git -C "$PRIMARY" for-each-ref --format='%(upstream:track)' "refs/heads/$b")"
+  if git -C "$PRIMARY" merge-base --is-ancestor "$b" "$main"; then
+    [ "$track" = '[gone]' ] && { echo 'ancestor of main, remote gone'; return; }
+  elif [ "$(git -C "$PRIMARY" merge-tree --write-tree "$main" "$b" 2>/dev/null | head -1)" \
+       = "$(git -C "$PRIMARY" rev-parse "$main^{tree}")" ]; then
+    echo 'content already in main'; return
+  fi
+  re="$(printf '%s' "$b" | sed 's/[.[\*^$()+?{}|]/\\&/g')"
+  merge="$(git -C "$PRIMARY" log "$main" -1 --format=%ct -E \
+    --grep="^Merged in $re \\(pull request" --grep="^Merge pull request #[0-9]+ from [^ ]+/$re\$")"
+  [ -n "$merge" ] && [ "$(git -C "$PRIMARY" log -1 --format=%ct "$b")" -le "$merge" ] \
+    && echo 'PR merged, nothing newer on it'
+}
+
+# Merged local branches and their worktrees. Dry run unless --apply. Dirty trees, the primary
+# checkout and the one this runs from are kept; remote branches are never touched.
+prune() { # [--apply]
+  local apply="${1:-}" b reason path here kept=0 n=0
+  here="$(git rev-parse --show-toplevel 2>/dev/null)"
+  git -C "$PRIMARY" fetch -p -q "$RAMIFY_REMOTE" 2>/dev/null || echo "  (fetch failed — judging on the last known $RAMIFY_REMOTE/$RAMIFY_MAIN)"
+  [ "$apply" = --apply ] && git -C "$PRIMARY" worktree prune
+  while read -r b; do
+    [ "$b" = "$RAMIFY_MAIN" ] && continue
+    reason="$(merged_reason "$b")"
+    [ -n "$reason" ] || continue
+    path="$(git -C "$PRIMARY" worktree list --porcelain \
+      | awk -v r="refs/heads/$b" '/^worktree /{p=$2} $0=="branch "r{print p}')"
+    if [ -n "$path" ] && [ -d "$path" ]; then
+      if [ "$path" = "$PRIMARY" ] || [ "$path" = "$here" ]; then
+        printf '  keep   %-45s checked out here\n' "$b"; kept=$((kept + 1)); continue
+      fi
+      if [ -n "$(git -C "$path" status --porcelain)" ]; then
+        printf '  keep   %-45s %s has uncommitted changes\n' "$b" "$(basename "$path")"; kept=$((kept + 1)); continue
+      fi
+    fi
+    printf '  prune  %-45s %s%s\n' "$b" "$reason" "${path:+ + worktree $(basename "$path")}"
+    n=$((n + 1))
+    [ "$apply" = --apply ] || continue
+    if [ -n "$path" ] && [ -d "$path" ]; then
+      forget_worktree "$(basename "$path")"
+      git -C "$PRIMARY" worktree remove "$path" || { echo "    worktree remove failed — branch kept"; continue; }
+    fi
+    git -C "$PRIMARY" branch -D -q "$b"
+  done < <(git -C "$PRIMARY" for-each-ref --format='%(refname:short)' refs/heads)
+  if [ "$n" = 0 ]; then echo "nothing merged to prune"
+  elif [ "$apply" = --apply ]; then echo "$n pruned, $kept kept"
+  else echo "$n to prune, $kept kept — 'ramify prune --apply' does it"; fi
+}
+
+forget_worktree() { # worktree — stop its stack, drop its state and logs
+  [ -n "$CONFIG" ] && kill_worktree "$1" >/dev/null
+  rm -f "$STATE_DIR/$1".*.log "$STATE_DIR/$1".*.pid "$STATE_DIR/$1.env"
+}
+
+# One worktree and its branch, merged or not. Says what is lost, then wants --yes or a yes.
+force_delete() { # worktree name or path, [--yes]
+  local path b dirty unpushed here
+  path="$(worktree_root "$(basename "${1:-}")")"
+  [ -n "$path" ] || { echo "no worktree named '${1:-}'" >&2; return 1; }
+  here="$(git rev-parse --show-toplevel 2>/dev/null)"
+  [ "$path" = "$PRIMARY" ] && { echo "refusing: $path is the primary checkout" >&2; return 1; }
+  [ "$path" = "$here" ] && { echo "refusing: this shell is inside $path" >&2; return 1; }
+  b="$(git -C "$path" symbolic-ref --short -q HEAD)"
+  dirty="$(git -C "$path" status --porcelain | wc -l | tr -d ' ')"
+  unpushed="$([ -n "$b" ] && git -C "$PRIMARY" rev-list --count "$b" --not --remotes 2>/dev/null || echo 0)"
+  echo "force delete $(basename "$path") (${b:-detached}): $dirty uncommitted file(s), $unpushed commit(s) on no remote"
+  if [ "${2:-}" != --yes ]; then
+    [ -t 0 ] || { echo "add --yes to confirm" >&2; return 1; }
+    choose "Delete it? This cannot be undone." "Delete" "Back"
+    [ "$CHOICE" = 0 ] || return 0
+  fi
+  forget_worktree "$(basename "$path")"
+  git -C "$PRIMARY" worktree remove --force --force "$path" || return 1
+  [ -n "$b" ] && git -C "$PRIMARY" branch -D -q "$b"
+  echo "deleted $(basename "$path")${b:+ and $b}"
+}
+
+# `/color` takes one of eight names; hashing the slug keeps a tree's colour across sessions.
+label() { # [slug]
+  local slug="${1:-$WORKTREE}" c=(red blue green yellow purple orange pink cyan) h
+  h="$(printf %s "$slug" | { md5 -q 2>/dev/null || md5sum; } | cut -c1-8)"
+  echo "/rename $slug"
+  echo "/color ${c[$(( 0x$h % 8 ))]}"
+}
+
+# Base on the remote main, never on this checkout's HEAD: it may sit on someone else's branch.
+new() { # slug
+  local slug="${1:-}" parent dest branch p wt autostart=0
+  [ -n "$slug" ] || die "usage: ramify new <slug>"
+  case "$RAMIFY_WORKTREES" in /*) parent="$RAMIFY_WORKTREES" ;; *) parent="$PRIMARY/$RAMIFY_WORKTREES" ;; esac
+  mkdir -p "$parent" && parent="$(cd "$parent" && pwd)"
+  dest="$parent/$slug"; branch="$RAMIFY_BRANCH_PREFIX$slug"; wt="$slug"
+  git -C "$PRIMARY" fetch -q "$RAMIFY_REMOTE" "$RAMIFY_MAIN" || echo "  (fetch failed — cutting from the last known $RAMIFY_REMOTE/$RAMIFY_MAIN)"
+  # --no-track: a branch tracking main would pull main and never show its own remote as gone.
+  git -C "$PRIMARY" worktree add -q --no-track -b "$branch" "$dest" "$RAMIFY_REMOTE/$RAMIFY_MAIN" || exit 1
+
+  # A worktree carries tracked files only. --ignore-existing keeps tracked copies the checkout
+  # just wrote; the exclude keeps an agent harness's nested worktrees from being duplicated.
+  for p in $RAMIFY_COPY; do
+    if [ -d "$PRIMARY/$p" ]; then
+      mkdir -p "$dest/$p"
+      rsync -a --ignore-existing ${RAMIFY_COPY_EXCLUDE:+--exclude "$RAMIFY_COPY_EXCLUDE"} "$PRIMARY/$p/" "$dest/$p/"
+    elif [ -e "$PRIMARY/$p" ] && [ ! -e "$dest/$p" ]; then
+      mkdir -p "$(dirname "$dest/$p")" && cp -p "$PRIMARY/$p" "$dest/$p"
+    fi
+  done
+
+  [ -n "$CONFIG" ] && [ -n "$RAMIFY_SERVICES" ] && [ "${RAMIFY_AUTOSTART:-1}" = 1 ] && autostart=1
+  if [ -n "$RAMIFY_BOOTSTRAP" ] || [ "$autostart" = 1 ]; then
+    (cd "$dest" && nohup bash -c 'eval "${1:-true}" || exit 1; [ "$3" = 1 ] && RAMIFY_ROOT="$2" "$4" up' \
+       _ "$RAMIFY_BOOTSTRAP" "$dest" "$autostart" "$SELF" >"$STATE_DIR/$wt.bootstrap.log" 2>&1 </dev/null &)
+    echo "  bootstrap       running in the background — $STATE_DIR/$wt.bootstrap.log"
+  fi
+  echo "  branch          $branch (from $RAMIFY_REMOTE/$RAMIFY_MAIN)"
+  # The PostToolUse hook reads this exact line to follow the session into the new tree.
+  echo "ramify: worktree $dest"
+  label "$slug"
+}
+
+# ── Reporting ────────────────────────────────────────────────────────────────
+status() {
+  need_config
+  local c s slot holder live
+  [ -n "$RAMIFY_CONTAINERS" ] && { echo "containers (shared):"
+    for c in $RAMIFY_CONTAINERS; do docker ps --filter "name=^${c}\$" --format '  {{.Names}}  {{.Status}}'; done; }
+  for s in $RAMIFY_SERVICES; do
+    has_shared "$s" || continue
+    printf 'shared %s :%s  %s\n' "$s" "$(sv "$s" shared_port)" \
+      "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')"
+  done
+  echo "port slots ($SLOTS):"
+  for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
+    if [ -f "$SLOTS/$slot" ]; then
+      holder="$(cut -d' ' -f1 "$SLOTS/$slot")"
+      stack_is_down "$holder" && live="STALE (nothing on its ports)" || live="up"
+      printf '  %-3s %-30s %s\n' "$slot" "$holder" "$live"
+    else
+      printf '  %-3s %-30s %s\n' "$slot" "" "free ($(slot_ports "$slot" | sed 's/^/:/' | tr '\n' ' '))"
+    fi
+  done
+}
+
+# Exit 0 when every started, non-optional service of this worktree answers. The Stop hook's fast path.
+ping() {
+  need_config
+  [ -f "$STATE" ] || return 1
+  local s port
+  for s in $RAMIFY_SERVICES; do
+    [ -n "$(sv "$s" optional)" ] && continue
+    port="$(envget "$STATE" "$(upper "$s")_PORT")"; [ -n "$port" ] || continue
+    curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$port")" || return 1
+  done
+}
+
+BOX_W=64
+BOX_LINE="$(printf '─%.0s' $(seq 1 $((BOX_W + 2))))"
+row() { printf '│ %s%*s │\n' "$1" $((BOX_W - ${#1})) ''; }
+row2() { printf '│ %s%*s %s │\n' "$1" $((BOX_W - ${#1} - ${#2} - 1)) '' "$2"; }
+
+# Bound but not answering is "starting": a build holds its port a while before it serves.
+probe() { # service, port
+  [ -n "${2:-}" ] || { echo '—'; return; }
+  bound "$2" || { echo 'down'; return; }
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$(health_url "$1" "$2")" 2>/dev/null)" = 200 ] \
+    && echo 'ready' || echo 'starting'
+}
+
+uptime_of() { # file
+  [ -f "$1" ] || { echo '—'; return; }
+  local s=$(( $(date +%s) - $(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || date +%s) ))
+  if [ "$s" -lt 3600 ]; then printf '%dm' $((s / 60)); else printf '%dh%02dm' $((s / 3600)) $(((s % 3600) / 60)); fi
+}
+
+tile() { # worktree, [smoke]
+  local wt="$1" env="$STATE_DIR/$1.env" root branch s U port kind out
+  [ -f "$env" ] || { echo "no stack for $wt — run 'ramify up'"; return 1; }
+  root="$(worktree_root "$wt")"
+  branch="$(branch_of "${root:-$REPO_ROOT}")"
+  [ -n "$(git -C "${root:-$REPO_ROOT}" status --porcelain 2>/dev/null)" ] && branch="$branch *"
+  printf '┌%s┐\n' "$BOX_LINE"
+  row2 "$wt" "slot $(envget "$env" SLOT)"
+  row2 "$branch" "up $(uptime_of "$env")"
+  printf '├%s┤\n' "$BOX_LINE"
+  for s in $RAMIFY_SERVICES; do
+    U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
+    kind="$s"; has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind="$s shared" || kind="$s private"; }
+    row2 "$(printf '%-12s %s' "$kind" "http://localhost:$port")" "$(probe "$s" "$port")"
+    if [ "${2:-}" = smoke ] && ! out="$(smoke "$s" "$port")"; then
+      row "$(printf '%-12s %s' '  smoke' "$out")"
+    fi
+  done
+  printf '└%s┘\n' "$BOX_LINE"
+}
+
+dash() {
+  need_config
+  local c s claimed=0 slot holder held line=""
+  for c in $RAMIFY_CONTAINERS; do
+    line="$line$c $(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo up || echo DOWN)   "
+  done
+  for s in $RAMIFY_SERVICES; do
+    has_shared "$s" || continue
+    line="${line}shared $s :$(sv "$s" shared_port) $(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')   "
+  done
+  [ -n "$line" ] && printf '%s\n\n' "$line"
+  for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
+    [ -f "$SLOTS/$slot" ] || continue
+    holder="$(cut -d' ' -f1 "$SLOTS/$slot")"
+    # One env file per worktree: a second `up` without a `down` leaves the first stack on a slot
+    # nothing points at any more. Say so instead of drawing the worktree twice.
+    held="$(envget "$STATE_DIR/$holder.env" SLOT)"
+    if [ -n "$held" ] && [ "$held" != "$slot" ]; then
+      printf 'slot %-2s ORPHAN — %s still runs here but its state moved to slot %s (ramify cleanup)\n\n' "$slot" "$holder" "$held"
+      continue
+    fi
+    tile "$holder" && claimed=$((claimed + 1))
+  done
+  [ "$claimed" = 0 ] && echo "no stack running on any slot — 'ramify up' in a worktree starts one"
+  return 0
+}
+
+clear_screen() { [ -t 1 ] && printf '\033[H\033[2J\033[3J'; }
+
+# Arrow-key picker: ↑/↓ or j/k, enter picks, esc/q cancels. Sets CHOICE to the index, or -1.
+# ponytail: no scrolling — a list taller than the terminal breaks the redraw; add a window if it grows.
+choose() { # title, options…
+  local title="$1" sel=0 n i k rest; shift; n=$#
+  printf '\033[?25l%s\n' "$title"
+  while :; do
+    for ((i = 0; i < n; i++)); do
+      local opt="${@:$((i + 1)):1}"
+      if [ "$i" = "$sel" ]; then printf '\033[2K\033[36m❯ %s\033[0m\n' "$opt"
+      else printf '\033[2K  %s\n' "$opt"; fi
+    done
+    printf '\033[2K\033[2m↑/↓ move · enter select · esc back\033[0m\n'
+    IFS= read -rsn1 k
+    if [ "$k" = $'\e' ]; then
+      rest=''; IFS= read -rsn2 -t 1 rest
+      case "$rest" in '[A') k=k ;; '[B') k=j ;; '') k=q ;; esac
+    fi
+    case "$k" in
+      k) sel=$(( (sel - 1 + n) % n )) ;;
+      j) sel=$(( (sel + 1) % n )) ;;
+      '') CHOICE=$sel; break ;;
+      q) CHOICE=-1; break ;;
+    esac
+    printf '\033[%dA' $((n + 1))
+  done
+  printf '\033[?25h'
+}
+
+menu() {
+  local paths=() labels=() p wt slot
+  while read -r p; do paths+=("$p"); done \
+    < <(git -C "$PRIMARY" worktree list --porcelain | awk '/^worktree /{print $2}')
+  for p in "${paths[@]}"; do
+    wt="$(basename "$p")"; slot="$(envget "$STATE_DIR/$wt.env" SLOT)"
+    labels+=("$(printf '%-40s %-8s %s' "$wt" "${slot:+slot $slot}" "$(branch_of "$p")")")
+  done
+  clear_screen
+  choose "Which worktree?" "${labels[@]}" "Machine-wide cleanup" "Prune merged worktrees + branches"
+  [ "$CHOICE" -lt 0 ] && return
+  if [ "$CHOICE" = "${#paths[@]}" ]; then
+    cleanup
+  elif [ "$CHOICE" = "$((${#paths[@]} + 1))" ]; then
+    prune; echo
+    choose "Prune these?" "Prune" "Back"
+    [ "$CHOICE" = 0 ] && prune --apply
+  else
+    p="${paths[$CHOICE]}"; echo
+    choose "$(basename "$p")" "Start QA" "Stop + release slot" "Force delete worktree + branch" "Back"
+    case "$CHOICE" in
+      0) RAMIFY_ROOT="$p" "$SELF" up ;;
+      1) RAMIFY_ROOT="$p" "$SELF" down ;;
+      2) echo; force_delete "$p" ;;
+      *) return ;;
+    esac
+  fi
+  read -rsn1 -p "press any key to return to the dashboard"
+}
+
+# Redraws only when the rendered text changes: the text is the change detection.
+watch_dash() {
+  local interval="${1:-2}" prev='' now key hint='ctrl-c to stop'
+  [ -t 0 ] && hint='m = menu · ctrl-c to stop'
+  trap 'printf "\n"; exit 0' INT TERM
+  while :; do
+    now="$(dash)"
+    if [ "$now" != "$prev" ]; then
+      clear_screen
+      printf '%s\nwatching every %ss — %s   (last change %s)\n' "$now" "$interval" "$hint" "$(date +%H:%M:%S)"
+      prev="$now"
+    fi
+    if [ -t 0 ]; then
+      key=''; read -rsn1 -t "$interval" key
+      [ "$key" = m ] && { menu; prev=''; }
+    else
+      sleep "$interval"
+    fi
+  done
+}
+
+show_config() { # [-q | get VAR]
+  [ "${1:-}" = -q ] && { [ -n "$CONFIG" ]; return; }
+  [ "${1:-}" = get ] && { [[ "${2:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && printf '%s\n' "${!2:-}"; return; }
+  echo "config      ${CONFIG:-(none)}"
+  echo "project     $RAMIFY_PROJECT   primary $PRIMARY"
+  echo "worktree    $WORKTREE ($(branch_of "$REPO_ROOT"))"
+  echo "main        $RAMIFY_REMOTE/$RAMIFY_MAIN   new trees in $RAMIFY_WORKTREES, branches '$RAMIFY_BRANCH_PREFIX<slug>'"
+  echo "services    ${RAMIFY_SERVICES:-(none)}"
+  echo "qa plan     ${RAMIFY_QA_PLAN:-(none)}"
+  echo "state       $STATE_DIR"
+  [ -n "$CONFIG" ]
+}
+
+case "${1:-}" in
+  setup) exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
+  new) new "${2:-}" ;;
+  label) label "${2:-}" ;;
+  config) show_config "${2:-}" "${3:-}" ;;
+  up) up ;;
+  down) down ;;
+  ping) ping ;;
+  card) need_config; tile "$WORKTREE" smoke ;;
+  dash) dash ;;
+  watch) watch_dash "${2:-2}" ;;
+  status) status ;;
+  cleanup) cleanup ;;
+  prune) prune "${2:-}" ;;
+  delete) force_delete "${2:-}" "${3:-}" ;;
+  shared-down) shared_down ;;
+  *) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

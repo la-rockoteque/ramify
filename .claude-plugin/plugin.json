@@ -1,0 +1,44 @@
+{
+  "name": "ramify",
+  "version": "0.1.0",
+  "description": "Parallel branches for AI agents: one worktree per branch, one QA stack per worktree on its own port slot, shared containers, and a hand-over to a human reviewer.",
+  "author": {
+    "name": "Rocko Bernier",
+    "email": "vbernier@nexapp.ca"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["git", "worktree", "branching", "qa", "parallel", "dev-server", "ports"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" behind", "timeout": 25 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" push", "timeout": 10 },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" stop", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" session-end", "timeout": 20 }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ramify",
+  "description": "Parallel branches for AI agents: worktrees, per-worktree QA stacks, hand-over to a human.",
+  "owner": { "name": "Rocko Bernier", "email": "vbernier@nexapp.ca" },
+  "plugins": [
+    {
+      "name": "ramify",
+      "description": "One worktree per branch, one QA stack per worktree, shared containers.",
+      "source": "./",
+      "category": "productivity",
+      "version": "0.1.0"
+    }
+  ]
+}
