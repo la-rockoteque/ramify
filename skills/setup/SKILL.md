@@ -20,6 +20,10 @@ branches share, where linked worktrees already live, gitignored paths that exist
 `.env*`), compose containers, Node dev servers and Storybook, and ASP.NET Core Web projects. It
 is a guess from the file tree. Nothing in it is verified yet.
 
+A repo with nothing to serve (a library, a Claude plugin) is set up for branching only: leave
+`RAMIFY_SERVICES` empty. `new`, `prune`, `delete` and the `behind` gate work; the QA hooks and
+the dashboard skip it.
+
 ## 2. Check it against the repo
 
 Read what the draft cannot: `README`, `CLAUDE.md` / `AGENTS.md`, `CONTRIBUTING`, the

@@ -151,7 +151,7 @@ RAMIFY_CONTAINERS=\"$containers\"
 RAMIFY_SERVICES=\"$services\"
 $body"
 [ -n "$services" ] || out="$out
-# Nothing detected. A service is five lines:
+# Nothing detected. Leave it empty for branching only (a library, a plugin), or add a service:
 # RAMIFY_SERVICES=\"app\"
 # app_port=8000                 # slot N → 8000+N
 # app_dir=                      # relative to the worktree

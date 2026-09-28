@@ -85,9 +85,11 @@ envget() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1; }   # file, key
 skipped() { case " $RAMIFY_SKIP " in *" $1 "*) return 0 ;; esac; return 1; }
 has_shared() { [ -n "$(sv "$1" shared_port)" ]; }
 
+# `need_config any` accepts a config with no services: a repo can use ramify for branching alone.
 need_config() {
   [ -n "$CONFIG" ] || die "no .ramify.conf or .claude/ramify.conf in $PRIMARY$([ "$REPO_ROOT" = "$PRIMARY" ] || echo " or $REPO_ROOT") — run 'ramify setup'"
-  [ -n "$RAMIFY_SERVICES" ] || die "$CONFIG declares no RAMIFY_SERVICES"
+  [ "${1:-}" = any ] && return 0
+  [ -n "$RAMIFY_SERVICES" ] || die "$CONFIG declares no RAMIFY_SERVICES — no QA stack to run here (new, prune and delete still work)"
   local s
   for s in $RAMIFY_SERVICES; do
     [[ "$s" =~ ^[a-z_][a-z0-9_]*$ ]] || die "service name '$s' must match [a-z_][a-z0-9_]*"
@@ -609,10 +611,11 @@ tile() { # worktree, [smoke]
   printf '└%s┘\n' "$BOX_LINE"
 }
 
-projects() { # primary checkouts of every project with ramify state, one per line
+projects() { # primary checkouts of every project that runs QA stacks, one per line
   local f p
   for f in "$STATE_ROOT"/*/primary; do
-    p="$(cat "$f" 2>/dev/null)"; [ -n "$p" ] && [ -d "$p" ] && echo "$p"
+    p="$(cat "$f" 2>/dev/null)"; [ -n "$p" ] && [ -d "$p" ] || continue
+    [ -n "$(RAMIFY_ROOT="$p" "$SELF" config get RAMIFY_SERVICES 2>/dev/null)" ] && echo "$p"
   done | sort -u
 }
 
@@ -732,7 +735,7 @@ watch_dash() {
   [ -t 0 ] && hint='m = menu · ctrl-c to stop'
   trap 'printf "\n"; exit 0' INT TERM
   while :; do
-    now="$(dash)"
+    now="$(dash 2>&1)"
     if [ "$now" != "$prev" ]; then
       clear_screen
       printf '%s\nwatching every %ss — %s   (last change %s)\n' "$now" "$interval" "$hint" "$(date +%H:%M:%S)"
@@ -771,7 +774,7 @@ case "${1:-}" in
   card) need_config; tile "$WORKTREE" smoke ;;
   dash) dash ;;
   dash-project) dash_project ;;
-  menu) need_config; menu ;;
+  menu) need_config any; menu ;;
   watch) watch_dash "${2:-2}" ;;
   status) status ;;
   cleanup) cleanup ;;

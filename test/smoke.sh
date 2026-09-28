@@ -87,6 +87,11 @@ other="$T/other"; git init -q "$other"
 check "dash works from a repo without a config"  bash -c "cd '$other' && [ \$(env -u RAMIFY_ROOT '$RAMIFY' dash | grep -c '^┌') = 2 ]"
 check "watch-style dash works outside git"       bash -c "cd / && env -u RAMIFY_ROOT '$RAMIFY' dash | grep -q '^┌'"
 
+plain="$T/plain"; git init -q "$plain"; printf 'RAMIFY_BRANCH_PREFIX=feat/\n' >"$plain/.ramify.conf"
+RAMIFY_ROOT="$plain" "$RAMIFY" config -q
+check "a branching-only project stays out of dash" bash -c "cd '$other' && [ \$(env -u RAMIFY_ROOT '$RAMIFY' dash | grep -c '^┌') = 2 ] && ! env -u RAMIFY_ROOT '$RAMIFY' dash | grep -q plain"
+check "the stop hook ignores it"                 bash -c "[ -z \"\$(echo '{\"session_id\":\"p\"}' | RAMIFY_AUTOSTART=1 RAMIFY_ROOT='$plain' '$HOOK' stop)\" ] && [ ! -f '$RAMIFY_STATE_DIR/plain/plain.env' ]"
+
 # ── an agent's Bash tool reads output through a pipe; up and new must not hold it open ──
 check "a second up keeps the same slot"         bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' up >/dev/null 2>&1; grep -qx SLOT=1 '$ENV1' && [ ! -f '$RAMIFY_STATE_DIR/app/slots/3' ]"
 check "up returns through a pipe"               bash -c "RAMIFY_ROOT='$WT' perl -e 'alarm 60; exec @ARGV' '$RAMIFY' up | cat"

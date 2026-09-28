@@ -9,7 +9,7 @@
       "description": "One worktree per branch, one QA stack per worktree, shared containers.",
       "source": "./",
       "category": "productivity",
-      "version": "0.1.2"
+      "version": "0.1.3"
     }
   ]
 }
