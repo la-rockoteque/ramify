@@ -28,13 +28,22 @@ In Claude Code:
 /plugin install ramify@ramify
 ```
 
+A teammate installs from the remote instead:
+
+```
+/plugin marketplace add git@git.nexapptech.com:vbernier/ramify.git
+/plugin install ramify@ramify
+```
+
+The plugin is installed once per machine. Each repo needs only its config, see [Usage](#usage).
+
 Requirements: bash, git ≥ 2.38 (`merge-tree --write-tree`), curl, lsof, python3, rsync.
 Docker only if the repo has shared containers.
 
 ## Usage
 
-Set up a repo once. The draft comes from what the repo shows; the `ramify:setup` skill reviews
-it with you:
+Set up a repo once. In Claude Code, ask for `/ramify:setup`: it drafts the config, checks it
+against the repo, asks what only you know, and proves it with `ramify up`. By hand:
 
 ```bash
 cd ~/dev/my-app && ramify setup            # writes .ramify.conf (--local: .claude/ramify.conf)

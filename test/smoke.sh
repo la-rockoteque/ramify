@@ -83,6 +83,12 @@ check "changed api is private"                  grep -qx API_SHARED=0 "$ENV2"
 check "private api answers on slot port"        answers 17002
 check "dash draws both tiles"                   bash -c "[ \$(RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -c '^┌') = 2 ]"
 
+# ── an agent's Bash tool reads output through a pipe; up and new must not hold it open ──
+check "a second up keeps the same slot"         bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' up >/dev/null 2>&1; grep -qx SLOT=1 '$ENV1' && [ ! -f '$RAMIFY_STATE_DIR/app/slots/3' ]"
+check "up returns through a pipe"               bash -c "RAMIFY_ROOT='$WT' perl -e 'alarm 60; exec @ARGV' '$RAMIFY' up | cat"
+check "new returns through a pipe"              bash -c "RAMIFY_AUTOSTART=1 RAMIFY_BOOTSTRAP='sleep 30' perl -e 'alarm 20; exec @ARGV' '$RAMIFY' new piped | cat"
+git worktree remove --force "$T/app-wt/piped" 2>/dev/null; git branch -D -q story/piped 2>/dev/null
+
 # ── down leaves shared things alone ──
 RAMIFY_ROOT="$WT" "$RAMIFY" down >/dev/null 2>&1
 sleep 1
