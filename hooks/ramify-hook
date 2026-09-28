@@ -83,7 +83,7 @@ on_worktree_add() {
   [ -n "${wt:-}" ] && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   configured "$wt" || return 0
   mkdir -p "$PINS" && printf '%s\n' "$wt" >"$PINS/$(field session_id).root"
-  [ "${RAMIFY_AUTOSTART:-1}" = 1 ] || return 0
+  [ "$(conf "$wt" RAMIFY_AUTOSTART)" = 0 ] && return 0
 
   # Under the project's state dir, like the CLI's own logs: two repos may both have a `feat` tree.
   log="$(conf "$wt" STATE_DIR)/$(basename "$wt").autostart.log"
@@ -145,7 +145,7 @@ Merge $main in, make the tests pass on the result, then push:
 on_stop() {
   local root; root="$(session_root)"
   configured "$root" || return 0
-  [ "${RAMIFY_AUTOSTART:-1}" = 1 ] || return 0
+  [ "$(conf "$root" RAMIFY_AUTOSTART)" = 0 ] && return 0
   RAMIFY_ROOT="$root" "$RAMIFY" ping >/dev/null 2>&1 && return 0
   RAMIFY_ROOT="$root" nohup "$RAMIFY" up \
     >"$(conf "$root" STATE_DIR)/$(basename "$root").autostart.log" 2>&1 </dev/null &
