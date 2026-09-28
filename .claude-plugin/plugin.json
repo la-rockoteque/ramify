@@ -7,13 +7,25 @@
     "email": "vbernier@nexapp.ca"
   },
   "license": "UNLICENSED",
-  "keywords": ["git", "worktree", "branching", "qa", "parallel", "dev-server", "ports"],
+  "keywords": [
+    "git",
+    "worktree",
+    "branching",
+    "qa",
+    "parallel",
+    "dev-server",
+    "ports"
+  ],
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" behind", "timeout": 25 }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" behind",
+            "timeout": 25
+          }
         ]
       }
     ],
@@ -21,24 +33,41 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" push", "timeout": 10 },
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add", "timeout": 10 }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" push",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add",
+            "timeout": 10
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" stop", "timeout": 10 }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" stop",
+            "timeout": 10
+          }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" session-end", "timeout": 20 }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" session-end",
+            "timeout": 20
+          }
         ]
       }
     ]
-  }
+  },
+  "icon": "./assets/ramify-128.png"
 }

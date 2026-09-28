@@ -1,3 +1,5 @@
+<img src="assets/ramify-512.png" alt="ramify icon: a windswept bonsai before a red sun" width="160" align="right">
+
 # ramify
 
 Run several branches at once, each in its own git worktree with its own QA stack, for AI coding agents and the humans who review their work.
