@@ -68,7 +68,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
 | `ping` | Exit 0 when every service of this worktree answers |
-| `card` / `dash` / `watch [s]` / `status` | Report one worktree, every worktree, on a loop, or the slot table |
+| `card` / `dash` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
 | `cleanup` | Release crashed claims, kill orphans, stop stacks of deleted worktrees |
 | `prune [--apply]` | Delete merged local branches and their worktrees |
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |
