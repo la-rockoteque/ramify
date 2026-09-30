@@ -111,6 +111,19 @@ RAMIFY_ROOT="$WT3" "$RAMIFY" down >/dev/null 2>&1
 check "down clears the recorded failure"        test ! -f "$RAMIFY_STATE_DIR/app/broken.errors"
 git worktree remove --force "$WT3"; git branch -D -q story/broken
 
+# ── <svc>_when: a service starts only once the branch touches what it shows ──
+"$RAMIFY" new lean >/dev/null 2>&1
+WT4="$T/app-wt/lean"
+printf '%s\n' "web_when='^web/'" >>"$WT4/.ramify.conf"
+RAMIFY_ROOT="$WT4" "$RAMIFY" up >/dev/null 2>&1
+check "a _when service stays out of an unrelated branch" bash -c "! grep -q '^WEB_PORT=' '$RAMIFY_STATE_DIR/app/lean.env'"
+RAMIFY_ROOT="$WT4" "$RAMIFY" down >/dev/null 2>&1
+echo change >"$WT4/web/changed.txt"
+RAMIFY_ROOT="$WT4" "$RAMIFY" up >/dev/null 2>&1
+check "a _when service starts once a match changes" grep -q '^WEB_PORT=' "$RAMIFY_STATE_DIR/app/lean.env"
+RAMIFY_ROOT="$WT4" "$RAMIFY" down >/dev/null 2>&1
+git worktree remove --force "$WT4"; git branch -D -q story/lean
+
 # ── status line: the pinned worktree and its branch, nothing outside ramify ──
 mkdir -p "$RAMIFY_STATE_DIR/sessions"; printf '%s\n' "$WT" >"$RAMIFY_STATE_DIR/sessions/sl.root"
 check "statusline follows the session's pin"     bash -c "[ \"\$(printf '{\"session_id\":\"sl\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 feat ⎇ story/feat · 2/2 up' ]"

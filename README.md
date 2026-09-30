@@ -111,6 +111,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_SERVICES` | none | Services in start order |
 | `<svc>_port` `_dir` `_health` `_cmd` | — | Base port, directory, readiness path, command |
 | `<svc>_shared_port` `_shared_cmd` `_shared_when` | — | Run once from the primary checkout while every changed path matches `_shared_when` |
+| `<svc>_when` | — | Start the service only when a changed path matches this regex |
 | `<svc>_prepare` `_smoke` `_optional` `_timeout` | — | Pre-start step for a private instance, wiring check, start last, readiness timeout |
 | `RAMIFY_QA_PLAN` `_RESULTS` `_NOTES` | none | The QA recipe the `ask-for-qa` skill follows |
 | `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |

@@ -226,6 +226,13 @@ is_shared() {
   ! changed_paths | grep -vE "$re" | grep -q .
 }
 
+# A service with `<svc>_when` runs only once some changed path matches it: a Storybook for a
+# branch that touches no component costs RAM and shows nothing new.
+unneeded() {
+  local re; re="$(sv "$1" when)"
+  [ -n "$re" ] && ! changed_paths | grep -qE "$re"
+}
+
 # The redirect wraps the whole subshell: redirecting only `nohup` leaves the forked shell holding
 # the caller's stdout, and anything reading `ramify up` through a pipe then waits forever.
 # Each service leads its own process group (perl setpgrp keeps the pid), so a stop reaches the
@@ -285,6 +292,7 @@ up() {
 
   for s in $RAMIFY_SERVICES; do
     skipped "$s" && continue
+    unneeded "$s" && { printf '  %-15s not needed — nothing changed matches %s_when\n' "$s" "$s"; continue; }
     U="$(upper "$s")"
     if is_shared "$s"; then
       port="$(sv "$s" shared_port)"
