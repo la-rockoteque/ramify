@@ -52,6 +52,10 @@ it on a turn that changed nothing, and do not poll it.
   without `--apply`. Merged means: an ancestor of main whose remote is gone, content already in
   main, or main carries its merge commit (Bitbucket or GitHub wording) with nothing newer on the
   branch. Keeps dirty worktrees, the primary checkout and the current one. Never touches remotes.
+- **`ramify complete <worktree> [--yes]`** — the branch is done: closes its Jira ticket (with
+  `RAMIFY_JIRA_URL`), stops its stack, removes the worktree and the local branch. Refuses
+  uncommitted or unpushed work. `prune --apply` and `cleanup` also close the tickets of merged
+  branches; a ticket already done is left alone.
 - **`ramify delete <worktree> [--yes]`** — force-deletes one worktree and its branch. Prints what
   is lost first. Needs `--yes` without a terminal.
 

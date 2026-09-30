@@ -38,7 +38,7 @@ A teammate installs from the remote instead:
 The plugin is installed once per machine. Each repo needs only its config, see [Usage](#usage).
 
 Requirements: bash, git ≥ 2.38 (`merge-tree --write-tree`), curl, lsof, python3, rsync.
-Docker only if the repo has shared containers.
+Docker only if the repo has shared containers. Node.js ≥ 22.12 only to install the app.
 
 ## Usage
 
@@ -68,11 +68,15 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
 | `ping` | Exit 0 when every service of this worktree answers |
-| `card` / `dash` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
-| `cleanup` | Release crashed claims, kill orphans, stop stacks of deleted worktrees |
-| `prune [--apply]` | Delete merged local branches and their worktrees |
+| `card` / `dash [--json]` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
+| `app` | Open the desktop dashboard, see [The app](#the-app) |
+| `cleanup` | Release crashed claims, kill orphans, stop stacks of deleted worktrees, close the tickets of merged branches |
+| `prune [--apply]` | Delete merged local branches and their worktrees, and close their tickets |
+| `complete <worktree> [--yes]` | Close its ticket, stop its stack, remove the worktree and its local branch |
+| `jira login` / `jira check` | Store a Jira API token in the Keychain, or test it |
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |
 | `shared-down` | Stop the shared service instances |
+| `statusline [--json]` | A status line segment: the session's worktree and branch |
 | `write-set <file>` | Check the branch's diff against allowed and immutable path globs |
 
 `RAMIFY_ROOT=<path>` points any command at another worktree.
@@ -109,8 +113,60 @@ SPA that proxies to whichever API it got, and Storybook.
 | `<svc>_shared_port` `_shared_cmd` `_shared_when` | — | Run once from the primary checkout while every changed path matches `_shared_when` |
 | `<svc>_prepare` `_smoke` `_optional` `_timeout` | — | Pre-start step for a private instance, wiring check, start last, readiness timeout |
 | `RAMIFY_QA_PLAN` `_RESULTS` `_NOTES` | none | The QA recipe the `ask-for-qa` skill follows |
+| `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |
+| `RAMIFY_TICKET_PATTERN` / `RAMIFY_JIRA_DONE` | `[A-Za-z][A-Za-z0-9]*-[0-9]+` / none | The key in a branch name; the done transition to pick when there are several |
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
 | `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `10` / none / `1` | Slot count, services to leave out, hook autostart |
+
+### Tickets
+
+With `RAMIFY_JIRA_URL` set, ramify reads a Jira key from each branch name as a whole word:
+`story/tm-127-tracker-pagination` is TM-127, and `story/backend-under-3min` has no key. Then:
+
+- `prune --apply` closes the ticket of each branch it removes. The dry run says what it would close.
+- `cleanup` closes the open tickets of merged branches that are still here. It removes nothing.
+- `complete <worktree>` closes the ticket, then removes the worktree and its local branch. It
+  refuses uncommitted or unpushed work. If Jira refuses, the worktree stays.
+
+"Closed" means the status category done, so a ticket already in any done status is left alone.
+Run `ramify jira login` once per Jira site. It stores your email and an
+[API token](https://id.atlassian.com/manage-profile/security/api-tokens) in the macOS Keychain,
+not in the repo config. On Linux, export `RAMIFY_JIRA_EMAIL` and `RAMIFY_JIRA_TOKEN` instead.
+
+### The status line
+
+A session that `ramify new` moved to a worktree still reports the directory it started in, so a
+status line shows that checkout's branch. `ramify statusline` reads the status line JSON and
+follows the session to its worktree. It prints `𖣂 tm-127-pagination ⎇ story/tm-127-pagination · 2/3 up`,
+or `𖣂 main` in the primary checkout. The count says how many of the worktree's services
+answer; `stack down` means none do. It prints nothing where ramify is not set up.
+
+```json
+"statusLine": { "type": "command", "command": "ramify statusline" }
+```
+
+`ramify` must be on the PATH (see [Install](#install)): the plugin's `bin/` is on the Bash
+tool's PATH only. A status line script of your own can call `ramify statusline --json` for
+`root`, `worktree`, `branch`, `primary`, `icon`, `slot`, `ticket` and `stack` (`up`, `partial`,
+`down` or `stopped`), and run its git segment from `root`.
+`RAMIFY_STATUSLINE_ICON` replaces the tree.
+
+### The app
+
+`app/` is an Electron window on the same machine-wide dashboard. It shows every project and
+every worktree, running or not, one tab per repo. From it you start and stop stacks, cut a new worktree, complete or
+delete one, prune merged branches, run cleanup and stop the shared instances. It reads
+`ramify dash --json` every 3 seconds, and each button runs a `ramify` command. The output goes
+to the log panel. The CLI stays the source of truth.
+
+A red **!** marks a failure: a service that did not come up, a `prepare` or bootstrap that
+failed, Docker down, no free slot, or a service that stopped answering. Click it to read the
+log. `up` records each failure in `/tmp/ramify/<project>/<worktree>.errors`. The next `up`
+starts that file afresh, and `down` clears it.
+
+In Claude Code, ask for `/ramify:app`. In a terminal, run `ramify app`. The first run installs
+Electron into `~/.cache/ramify/electron` (Node.js ≥ 22.12 and npm needed, once per Electron
+version). Plugin updates reuse it. The window runs detached from the shell that opened it.
 
 ### The plugin
 
@@ -122,14 +178,18 @@ The hooks do nothing in a repo without a config.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
 - **SessionEnd**: stops this worktree's stack.
 
-Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`.
+Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`.
 
 State lives in `/tmp/ramify/<project>/`, machine-wide, so every session sees the same slot registry.
+The list of configured repos lives in `~/.claude/ramify/projects` (`$CLAUDE_CONFIG_DIR` if set),
+one primary checkout per line. Any `ramify` command in a configured repo adds it. A reboot keeps
+it, so the app lists a repo whose stacks are all down. A moved repo, or one without its config
+any more, drops out of the list; delete its line to forget it for good.
 
 ## Test
 
 ```bash
-test/smoke.sh                 # new, up, shared/private, down, cleanup, prune, write-set, hooks, setup
+test/smoke.sh                 # new, up, shared/private, dash --json, down, cleanup, prune, write-set, hooks, setup
 ramify write-set --self-test
 ```
 

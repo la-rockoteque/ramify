@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>ramify</title>
+  <style>
+    :root {
+      --bg: #f6f4f0; --panel: #ffffff; --text: #1d1b19; --muted: #6f6a64; --line: #e3ded6;
+      --accent: #c2412d; --ok: #2f8a4c; --warn: #b7791f; --bad: #c2412d; --idle: #a8a29e;
+      --btn: #efebe5; --btn-hover: #e4dfd7;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161412; --panel: #211e1b; --text: #ece8e3; --muted: #9b948c; --line: #34302b;
+        --accent: #e0654f; --ok: #5cbf7a; --warn: #e0a84a; --bad: #e0654f; --idle: #6b655f;
+        --btn: #2d2925; --btn-hover: #3a3530;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+      background: var(--bg); border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
+    header h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .02em; }
+    header img { width: 22px; height: 22px; }
+    header .spacer { flex: 1; }
+    header button, header .status { -webkit-app-region: no-drag; }
+    .status { color: var(--muted); font-size: 12px; }
+    .top { position: sticky; top: 0; z-index: 2; }
+    #tabs { display: flex; gap: 2px; padding: 0 20px; overflow-x: auto;
+      background: var(--bg); border-bottom: 1px solid var(--line); }
+    .tab { display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px 8px; border: 0; border-bottom: 2px solid transparent;
+      border-radius: 0; background: none; color: var(--muted); font-weight: 550; white-space: nowrap; }
+    .tab:hover:not(:disabled) { background: none; color: var(--text); }
+    .tab.on { color: var(--text); border-bottom-color: var(--accent); }
+    .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .count { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--btn); color: var(--muted); font-size: 11px; text-align: center; }
+    .count.live { background: var(--ok); color: #fff; }
+    main { padding: 16px 20px 24px; }
+    body:has(#log:not(:empty)) main { padding-bottom: 200px; }
+    .project { margin-bottom: 28px; }
+    .project-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .project-head h2 { margin: 0 8px 0 0; font: 12px ui-monospace, Menlo, monospace; color: var(--muted); }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border: 1px solid var(--line);
+      border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; }
+    .project-actions { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+    input { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); width: 160px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+    .card.idle { opacity: .72; }
+    .card.busy { outline: 2px solid var(--warn); outline-offset: -1px; }
+    .card-top { display: flex; justify-content: space-between; gap: 8px; }
+    .card-name { font-weight: 650; word-break: break-all; }
+    .card-branch { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; }
+    .dirty { color: var(--warn); }
+    .ticket { margin-left: 8px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
+      font: 600 11px/18px ui-monospace, Menlo, monospace; text-decoration: none; vertical-align: 1px; }
+    .ticket:hover { color: var(--accent); border-color: var(--accent); }
+    .meta { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
+    .svc { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 8px; font-size: 12px; }
+    .svc a { color: var(--text); text-decoration: none; font-family: ui-monospace, Menlo, monospace; }
+    .svc a:hover { color: var(--accent); text-decoration: underline; }
+    .svc .kind { color: var(--muted); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+    .dot.ready, .dot.true { background: var(--ok); }
+    .dot.starting { background: var(--warn); }
+    .dot.down, .dot.false { background: var(--bad); }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+    button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--btn); color: var(--text); cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--btn-hover); }
+    button:disabled { opacity: .5; cursor: default; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.danger { color: var(--bad); }
+    .orphan { color: var(--bad); font-size: 12px; margin-bottom: 8px; }
+    .note { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+    .error { color: var(--bad); white-space: pre-wrap; }
+    .bang { width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; background: var(--bad); color: #fff;
+      font: 700 11px/16px -apple-system, sans-serif; text-align: center; margin-left: -4px; }
+    .bang:hover:not(:disabled) { background: var(--bad); filter: brightness(1.15); }
+    .bang:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+    .svc.failed-step { grid-template-columns: 10px 1fr; color: var(--bad); }
+    .svc.failed-step .bang { margin-left: -4px; }
+    .svc { grid-template-columns: 12px 1fr auto; }
+    dialog { width: min(900px, 90vw); max-height: 85vh; padding: 0; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--panel); color: var(--text); }
+    dialog::backdrop { background: rgb(0 0 0 / .45); }
+    dialog .head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    dialog h3 { margin: 0; font-size: 14px; flex: 1; }
+    dialog .message { margin: 10px 16px 0; color: var(--bad); }
+    dialog .path { margin: 4px 16px 10px; color: var(--muted); font: 11px ui-monospace, Menlo, monospace; word-break: break-all; }
+    dialog pre { margin: 0; padding: 12px 16px; max-height: 60vh; overflow: auto; border-top: 1px solid var(--line);
+      font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+    #log { position: fixed; left: 0; right: 0; bottom: 0; height: 180px; margin: 0; padding: 10px 20px; overflow: auto;
+      background: var(--panel); border-top: 1px solid var(--line); font: 12px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: var(--muted); }
+    #log:empty { display: none; }
+    #log .cmd { color: var(--text); font-weight: 600; }
+    #log .fail { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <div class="top">
+  <header>
+    <img src="../assets/ramify-128.png" alt="">
+    <h1>ramify</h1>
+    <span class="spacer"></span>
+    <span class="status" id="status">loading…</span>
+    <button id="refresh" title="Refresh now">Refresh</button>
+  </header>
+  <nav id="tabs" role="tablist" aria-label="Repositories" hidden></nav>
+  </div>
+  <main id="projects"></main>
+  <pre id="log" aria-live="polite"></pre>
+  <dialog id="logview" aria-labelledby="logview-title">
+    <div class="head">
+      <h3 id="logview-title"></h3>
+      <button class="reload">Reload</button>
+      <button class="close">Close</button>
+    </div>
+    <div class="message"></div>
+    <div class="path"></div>
+    <pre></pre>
+  </dialog>
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -7,7 +7,7 @@ set -uo pipefail
 RAMIFY="$(cd "$(dirname "$0")/.." && pwd)/bin/ramify"
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/hooks/ramify-hook"
 T="$(cd "$(mktemp -d)" && pwd -P)"
-export RAMIFY_STATE_DIR="$T/state" RAMIFY_AUTOSTART=0
+export RAMIFY_STATE_DIR="$T/state" RAMIFY_REGISTRY="$T/registry" RAMIFY_AUTOSTART=0
 fails=0
 
 teardown() {
@@ -82,6 +82,7 @@ check "second tree gets slot 2"                 grep -qx SLOT=2 "$ENV2"
 check "changed api is private"                  grep -qx API_SHARED=0 "$ENV2"
 check "private api answers on slot port"        answers 17002
 check "dash draws both tiles"                   bash -c "[ \$(RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -c '^┌') = 2 ]"
+check "dash --json lists both running stacks"   bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; p=json.load(sys.stdin)[0]; assert sorted(w[\"slot\"] for w in p[\"worktrees\"] if w[\"slot\"]) == [1, 2]; assert p[\"shared\"][0][\"up\"] is True'"
 
 other="$T/other"; git init -q "$other"
 check "dash works from a repo without a config"  bash -c "cd '$other' && [ \$(env -u RAMIFY_ROOT '$RAMIFY' dash | grep -c '^┌') = 2 ]"
@@ -90,6 +91,8 @@ check "watch-style dash works outside git"       bash -c "cd / && env -u RAMIFY_
 plain="$T/plain"; git init -q "$plain"; printf 'RAMIFY_BRANCH_PREFIX=feat/\n' >"$plain/.ramify.conf"
 RAMIFY_ROOT="$plain" "$RAMIFY" config -q
 check "a branching-only project stays out of dash" bash -c "cd '$other' && [ \$(env -u RAMIFY_ROOT '$RAMIFY' dash | grep -c '^┌') = 2 ] && ! env -u RAMIFY_ROOT '$RAMIFY' dash | grep -q plain"
+check "the registry records both repos"         bash -c "grep -qxF '$T/app' '$RAMIFY_REGISTRY' && grep -qxF '$plain' '$RAMIFY_REGISTRY'"
+check "dash --json lists the branching-only repo" bash -c "cd / && env -u RAMIFY_ROOT '$RAMIFY' dash --json | python3 -c 'import json,sys; p={x[\"primary\"]: x for x in json.load(sys.stdin)}; assert p[\"$plain\"][\"stacks\"] is False and p[\"$T/app\"][\"stacks\"] is True'"
 check "the stop hook ignores it"                 bash -c "[ -z \"\$(echo '{\"session_id\":\"p\"}' | RAMIFY_AUTOSTART=1 RAMIFY_ROOT='$plain' '$HOOK' stop)\" ] && [ ! -f '$RAMIFY_STATE_DIR/plain/plain.env' ]"
 
 # ── an agent's Bash tool reads output through a pipe; up and new must not hold it open ──
@@ -97,6 +100,23 @@ check "a second up keeps the same slot"         bash -c "RAMIFY_ROOT='$WT' '$RAM
 check "up returns through a pipe"               bash -c "RAMIFY_ROOT='$WT' perl -e 'alarm 60; exec @ARGV' '$RAMIFY' up | cat"
 check "new returns through a pipe"              bash -c "RAMIFY_AUTOSTART=1 RAMIFY_BOOTSTRAP='sleep 30' perl -e 'alarm 20; exec @ARGV' '$RAMIFY' new piped | cat"
 git worktree remove --force "$T/app-wt/piped" 2>/dev/null; git branch -D -q story/piped 2>/dev/null
+
+# ── a service that never answers: up records why, the JSON carries it, down clears it ──
+"$RAMIFY" new broken >/dev/null 2>&1
+WT3="$T/app-wt/broken"
+printf '%s\n' "web_cmd='echo \"boom: no such module\" >&2; exit 1'" web_timeout=2 >>"$WT3/.ramify.conf"   # the tree's own config wins
+RAMIFY_ROOT="$WT3" "$RAMIFY" up >/dev/null 2>&1
+check "a failed service is recorded with its log" bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; w=[w for w in json.load(sys.stdin)[0][\"worktrees\"] if w[\"name\"]==\"broken\"][0]; e=w[\"errors\"][0]; assert e[\"service\"]==\"web\" and \"boom\" in open(e[\"log\"]).read()'"
+RAMIFY_ROOT="$WT3" "$RAMIFY" down >/dev/null 2>&1
+check "down clears the recorded failure"        test ! -f "$RAMIFY_STATE_DIR/app/broken.errors"
+git worktree remove --force "$WT3"; git branch -D -q story/broken
+
+# ── status line: the pinned worktree and its branch, nothing outside ramify ──
+mkdir -p "$RAMIFY_STATE_DIR/sessions"; printf '%s\n' "$WT" >"$RAMIFY_STATE_DIR/sessions/sl.root"
+check "statusline follows the session's pin"     bash -c "[ \"\$(printf '{\"session_id\":\"sl\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 feat ⎇ story/feat · 2/2 up' ]"
+check "statusline shows the primary's branch"    bash -c "[ \"\$(printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 main' ]"
+check "statusline is silent outside ramify"      bash -c "[ -z \"\$(printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$other\"}}' | '$RAMIFY' statusline)\" ]"
+rm -f "$RAMIFY_STATE_DIR/sessions/sl.root"
 
 # ── down leaves shared things alone ──
 RAMIFY_ROOT="$WT" "$RAMIFY" down >/dev/null 2>&1
@@ -122,7 +142,65 @@ git push -q origin main 2>/dev/null
 check "prune dry run lists the merged branch"   bash -c "'$RAMIFY' prune | grep -q 'prune  story/feat'"
 check "prune dry run deletes nothing"           test -d "$WT"
 "$RAMIFY" prune --apply >/dev/null 2>&1
+check "a repo with nothing running stays listed" bash -c "rm -rf '$RAMIFY_STATE_DIR'/*/primary; cd / && env -u RAMIFY_ROOT '$RAMIFY' dash --json | grep -qF '\"primary\":\"$T/app\"'"
 check "prune --apply removes worktree + branch" bash -c "[ ! -d '$WT' ] && ! git show-ref -q refs/heads/story/feat"
+
+# ── Jira: the key comes from the branch, complete and prune close the ticket ──
+cat >"$T/jira.py" <<'PY'
+import base64, json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+state = {"TM-7": "In Progress", "TM-8": "In Review", "TM-9": "Done", "TM-10": "In Progress"}
+AUTH = "Basic " + base64.b64encode(b"qa@t:tok").decode()
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, code, body=None):
+        self.send_response(code); self.end_headers()
+        if body is not None: self.wfile.write(json.dumps(body).encode())
+    def key(self): return self.path.split("/")[5].split("?")[0]
+    def do_GET(self):
+        if self.headers.get("Authorization") != AUTH: return self.reply(401)
+        k = self.key()
+        if k not in state: return self.reply(404)
+        if self.path.endswith("/transitions"):
+            return self.reply(200, {"transitions": [{"id": "5", "name": "Review", "to": {"name": "In Review", "statusCategory": {"key": "indeterminate"}}},
+                                                    {"id": "31", "name": "Done", "to": {"name": "Done", "statusCategory": {"key": "done"}}}]})
+        cat = "done" if state[k] == "Done" else "indeterminate"
+        self.reply(200, {"fields": {"status": {"name": state[k], "statusCategory": {"key": cat}}}})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if body["transition"]["id"] == "31": state[self.key()] = "Done"
+        open(sys.argv[2], "a").write(self.key() + "\n")
+        self.reply(204)
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+python3 "$T/jira.py" 17350 "$T/closed.txt" & JIRA_PID=$!
+printf 'RAMIFY_JIRA_URL=http://127.0.0.1:17350\n' >>.ramify.conf
+git commit -qam jira && git push -q origin main 2>/dev/null
+export RAMIFY_JIRA_EMAIL=qa@t RAMIFY_JIRA_TOKEN=tok
+sleep 1
+"$RAMIFY" new tm-7-login >/dev/null 2>&1
+WT7="$T/app-wt/tm-7-login"
+check "dash --json carries the branch's ticket"  bash -c "'$RAMIFY' dash --json | grep -q '\"ticket\":\"TM-7\"'"
+echo x >"$WT7/x.txt"; git -C "$WT7" add x.txt; git -C "$WT7" commit -qm x
+check "complete refuses unpushed commits"       bash -c "! '$RAMIFY' complete tm-7-login --yes && [ -d '$WT7' ] && [ ! -s '$T/closed.txt' ]"
+git -C "$WT7" push -q origin story/tm-7-login 2>/dev/null
+"$RAMIFY" complete tm-7-login --yes >"$T/complete.log" 2>&1
+check "complete closes the ticket"              grep -qx TM-7 "$T/closed.txt"
+check "complete removes worktree + branch"      bash -c "[ ! -d '$WT7' ] && ! git show-ref -q refs/heads/story/tm-7-login"
+for k in 8 9; do git checkout -q -b "story/tm-$k-x" main; echo "$k" >"f$k"; git add "f$k"; git commit -qm "$k"; git checkout -q main
+  git merge -q --no-ff "story/tm-$k-x" -m "Merge pull request #$k from someone/story/tm-$k-x"; done
+git push -q origin main 2>/dev/null
+check "prune dry run says what it would close"  bash -c "'$RAMIFY' prune | grep -q 'closes TM-8 (In Review)' && '$RAMIFY' prune | grep -q 'TM-9 already Done'"
+"$RAMIFY" prune --apply >"$T/prune.log" 2>&1
+check "prune --apply closes open tickets only"  bash -c "[ \"\$(sort '$T/closed.txt' | tr '\n' ' ')\" = 'TM-7 TM-8 ' ]"
+check "jira refuses plain http off localhost"   bash -c "python3 '$(dirname "$RAMIFY")/../libexec/jira.py' check http://jira.example.com 2>&1 | grep -q 'must be an https'"
+git checkout -q -b story/tm-10-kept main; echo 10 >f10; git add f10; git commit -qm 10; git checkout -q main
+git merge -q --no-ff story/tm-10-kept -m "Merge pull request #10 from someone/story/tm-10-kept"; git push -q origin main 2>/dev/null
+"$RAMIFY" cleanup >"$T/cleanup-jira.log" 2>&1
+check "cleanup closes a merged branch's ticket" bash -c "grep -qx TM-10 '$T/closed.txt' && git show-ref -q refs/heads/story/tm-10-kept"
+"$RAMIFY" cleanup >"$T/cleanup-jira2.log" 2>&1
+check "cleanup leaves a done ticket alone"      bash -c "[ \$(grep -c TM-10 '$T/closed.txt') = 1 ]"
+kill "$JIRA_PID" 2>/dev/null; unset RAMIFY_JIRA_EMAIL RAMIFY_JIRA_TOKEN
 
 # ── write-set on a real branch ──
 git checkout -q -b ws

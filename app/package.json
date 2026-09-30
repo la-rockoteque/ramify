@@ -1,0 +1,13 @@
+{
+  "name": "ramify-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop dashboard for ramify QA stacks",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "44.5.1"
+  }
+}

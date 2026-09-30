@@ -3,8 +3,9 @@
 #
 # Usage:  ramify setup [--print | --force] [--local] | config [-q | get VAR]
 #         ramify new <slug> | label [slug]
-#         ramify up | down | ping | card | dash | watch [seconds] | status | shared-down
-#         ramify cleanup | prune [--apply] | delete <worktree> [--yes]
+#         ramify up | down | ping | card | dash [--json] | watch [seconds] | status | shared-down
+#         ramify cleanup | prune [--apply] | delete <worktree> [--yes] | complete <worktree> [--yes]
+#         ramify jira login | check | statusline [--json] | app
 #         ramify write-set <file> | write-set --self-test
 #
 # THE CONTAINERS ARE SHARED AND THE APPS ARE NOT. Databases and emulators are expensive, stateful
@@ -26,13 +27,22 @@ die() { echo "ramify: $*" >&2; exit 1; }
 # not from the worktree under test, and a `down` aimed at the wrong tree kills nothing and
 # reports success.
 REPO_ROOT="${RAMIFY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+# Every configured repo on the machine, one primary checkout per line. It lives with the user's
+# Claude config, not in /tmp: the app lists a repo whose stacks are all down, and a reboot
+# empties /tmp.
+REGISTRY="${RAMIFY_REGISTRY:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ramify/projects}"
 # The dashboard is machine-wide, so it runs from anywhere: outside a checkout, borrow any project.
 case "${1:-}" in dash|watch)
-  [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cat "${RAMIFY_STATE_DIR:-/tmp/ramify}"/*/primary 2>/dev/null | head -1)"
+  [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cat "$REGISTRY" "${RAMIFY_STATE_DIR:-/tmp/ramify}"/*/primary 2>/dev/null \
+    | while read -r p; do [ -d "$p" ] && { echo "$p"; break; }; done)"
   [ -n "$REPO_ROOT" ] || { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; exit 0; } ;;
 esac
 case "${1:-}" in ''|-h|--help|help) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 case "${1:-}" in write-set) exec "$RAMIFY_HOME/libexec/write-set.sh" "${@:2}" ;; esac
+# The app is machine-wide like the dashboard: it runs from anywhere.
+case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; esac
+# The status line runs outside any checkout, many times a minute: its own script, no config load.
+case "${1:-}" in statusline) exec "$RAMIFY_HOME/libexec/statusline.sh" "${@:2}" ;; esac
 [ -n "$REPO_ROOT" ] || die "not inside a git checkout (or set RAMIFY_ROOT)"
 PRIMARY="$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
 [ -n "$PRIMARY" ] || die "$REPO_ROOT is not a git checkout"
@@ -65,6 +75,9 @@ done
 : "${RAMIFY_QA_PLAN:=}"
 : "${RAMIFY_QA_RESULTS:=}"
 : "${RAMIFY_QA_NOTES:=}"
+: "${RAMIFY_JIRA_URL:=}"
+: "${RAMIFY_JIRA_DONE:=}"
+: "${RAMIFY_TICKET_PATTERN:=[A-Za-z][A-Za-z0-9]*-[0-9]+}"
 
 # A fixed /tmp, not $TMPDIR: a sandboxed agent shell and a hook see different $TMPDIRs, and the
 # registry only works if every session on the machine reads the same one.
@@ -72,10 +85,16 @@ STATE_ROOT="${RAMIFY_STATE_DIR:-/tmp/ramify}"
 STATE_DIR="$STATE_ROOT/$RAMIFY_PROJECT"
 SLOTS="$STATE_DIR/slots"
 STATE="$STATE_DIR/$WORKTREE.env"
-# Each configured project records its primary checkout, so `dash` can find every project.
+# Why the last `up` failed, one `service<TAB>log<TAB>message` per line. `up` starts it afresh,
+# `down` clears it; the app draws a "!" per line.
+ERRORS="$STATE_DIR/$WORKTREE.errors"
+# Each configured project records its primary checkout, so `dash` and the app find every project.
+# An appended line is one write: two sessions registering at once leave a duplicate, not a mix.
 if [ -n "$CONFIG" ]; then
   mkdir -p "$SLOTS" "$STATE_DIR/shared"
   printf '%s\n' "$PRIMARY" >"$STATE_DIR/primary"
+  grep -qxF "$PRIMARY" "$REGISTRY" 2>/dev/null \
+    || { mkdir -p "$(dirname "$REGISTRY")" && printf '%s\n' "$PRIMARY" >>"$REGISTRY"; } 2>/dev/null
 fi
 
 # ── Config access ────────────────────────────────────────────────────────────
@@ -100,7 +119,8 @@ need_config() {
 port_of() { echo $(( $(sv "$1" port) + $2 )); }                # service, slot
 slot_ports() { local s; for s in $RAMIFY_SERVICES; do port_of "$s" "$1"; done; }
 bound() { lsof -ti:"$1" >/dev/null 2>&1; }
-branch_of() { git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'; }
+# Without a commit, rev-parse prints "HEAD" and fails: one line either way.
+branch_of() { local b; b="$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null)" && echo "$b" || echo '?'; }
 
 # ── Slots ────────────────────────────────────────────────────────────────────
 # A claim whose pid is gone and whose ports answer nobody is a crash, not a claim.
@@ -160,10 +180,13 @@ wait_for() { # url, seconds
 
 health_url() { echo "http://localhost:$2$(sv "$1" health)"; } # service, port
 
+note_error() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$ERRORS"; } # service or step, log, message
+fail() { note_error "$1" "$2" "$3"; die "$3"; }                        # same, then stop
+
 ensure_containers() {
   [ -n "$RAMIFY_CONTAINERS$RAMIFY_COMPOSE_FILE" ] || return 0
   # Fail here rather than three steps later on a service that cannot reach its database.
-  docker info >/dev/null 2>&1 || die "Docker is not running. Start it, then run this again."
+  docker info >/dev/null 2>&1 || fail containers '' "Docker is not running. Start it, then run this again."
   local c missing=0
   for c in $RAMIFY_CONTAINERS; do
     docker ps --filter "name=^${c}\$" --filter status=running -q | grep -q . || missing=1
@@ -176,12 +199,12 @@ ensure_containers() {
   if [ "$missing" = 0 ]; then
     echo "  containers      already up (shared)"; return
   fi
-  [ -n "$RAMIFY_COMPOSE_FILE" ] || die "containers down and no RAMIFY_COMPOSE_FILE to start them"
+  [ -n "$RAMIFY_COMPOSE_FILE" ] || fail containers '' "containers down and no RAMIFY_COMPOSE_FILE to start them"
   # Never `down`: another session is likely mid-QA against these. The fixed -p is what stops a
   # worktree from creating a second, conflicting set named after its own directory.
   echo "  containers      starting under project '$RAMIFY_COMPOSE_PROJECT'…"
-  docker compose -p "$RAMIFY_COMPOSE_PROJECT" -f "$PRIMARY/$RAMIFY_COMPOSE_FILE" up -d >/dev/null \
-    || die "docker compose up failed"
+  docker compose -p "$RAMIFY_COMPOSE_PROJECT" -f "$PRIMARY/$RAMIFY_COMPOSE_FILE" up -d >"$STATE_DIR/$WORKTREE.compose.log" 2>&1 \
+    || fail containers "$STATE_DIR/$WORKTREE.compose.log" "docker compose up failed"
 }
 
 # What this branch changed, committed or not — the point is what runs, not what is pushed.
@@ -222,7 +245,8 @@ ensure_shared() { # service
   if wait_for "$(health_url "$s" "$port")" "$(sv "$s" timeout || true)"; then
     printf '  %-15s http://localhost:%s  (shared, ready)\n' "$s" "$port"
   else
-    printf '  %-15s shared instance NOT READY — see %s\n' "$s" "$STATE_DIR/shared/$s.log"; return 1
+    printf '  %-15s shared instance NOT READY — see %s\n' "$s" "$STATE_DIR/shared/$s.log"
+    note_error "$s" "$STATE_DIR/shared/$s.log" "shared instance did not answer $(health_url "$s" "$port")"; return 1
   fi
 }
 
@@ -236,6 +260,7 @@ smoke() { # service, port — prints the http code when it is not one the config
 
 up() {
   need_config
+  rm -f "$ERRORS"
   # Idempotent: a live stack is reported, not doubled. A second claim would orphan the first slot.
   if [ -f "$STATE" ]; then
     if ping; then tile "$WORKTREE" smoke; return 0; fi
@@ -244,8 +269,8 @@ up() {
   echo "Stack for $WORKTREE ($(branch_of "$REPO_ROOT"))"
   ensure_containers
 
-  local slot s U port cmd late=""
-  slot="$(claim_slot)" || die "all $RAMIFY_MAX_SLOT slots taken — 'ramify status' shows who holds them"
+  local slot s U port cmd rc late=""
+  slot="$(claim_slot)" || fail slots '' "all $RAMIFY_MAX_SLOT slots taken — 'ramify status' shows who holds them"
   echo "  slot            $slot"
   printf 'SLOT=%s\n' "$slot" >"$STATE"
 
@@ -254,7 +279,7 @@ up() {
     U="$(upper "$s")"
     if is_shared "$s"; then
       port="$(sv "$s" shared_port)"
-      ensure_shared "$s" || { release_slot "$slot" "$WORKTREE"; exit 1; }
+      ensure_shared "$s" || { kill_worktree "$WORKTREE" >/dev/null; exit 1; }
       printf '%s_PORT=%s\n%s_SHARED=1\n' "$U" "$port" "$U" >>"$STATE"
     else
       port="$(port_of "$s" "$slot")"
@@ -262,8 +287,9 @@ up() {
       if [ -n "$cmd" ]; then
         printf '  %-15s preparing\n' "$s"
         (cd "$REPO_ROOT/$(sv "$s" dir)" && bash -c "$cmd") >"$STATE_DIR/$WORKTREE.$s.prepare.log" 2>&1 \
-          || { printf '  %-15s prepare FAILED — see %s\n' "$s" "$STATE_DIR/$WORKTREE.$s.prepare.log"
-               down >/dev/null; exit 1; }
+          || { rc=$?; printf '  %-15s prepare FAILED — see %s\n' "$s" "$STATE_DIR/$WORKTREE.$s.prepare.log"
+               note_error "$s" "$STATE_DIR/$WORKTREE.$s.prepare.log" "prepare failed (exit $rc)"
+               kill_worktree "$WORKTREE" >/dev/null; exit 1; }
       fi
       start_service "$s" "$port" "$REPO_ROOT" "$STATE_DIR/$WORKTREE.$s.pid" "$STATE_DIR/$WORKTREE.$s.log" \
         "$(sv "$s" cmd)"
@@ -276,6 +302,7 @@ up() {
         printf '  %-15s http://localhost:%s  (ready)\n' "$s" "$port"
       else
         printf '  %-15s http://localhost:%s  NOT READY — see %s\n' "$s" "$port" "$STATE_DIR/$WORKTREE.$s.log"
+        note_error "$s" "$STATE_DIR/$WORKTREE.$s.log" "did not answer $(health_url "$s" "$port") in time"
       fi
     fi
     # Later services read earlier ports: `VITE_API_TARGET=http://localhost:$API_PORT`.
@@ -322,6 +349,7 @@ kill_worktree() { # worktree
 down() {
   need_config
   kill_worktree "$WORKTREE"
+  rm -f "$ERRORS"
   echo "$WORKTREE stopped. Shared containers and instances left running on purpose."
 }
 
@@ -387,7 +415,7 @@ cleanup() {
     [ -n "$wt" ] || continue
     if [ -z "$(worktree_root "$wt")" ]; then
       kill_worktree "$wt" >/dev/null
-      rm -f "$STATE_DIR/$wt".*.log "$STATE_DIR/$wt".*.pid "$STATE_DIR/$wt.env"
+      rm -f "$STATE_DIR/$wt".*.log "$STATE_DIR/$wt".*.pid "$STATE_DIR/$wt.env" "$STATE_DIR/$wt.errors"
       echo "  state          $wt removed — its worktree no longer exists"; found=1
     elif ! holds_a_slot "$wt" && stack_is_down "$wt"; then
       # Logs stay as the post-mortem; only state that lies about what runs goes.
@@ -402,6 +430,7 @@ cleanup() {
     fi
   done < <(ls "$STATE_DIR" 2>/dev/null | sed -n -E 's/\.(env|[a-z0-9_]+(\.prepare)?\.(log|pid))$//p' | sort -u)
 
+  close_merged_tickets && found=1
   [ "$found" = 0 ] && echo "nothing to clean — every claimed slot has a live stack behind it"
   return 0
 }
@@ -432,7 +461,7 @@ merged_reason() { # branch
 # Merged local branches and their worktrees. Dry run unless --apply. Dirty trees, the primary
 # checkout and the one this runs from are kept; remote branches are never touched.
 prune() { # [--apply]
-  local apply="${1:-}" b reason path here kept=0 n=0
+  local apply="${1:-}" b reason path here key kept=0 n=0
   here="$(git rev-parse --show-toplevel 2>/dev/null)"
   git -C "$PRIMARY" fetch -p -q "$RAMIFY_REMOTE" 2>/dev/null || echo "  (fetch failed — judging on the last known $RAMIFY_REMOTE/$RAMIFY_MAIN)"
   [ "$apply" = --apply ] && git -C "$PRIMARY" worktree prune
@@ -452,13 +481,17 @@ prune() { # [--apply]
     fi
     printf '  prune  %-45s %s%s\n' "$b" "$reason" "${path:+ + worktree $(basename "$path")}"
     n=$((n + 1))
-    [ "$apply" = --apply ] || continue
+    key="$(ticket_of "$b")"
+    [ "$apply" = --apply ] || { [ -n "$key" ] && printf '         %s\n' "$(ticket_note "$key")"; continue; }
     # Remove first: a failed remove must leave the tree's stack and state as they were.
     if [ -n "$path" ] && [ -d "$path" ]; then
       git -C "$PRIMARY" worktree remove "$path" || { echo "    worktree remove failed — branch and stack kept"; continue; }
       forget_worktree "$(basename "$path")"
     fi
     git -C "$PRIMARY" branch -D -q "$b"
+    # After the removal: a kept branch keeps its ticket open. A failed close costs nothing, the
+    # work is merged; it is said, and the ticket stays for a human.
+    [ -n "$key" ] && { jira close "$key" 2>&1 | sed 's/^jira: //; s/^/         /'; }
   done < <(git -C "$PRIMARY" for-each-ref --format='%(refname:short)' refs/heads)
   if [ "$n" = 0 ]; then echo "nothing merged to prune"
   elif [ "$apply" = --apply ]; then echo "$n pruned, $kept kept"
@@ -467,7 +500,7 @@ prune() { # [--apply]
 
 forget_worktree() { # worktree — stop its stack, drop its state and logs
   [ -n "$CONFIG" ] && kill_worktree "$1" >/dev/null
-  rm -f "$STATE_DIR/$1".*.log "$STATE_DIR/$1".*.pid "$STATE_DIR/$1.env"
+  rm -f "$STATE_DIR/$1".*.log "$STATE_DIR/$1".*.pid "$STATE_DIR/$1.env" "$STATE_DIR/$1.errors"
 }
 
 # One worktree and its branch, merged or not. Says what is lost, then wants --yes or a yes.
@@ -491,6 +524,95 @@ force_delete() { # worktree name or path, [--yes]
   forget_worktree "$(basename "$path")"
   [ -n "$b" ] && git -C "$PRIMARY" branch -D -q "$b"
   echo "deleted $(basename "$path")${b:+ and $b}"
+}
+
+# ── Tickets ──────────────────────────────────────────────────────────────────
+# The Jira key in a branch name, upper-cased: story/tm-127-pagination → TM-127. Whole words only,
+# so story/backend-under-3min carries none. Nothing without RAMIFY_JIRA_URL.
+ticket_of() { # branch
+  [ -n "$RAMIFY_JIRA_URL" ] || return 0
+  local s="-${1//\//-}-"
+  [[ "$s" =~ -($RAMIFY_TICKET_PATTERN)- ]] && upper "${BASH_REMATCH[1]}"
+  return 0
+}
+
+jira() { RAMIFY_JIRA_DONE="$RAMIFY_JIRA_DONE" python3 "$RAMIFY_HOME/libexec/jira.py" "$1" "$RAMIFY_JIRA_URL" "${@:2}"; }
+
+ticket_note() { # key → what closing it would do
+  local out cat name
+  out="$(jira status "$1" 2>&1)" || { echo "${out#jira: }"; return; }
+  IFS=$'\t' read -r _ cat name <<<"$out"
+  case "$cat" in
+    done) echo "$1 already $name" ;;
+    missing) echo "$1 not found in Jira, nothing to close" ;;
+    *) echo "closes $1 ($name)" ;;
+  esac
+}
+
+# The open tickets of merged branches still here, closed. Nothing is removed: that is `prune`.
+# Judged on the last fetched main, like the rest of `cleanup`. True when it closed one.
+close_merged_tickets() {
+  [ -n "$RAMIFY_JIRA_URL" ] || return 1
+  local b key note closed=1
+  while read -r b; do
+    [ "$b" = "$RAMIFY_MAIN" ] && continue
+    key="$(ticket_of "$b")"; [ -n "$key" ] || continue
+    [ -n "$(merged_reason "$b")" ] || continue
+    note="$(ticket_note "$key")"
+    case "$note" in
+      closes*) printf '  ticket         %s\n' "$(jira close "$key" 2>&1 | sed 's/^jira: //')"; closed=0 ;;
+      *already*|*"not found"*) ;;
+      *) printf '  ticket         %s: %s\n' "$key" "$note"; closed=0 ;;
+    esac
+  done < <(git -C "$PRIMARY" for-each-ref --format='%(refname:short)' refs/heads)
+  return "$closed"
+}
+
+# The token goes to the Keychain, never to the repo config: that file is committed.
+jira_login() {
+  [ -n "$RAMIFY_JIRA_URL" ] || die "set RAMIFY_JIRA_URL=https://<site>.atlassian.net in ${CONFIG:-.ramify.conf} first"
+  [ -t 0 ] || die "'ramify jira login' asks for a token: run it in a terminal"
+  command -v security >/dev/null || die "no macOS Keychain here: export RAMIFY_JIRA_EMAIL and RAMIFY_JIRA_TOKEN instead"
+  local host email
+  host="$(printf '%s' "$RAMIFY_JIRA_URL" | sed -E 's#^[a-z]+://##; s#[/:].*##')"
+  read -rp "Atlassian email for $host: " email
+  [ -n "$email" ] || die "no email given"
+  echo "API token, from https://id.atlassian.com/manage-profile/security/api-tokens"
+  while security delete-generic-password -s "ramify-jira:$host" >/dev/null 2>&1; do :; done
+  # -w last: security prompts for the token itself, so it never sits in argv or in shell history.
+  security add-generic-password -s "ramify-jira:$host" -a "$email" -l "ramify Jira token ($host)" -w || die "the Keychain refused the token"
+  jira check
+}
+
+# Done with a branch: close its ticket, stop its stack, remove the worktree and the local branch.
+# Nothing uncommitted or unpushed may go with it; that is `delete`, which says what it loses.
+complete_tree() { # worktree name or path, [--yes]
+  local path b dirty unpushed here key
+  path="$(worktree_root "$(basename "${1:-}")")"
+  [ -n "$path" ] || { echo "no worktree named '${1:-}'" >&2; return 1; }
+  here="$(git rev-parse --show-toplevel 2>/dev/null)"
+  [ "$path" = "$PRIMARY" ] && { echo "refusing: $path is the primary checkout" >&2; return 1; }
+  [ "$path" = "$here" ] && { echo "refusing: this shell is inside $path" >&2; return 1; }
+  b="$(git -C "$path" symbolic-ref --short -q HEAD)"
+  dirty="$(git -C "$path" status --porcelain | wc -l | tr -d ' ')"
+  unpushed="$([ -n "$b" ] && git -C "$PRIMARY" rev-list --count "$b" --not --remotes 2>/dev/null || echo 0)"
+  [ "$dirty" = 0 ] || { echo "refusing: $(basename "$path") has $dirty uncommitted file(s) — commit and push them, or 'ramify delete'" >&2; return 1; }
+  [ "$unpushed" = 0 ] || { echo "refusing: $unpushed commit(s) of $b are on no remote — push them, or 'ramify delete'" >&2; return 1; }
+  key="$(ticket_of "$b")"
+  echo "complete $(basename "$path") (${b:-detached})${key:+ — $(ticket_note "$key")}"
+  if [ "${2:-}" != --yes ]; then
+    [ -t 0 ] || { echo "add --yes to confirm" >&2; return 1; }
+    choose "Complete it?" "Complete" "Back"
+    [ "$CHOICE" = 0 ] || return 0
+  fi
+  # The ticket first: when Jira says no, the tree is still there to try again.
+  if [ -n "$key" ]; then
+    jira close "$key" || { echo "ticket not closed, $(basename "$path") kept — run it again once Jira answers" >&2; return 1; }
+  fi
+  git -C "$PRIMARY" worktree remove "$path" || return 1
+  forget_worktree "$(basename "$path")"
+  [ -n "$b" ] && git -C "$PRIMARY" branch -D -q "$b"
+  echo "completed $(basename "$path")${b:+, $b removed here (its remote branch is kept)}"
 }
 
 # `/color` takes one of eight names; hashing the slug keeps a tree's colour across sessions.
@@ -525,9 +647,12 @@ new() { # slug
 
   [ -n "$CONFIG" ] && [ -n "$RAMIFY_SERVICES" ] && [ "${RAMIFY_AUTOSTART:-1}" = 1 ] && autostart=1
   if [ -n "$RAMIFY_BOOTSTRAP" ] || [ "$autostart" = 1 ]; then
-    mkdir -p "$STATE_DIR"
-    (cd "$dest" && exec nohup bash -c 'eval "${1:-true}" || exit 1; [ "$3" = 1 ] && RAMIFY_ROOT="$2" "$4" up' \
-       _ "$RAMIFY_BOOTSTRAP" "$dest" "$autostart" "$SELF") >"$STATE_DIR/$wt.bootstrap.log" 2>&1 </dev/null &
+    mkdir -p "$STATE_DIR"; rm -f "$STATE_DIR/$wt.errors"
+    # A failed bootstrap is recorded like a failed `up`: nobody reads the log of a background job.
+    (cd "$dest" && exec nohup bash -c 'eval "${1:-true}" || { printf "bootstrap\t%s\tbootstrap failed (exit %s)\n" "$6" "$?" >>"$5"; exit 1; }
+       [ "$3" = 1 ] && RAMIFY_ROOT="$2" "$4" up' \
+       _ "$RAMIFY_BOOTSTRAP" "$dest" "$autostart" "$SELF" "$STATE_DIR/$wt.errors" "$STATE_DIR/$wt.bootstrap.log") \
+       >"$STATE_DIR/$wt.bootstrap.log" 2>&1 </dev/null &
     echo "  bootstrap       running in the background — $STATE_DIR/$wt.bootstrap.log"
   fi
   echo "  branch          $branch (from $RAMIFY_REMOTE/$RAMIFY_MAIN)"
@@ -611,12 +736,16 @@ tile() { # worktree, [smoke]
   printf '└%s┘\n' "$BOX_LINE"
 }
 
-projects() { # primary checkouts of every project that runs QA stacks, one per line
-  local f p
-  for f in "$STATE_ROOT"/*/primary; do
-    p="$(cat "$f" 2>/dev/null)"; [ -n "$p" ] && [ -d "$p" ] || continue
-    [ -n "$(RAMIFY_ROOT="$p" "$SELF" config get RAMIFY_SERVICES 2>/dev/null)" ] && echo "$p"
-  done | sort -u
+# Primary checkouts of every configured project, one per line: the ones that run QA stacks, or
+# with `all` the branching-only ones too. The /tmp records still count for projects not seen
+# since the registry existed. A repo that was moved or lost its config drops out.
+projects() { # [all]
+  local p
+  cat "$REGISTRY" "$STATE_ROOT"/*/primary 2>/dev/null | sort -u | while read -r p; do
+    [ -n "$p" ] && [ -d "$p" ] || continue
+    if [ "${1:-}" = all ]; then RAMIFY_ROOT="$p" "$SELF" config -q >/dev/null 2>&1 && echo "$p"
+    else [ -n "$(RAMIFY_ROOT="$p" "$SELF" config get RAMIFY_SERVICES 2>/dev/null)" ] && echo "$p"; fi
+  done
 }
 
 dash() {
@@ -656,6 +785,81 @@ dash_project() {
   done
   [ "$claimed" = 0 ] && echo "no stack running — 'ramify up' in a worktree starts one"
   return 0
+}
+
+# ── JSON, for the desktop app ────────────────────────────────────────────────
+js() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; printf '"%s"' "${s//$'\t'/\\t}"; }
+jsep() { [ "$1" = 0 ] || printf ','; }
+
+dash_json() { # every project, as one array
+  local p i=0
+  printf '['
+  while read -r p; do
+    [ -n "$p" ] || continue
+    jsep "$i"; i=1
+    RAMIFY_ROOT="$p" "$SELF" dash-project --json
+  done < <(projects all)
+  printf ']\n'
+}
+
+errors_json() { # errors file → [{"service","log","message"}]
+  local i=0 svc log msg
+  printf '['
+  [ -f "$1" ] && while IFS=$'\t' read -r svc log msg; do
+    jsep "$i"; i=1
+    printf '{"service":%s,"log":%s,"message":%s}' "$(js "$svc")" "$([ -n "$log" ] && [ -f "$log" ] && js "$log" || echo null)" "$(js "$msg")"
+  done <"$1"
+  printf ']'
+}
+
+# Every worktree of the project, running or not: the app acts on stopped ones too. A
+# branching-only project comes with `"stacks":false` and no services.
+dash_project_json() {
+  need_config any
+  local c s i path wt env slot U port kind held first log b key
+  printf '{"name":%s,"primary":%s,"stacks":%s,"jira":%s,"containers":[' "$(js "$RAMIFY_PROJECT")" "$(js "$PRIMARY")" \
+    "$([ -n "$RAMIFY_SERVICES" ] && echo true || echo false)" "$([ -n "$RAMIFY_JIRA_URL" ] && js "${RAMIFY_JIRA_URL%/}" || echo null)"
+  i=0; for c in $RAMIFY_CONTAINERS; do
+    jsep "$i"; i=1
+    printf '{"name":%s,"up":%s}' "$(js "$c")" \
+      "$(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo true || echo false)"
+  done
+  printf '],"shared":['
+  i=0; for s in $RAMIFY_SERVICES; do
+    has_shared "$s" || continue
+    jsep "$i"; i=1; port="$(sv "$s" shared_port)"
+    printf '{"service":%s,"port":%s,"up":%s}' "$(js "$s")" "$port" \
+      "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$port")" && echo true || echo false)"
+  done
+  printf '],"orphans":['
+  i=0; for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
+    [ -f "$SLOTS/$slot" ] || continue
+    wt="$(cut -d' ' -f1 "$SLOTS/$slot")"; held="$(envget "$STATE_DIR/$wt.env" SLOT)"
+    [ -n "$held" ] && [ "$held" != "$slot" ] || continue
+    jsep "$i"; i=1; printf '{"slot":%s,"worktree":%s,"moved_to":%s}' "$slot" "$(js "$wt")" "$held"
+  done
+  printf '],"worktrees":['
+  first=0
+  while read -r path; do
+    wt="$(basename "$path")"; env="$STATE_DIR/$wt.env"; slot="$(envget "$env" SLOT)"
+    jsep "$first"; first=1
+    b="$(branch_of "$path")"; key="$(ticket_of "$b")"
+    printf '{"name":%s,"path":%s,"branch":%s,"ticket":%s,"primary":%s,"dirty":%s,"slot":%s,"uptime":%s,"errors":%s,"services":[' \
+      "$(js "$wt")" "$(js "$path")" "$(js "$b")" "$([ -n "$key" ] && js "$key" || echo null)" \
+      "$([ "$path" = "$PRIMARY" ] && echo true || echo false)" \
+      "$([ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ] && echo true || echo false)" \
+      "${slot:-null}" "$([ -f "$env" ] && js "$(uptime_of "$env")" || echo null)" "$(errors_json "$STATE_DIR/$wt.errors")"
+    i=0; for s in $RAMIFY_SERVICES; do
+      U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
+      kind=own; has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind=shared || kind=private; }
+      jsep "$i"; i=1
+      log="$STATE_DIR/$wt.$s.log"; [ "$kind" = shared ] && log="$STATE_DIR/shared/$s.log"
+      printf '{"name":%s,"port":%s,"kind":"%s","state":"%s","log":%s}' "$(js "$s")" "$port" "$kind" "$(probe "$s" "$port")" \
+        "$([ -f "$log" ] && js "$log" || echo null)"
+    done
+    printf ']}'
+  done < <(git -C "$PRIMARY" worktree list --porcelain | awk '/^worktree /{print $2}')
+  printf ']}'
 }
 
 clear_screen() { [ -t 1 ] && printf '\033[H\033[2J\033[3J'; }
@@ -718,11 +922,12 @@ menu() {
     [ "$CHOICE" = 0 ] && prune --apply
   else
     p="${paths[$CHOICE]}"; echo
-    choose "$(basename "$p")" "Start QA" "Stop + release slot" "Force delete worktree + branch" "Back"
+    choose "$(basename "$p")" "Start QA" "Stop + release slot" "Complete (close ticket, remove worktree)" "Force delete worktree + branch" "Back"
     case "$CHOICE" in
       0) RAMIFY_ROOT="$p" "$SELF" up ;;
       1) RAMIFY_ROOT="$p" "$SELF" down ;;
-      2) echo; force_delete "$p" ;;
+      2) echo; complete_tree "$p" ;;
+      3) echo; force_delete "$p" ;;
       *) return ;;
     esac
   fi
@@ -759,6 +964,7 @@ show_config() { # [-q | get VAR]
   echo "main        $RAMIFY_REMOTE/$RAMIFY_MAIN   new trees in $RAMIFY_WORKTREES, branches '$RAMIFY_BRANCH_PREFIX<slug>'"
   echo "services    ${RAMIFY_SERVICES:-(none)}"
   echo "qa plan     ${RAMIFY_QA_PLAN:-(none)}"
+  echo "jira        ${RAMIFY_JIRA_URL:-(none)}${RAMIFY_JIRA_URL:+   tickets matching $RAMIFY_TICKET_PATTERN}"
   echo "state       $STATE_DIR"
   [ -n "$CONFIG" ]
 }
@@ -772,14 +978,22 @@ case "${1:-}" in
   down) down ;;
   ping) ping ;;
   card) need_config; tile "$WORKTREE" smoke ;;
-  dash) dash ;;
-  dash-project) dash_project ;;
+  dash) [ "${2:-}" = --json ] && dash_json || dash ;;
+  dash-project) [ "${2:-}" = --json ] && dash_project_json || dash_project ;;
   menu) need_config any; menu ;;
   watch) watch_dash "${2:-2}" ;;
   status) status ;;
   cleanup) cleanup ;;
   prune) prune "${2:-}" ;;
   delete) force_delete "${2:-}" "${3:-}" ;;
+  complete) complete_tree "${2:-}" "${3:-}" ;;
+  jira)
+    need_config any
+    case "${2:-}" in
+      login) jira_login ;;
+      check) [ -n "$RAMIFY_JIRA_URL" ] || die "no RAMIFY_JIRA_URL in $CONFIG"; jira check ;;
+      *) die "usage: ramify jira login | check" ;;
+    esac ;;
   shared-down) shared_down ;;
   *) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
