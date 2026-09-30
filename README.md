@@ -116,7 +116,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |
 | `RAMIFY_TICKET_PATTERN` / `RAMIFY_JIRA_DONE` | `[A-Za-z][A-Za-z0-9]*-[0-9]+` / none | The key in a branch name; the done transition to pick when there are several |
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
-| `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `10` / none / `1` | Slot count, services to leave out, hook autostart |
+| `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `3` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
 
 ### Tickets
 

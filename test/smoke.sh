@@ -43,7 +43,7 @@ api_shared_when='^(web/|docs/)'
 web_port=17200
 web_dir=web
 web_health=/
-web_cmd='echo "api is $API_PORT" >api.txt; exec python3 -m http.server $PORT'
+web_cmd='echo "api is $API_PORT" >api.txt; sh -c "sleep 9$PORT &"; exec python3 -m http.server $PORT'
 web_smoke='/ 200'
 EOF
 printf '.claude/\n' >.gitignore
@@ -122,6 +122,7 @@ rm -f "$RAMIFY_STATE_DIR/sessions/sl.root"
 RAMIFY_ROOT="$WT" "$RAMIFY" down >/dev/null 2>&1
 sleep 1
 check "down stops the tree's web"               bash -c "! curl -sf -o /dev/null --max-time 2 http://localhost:17201/"
+check "down stops the web's grandchildren"      bash -c "! pgrep -f 'sleep [9]17201'"
 check "down keeps the shared api"               answers 17100
 check "down releases the slot"                  test ! -f "$RAMIFY_STATE_DIR/app/slots/1"
 check "ping fails once down"                    bash -c "! RAMIFY_ROOT='$WT' '$RAMIFY' ping"

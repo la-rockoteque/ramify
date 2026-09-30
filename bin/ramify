@@ -70,7 +70,7 @@ done
 : "${RAMIFY_COMPOSE_PROJECT:=$RAMIFY_PROJECT}"
 : "${RAMIFY_CONTAINERS:=}"
 : "${RAMIFY_SERVICES:=}"
-: "${RAMIFY_MAX_SLOT:=10}"
+: "${RAMIFY_MAX_SLOT:=3}"
 : "${RAMIFY_SKIP:=}"
 : "${RAMIFY_QA_PLAN:=}"
 : "${RAMIFY_QA_RESULTS:=}"
@@ -228,10 +228,19 @@ is_shared() {
 
 # The redirect wraps the whole subshell: redirecting only `nohup` leaves the forked shell holding
 # the caller's stdout, and anything reading `ramify up` through a pipe then waits forever.
+# Each service leads its own process group (perl setpgrp keeps the pid), so a stop reaches the
+# grandchildren too: `npm run dev` and `dotnet watch` run the real server two levels down.
 start_service() { # service, port, root, pidfile, logfile, cmd
   local dir="$3/$(sv "$1" dir)"
-  (cd "$dir" && PORT="$2" exec nohup bash -c "$6") >"$5" 2>&1 </dev/null &
+  (cd "$dir" && PORT="$2" exec nohup perl -e 'setpgrp(0, 0); exec @ARGV' bash -c "$6") >"$5" 2>&1 </dev/null &
   echo $! >"$4"
+}
+
+# The whole group; `pkill -P` covers a stack started before services had their own group.
+stop_pidfile() { # pidfile
+  local pid; pid="$(cat "$1" 2>/dev/null)"
+  [ -n "$pid" ] && { kill -- "-$pid" 2>/dev/null || { pkill -P "$pid"; kill "$pid"; } 2>/dev/null; }
+  rm -f "$1"
 }
 
 ensure_shared() { # service
@@ -331,10 +340,7 @@ up() {
 kill_worktree() { # worktree
   local wt="$1" env="$STATE_DIR/$1.env" pidfile s U port
   for pidfile in "$STATE_DIR/$wt".*.pid; do
-    [ -f "$pidfile" ] || continue
-    pkill -P "$(cat "$pidfile")" 2>/dev/null
-    kill "$(cat "$pidfile")" 2>/dev/null
-    rm -f "$pidfile"
+    [ -f "$pidfile" ] && stop_pidfile "$pidfile"
   done
   for s in $RAMIFY_SERVICES; do
     U="$(upper "$s")"
@@ -359,7 +365,7 @@ shared_down() {
   for s in $RAMIFY_SERVICES; do
     has_shared "$s" || continue
     pidfile="$STATE_DIR/shared/$s.pid"
-    [ -f "$pidfile" ] && { pkill -P "$(cat "$pidfile")" 2>/dev/null; kill "$(cat "$pidfile")" 2>/dev/null; rm -f "$pidfile"; }
+    [ -f "$pidfile" ] && stop_pidfile "$pidfile"
     port="$(sv "$s" shared_port)"
     lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null
     echo "shared $s :$port stopped — every worktree pointed at it now reaches nothing"
