@@ -235,6 +235,9 @@ function projectSection(p) {
       el('h2', { title: p.primary }, p.primary.replace(/^\/Users\/[^/]+/, '~')),
       p.containers.map((c) => el('span', { class: 'pill', title: 'shared container' }, el('span', { class: `dot ${c.up}` }), c.name)),
       p.shared.map((s) => el('span', { class: 'pill', title: 'shared instance' }, el('span', { class: `dot ${s.up}` }), `shared ${s.service} :${s.port}`)),
+      (p.build_servers ?? []).map((b) => el('span', {
+        class: 'pill', title: 'build server, shared by every checkout on the machine — `dotnet build-server shutdown` stops it',
+      }, `${b.kind} ×${b.count} ${b.mb >= 1024 ? `${(b.mb / 1024).toFixed(1)} GB` : `${b.mb} MB`}`)),
       el('div', { class: 'project-actions' },
         input,
         el('button', { disabled: !!pdoing, onclick: create }, 'New worktree'),
@@ -248,6 +251,8 @@ function projectSection(p) {
     p.stacks ? null : el('div', { class: 'note' }, 'Branching only: this config declares no services, so there is no QA stack to run.'),
     p.orphans.map((o) => el('div', { class: 'orphan' },
       `slot ${o.slot}: orphan of ${o.worktree} (its state moved to slot ${o.moved_to}). Cleanup stops it.`)),
+    (p.strays ?? []).map((x) => el('div', { class: 'orphan' },
+      `stray: ${x.worktree} ${x.service} still runs (process group ${x.pgid}) with no pid file pointing at it. Cleanup stops it.`)),
     el('div', { class: 'grid' }, byRunning(p.worktrees).map((w) => worktreeCard(p, w))));
 }
 

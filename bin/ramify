@@ -70,7 +70,7 @@ done
 : "${RAMIFY_COMPOSE_PROJECT:=$RAMIFY_PROJECT}"
 : "${RAMIFY_CONTAINERS:=}"
 : "${RAMIFY_SERVICES:=}"
-: "${RAMIFY_MAX_SLOT:=3}"
+: "${RAMIFY_MAX_SLOT:=5}"
 : "${RAMIFY_SKIP:=}"
 : "${RAMIFY_QA_PLAN:=}"
 : "${RAMIFY_QA_RESULTS:=}"
@@ -237,17 +237,145 @@ unneeded() {
 # the caller's stdout, and anything reading `ramify up` through a pipe then waits forever.
 # Each service leads its own process group (perl setpgrp keeps the pid), so a stop reaches the
 # grandchildren too: `npm run dev` and `dotnet watch` run the real server two levels down.
-start_service() { # service, port, root, pidfile, logfile, cmd
+# RAMIFY_TAG rides in the environment of every process of the service, so a group whose pid file
+# was overwritten or deleted is still found: see `tagged_groups` and `tag_of`.
+start_service() { # service, port, root, pidfile, logfile, cmd, tag
   local dir="$3/$(sv "$1" dir)"
-  (cd "$dir" && PORT="$2" exec nohup perl -e 'setpgrp(0, 0); exec @ARGV' bash -c "$6") >"$5" 2>&1 </dev/null &
+  (cd "$dir" && PORT="$2" RAMIFY_TAG="$7" exec nohup perl -e 'setpgrp(0, 0); exec @ARGV' bash -c "$6") >"$5" 2>&1 </dev/null &
   echo $! >"$4"
 }
 
-# The whole group; `pkill -P` covers a stack started before services had their own group.
-stop_pidfile() { # pidfile
-  local pid; pid="$(cat "$1" 2>/dev/null)"
-  [ -n "$pid" ] && { kill -- "-$pid" 2>/dev/null || { pkill -P "$pid"; kill "$pid"; } 2>/dev/null; }
+# `<project>@<hash of the state dir>/<worktree>/<service>`. The hash keeps apart two repos with the
+# same name, and a test run from the machine's real stacks. A shared instance's worktree is
+# `@shared`, which no worktree name can be.
+TAG_NS="$RAMIFY_PROJECT@$(printf '%s' "$STATE_DIR" | shasum | cut -c1-8)"
+tag_of() { printf '%s/%s/%s' "$TAG_NS" "$1" "$2"; } # worktree or @shared, service
+
+# The pids and groups of this process and of every ancestor: the shell, the terminal, the session.
+PROTECTED="$(p=$$; while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+  echo "$p"; ps -o pgid= -p "$p" | tr -d ' '; p="$(ps -o ppid= -p "$p" | tr -d ' ')"; done | sort -u | tr '\n' ' ')"
+protected() { case " $PROTECTED " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# A group ramify may signal: one that carries this project's tag. Nothing else, ever. A pid file
+# can name a pid the system has since given to another program (a reboot keeps /tmp), and
+# `kill -- -1` is every process of the user, `kill -- -0` our own group.
+our_group() { # pgid
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -gt 1 ] && ! protected "$1" || return 1
+  tagged_groups | awk -v g="$1" '$1 == g { found = 1 } END { exit !found }'
+}
+
+stop_group() { our_group "${1:-}" && signal_group "$1"; return 0; } # pgid
+
+# Compiler daemons a build started from inside a service. They join that service's group and
+# carry its tag, yet every checkout on the machine shares them, and they exit on their own when
+# idle (Roslyn after 10 minutes, MSBuild nodes after 15). ramify never signals them.
+BUILD_SERVER_RE='MSBuild[.]dll.*nodeReuse:true|MSBuild[.]dll.*nodemode:8|VBCSCompiler[.]dll|rzc[.]dll.* server'
+
+# The group's members, build servers left out.
+group_members() { # pgid
+  ps -axww -o pid=,pgid=,command= | awk -v g="$1" -v re="$BUILD_SERVER_RE" '$2 == g && $0 !~ re { print $1 }'
+}
+
+# TERM each member, then KILL what is still there after 3s. Member by member, not `kill -- -pgid`,
+# so a shared compiler server in the group survives. Callers prove the group is ours first.
+signal_group() { # pgid
+  local i pids p
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -gt 1 ] && ! protected "$1" || return 0
+  for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    pids=""
+    for p in $(group_members "$1"); do
+      [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -gt 1 ] && ! protected "$p" && pids="$pids $p"
+    done
+    [ -n "$pids" ] || return 0
+    if [ "$i" = 15 ]; then kill -9 $pids 2>/dev/null
+    elif [ "$i" = 0 ]; then kill $pids 2>/dev/null
+    else sleep 0.2; fi
+  done
+}
+
+# The service leads its group, so the pid is the pgid. Ours when the group carries our tag, or, for
+# a stack started before tags, when that group is what listens on the service's port: the pid
+# file and the port agree. Anything else the file names is left alone, and said so.
+stop_pidfile() { # pidfile, [port]
+  local pid listener; pid="$(cat "$1" 2>/dev/null)"
   rm -f "$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 0
+  kill -0 -- "-$pid" 2>/dev/null || return 0
+  if our_group "$pid"; then signal_group "$pid"; return 0; fi
+  for listener in $( [ -n "${2:-}" ] && lsof -ti tcp:"$2" -sTCP:LISTEN 2>/dev/null); do
+    [ "$(ps -o pgid= -p "$listener" 2>/dev/null | tr -d ' ')" = "$pid" ] && { signal_group "$pid"; return 0; }
+  done
+  echo "ramify: left process group $pid alone — $1 names it, but nothing proves it is ours" >&2
+}
+
+# The group that listens on the port, when it is ours: the whole group, as killing only the listener
+# leaves `dotnet watch` alive, waiting to start it again. A listener that is not ours stays: after a
+# reboot another program can hold a port an old state file still names. LISTEN only: a proxy
+# connected to the port is not its owner.
+kill_port() { # port
+  local pid g
+  for pid in $(lsof -ti tcp:"$1" -sTCP:LISTEN 2>/dev/null); do
+    g="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$g" ] || continue
+    if our_group "$g"; then signal_group "$g"
+    else echo "ramify: left pid $pid alone on :$1 — it is not one of ours" >&2; fi
+  done
+}
+
+# `pgid worktree service` for every process group carrying a tag of this project. ps -E appends the
+# environment on macOS, `e` does on procps. The tag must start a word and match the namespace
+# literally: no regex, so a dot in a project name is a dot. macOS hides the environment of platform
+# binaries (/bin/bash, /usr/bin/python3), but every service runs node, dotnet or a brew python.
+tagged_groups() {
+  { ps -axwwE -o pgid=,command= 2>/dev/null || ps axeww -o pgid=,command=; } \
+    | awk -v pre="RAMIFY_TAG=$TAG_NS/" -v re="$BUILD_SERVER_RE" '$0 !~ re {
+        for (i = 2; i <= NF; i++) if (index($i, pre) == 1) {
+          n = split(substr($i, length(pre) + 1), t, "/")
+          if (n == 2 && t[1] ~ /^(@shared|[A-Za-z0-9._-]+)$/ && t[2] ~ /^[a-z_][a-z0-9_]*$/) print $1, t[1], t[2]
+        }
+      }' | sort -u
+}
+
+# Process groups of the project that no pid file names: a second `up` that overwrote the first one's
+# pid file, a worktree deleted from the Finder. A worktree whose `up` is still running is skipped.
+strays() { # [worktree]
+  local g wt s pidfile
+  while read -r g wt s; do
+    [ -z "${1:-}" ] || [ "$wt" = "$1" ] || continue
+    protected "$g" && continue
+    up_running "$wt" && continue
+    pidfile="$STATE_DIR/$wt.$s.pid"; [ "$wt" = @shared ] && pidfile="$STATE_DIR/shared/$s.pid"
+    [ "$(cat "$pidfile" 2>/dev/null)" = "$g" ] || echo "$g $wt $s"
+  done < <(tagged_groups)
+}
+
+# One `up` per worktree at a time. The Stop hook fires after every turn and an API can take minutes
+# to answer: without the lock a second `up` claims another slot and the first stack loses its pid
+# file, then runs on with nothing pointing at it.
+# The lock is a directory: `mkdir` creates or fails in one call. Its holder's pid is written just
+# after, so a lock without a pid counts as held for 30s. A pid that runs something other than
+# ramify is a reused pid: the lock is stale. A stale lock is renamed away first, so of two `up`s
+# that find it only one takes it over.
+up_lock() { echo "$STATE_DIR/$1.up.lock"; }
+up_running() { # worktree
+  local lock pid age; lock="$(up_lock "$1")"
+  [ -d "$lock" ] || return 1
+  pid="$(cat "$lock/pid" 2>/dev/null)"
+  if [ -z "$pid" ]; then
+    age=$(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0) ))
+    [ "$age" -lt 30 ]; return
+  fi
+  [ "$pid" != $$ ] && ps -o command= -p "$pid" 2>/dev/null | grep -q ramify
+}
+take_up_lock() {
+  local lock; lock="$(up_lock "$WORKTREE")"
+  if ! mkdir "$lock" 2>/dev/null; then
+    up_running "$WORKTREE" && { echo "$WORKTREE: an up is already running (pid $(cat "$lock/pid" 2>/dev/null)) — 'ramify card' shows how far it got"; exit 0; }
+    mv "$lock" "$lock.stale.$$" 2>/dev/null && rm -rf "$lock.stale.$$"
+    mkdir "$lock" 2>/dev/null || { echo "$WORKTREE: another up took the lock first"; exit 0; }
+  fi
+  echo $$ >"$lock/pid"
+  trap 'rm -rf "$(up_lock "$WORKTREE")"' EXIT
 }
 
 ensure_shared() { # service
@@ -257,7 +385,7 @@ ensure_shared() { # service
   fi
   printf '  %-15s starting shared instance from %s…\n' "$s" "$(basename "$PRIMARY")"
   start_service "$s" "$port" "$PRIMARY" "$STATE_DIR/shared/$s.pid" "$STATE_DIR/shared/$s.log" \
-    "$(sv "$s" shared_cmd)"
+    "$(sv "$s" shared_cmd)" "$(tag_of @shared "$s")"
   if wait_for "$(health_url "$s" "$port")" "$(sv "$s" timeout || true)"; then
     printf '  %-15s http://localhost:%s  (shared, ready)\n' "$s" "$port"
   else
@@ -276,12 +404,12 @@ smoke() { # service, port — prints the http code when it is not one the config
 
 up() {
   need_config
+  take_up_lock
   rm -f "$ERRORS"
   # Idempotent: a live stack is reported, not doubled. A second claim would orphan the first slot.
-  if [ -f "$STATE" ]; then
-    if ping; then tile "$WORKTREE" smoke; return 0; fi
-    kill_worktree "$WORKTREE" >/dev/null
-  fi
+  [ -f "$STATE" ] && ping && { tile "$WORKTREE" smoke; return 0; }
+  # Without state too: a stray of this worktree holds its ports and fights the new stack for them.
+  kill_worktree "$WORKTREE" >/dev/null
   echo "Stack for $WORKTREE ($(branch_of "$REPO_ROOT"))"
   ensure_containers
 
@@ -309,7 +437,7 @@ up() {
                kill_worktree "$WORKTREE" >/dev/null; exit 1; }
       fi
       start_service "$s" "$port" "$REPO_ROOT" "$STATE_DIR/$WORKTREE.$s.pid" "$STATE_DIR/$WORKTREE.$s.log" \
-        "$(sv "$s" cmd)"
+        "$(sv "$s" cmd)" "$(tag_of "$WORKTREE" "$s")"
       printf '%s_PORT=%s\n%s_SHARED=0\n' "$U" "$port" "$U" >>"$STATE"
       # Readiness is an answered request, not a started process. Optional services boot last and
       # nothing waits on them.
@@ -347,14 +475,21 @@ up() {
 # killing by port where a service was shared would tear down what every other worktree uses.
 kill_worktree() { # worktree
   local wt="$1" env="$STATE_DIR/$1.env" pidfile s U port
-  for pidfile in "$STATE_DIR/$wt".*.pid; do
+  for s in $RAMIFY_SERVICES; do
+    U="$(upper "$s")"; port=""
+    [ "$(envget "$env" "${U}_SHARED")" = 1 ] || port="$(envget "$env" "${U}_PORT")"
+    [ -f "$STATE_DIR/$wt.$s.pid" ] && stop_pidfile "$STATE_DIR/$wt.$s.pid" "$port"
+  done
+  for pidfile in "$STATE_DIR/$wt".*.pid; do   # services the config no longer lists
     [ -f "$pidfile" ] && stop_pidfile "$pidfile"
   done
+  # Groups of this worktree no pid file names any more.
+  tagged_groups | while read -r g w s; do [ "$w" = "$wt" ] && stop_group "$g"; done
   for s in $RAMIFY_SERVICES; do
     U="$(upper "$s")"
     [ "$(envget "$env" "${U}_SHARED")" = 1 ] && continue
     port="$(envget "$env" "${U}_PORT")"
-    [ -n "$port" ] && lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null
+    [ -n "$port" ] && kill_port "$port"
   done
   release_slot "$(envget "$env" SLOT)" "$wt"
   rm -f "$env"
@@ -373,9 +508,9 @@ shared_down() {
   for s in $RAMIFY_SERVICES; do
     has_shared "$s" || continue
     pidfile="$STATE_DIR/shared/$s.pid"
-    [ -f "$pidfile" ] && stop_pidfile "$pidfile"
     port="$(sv "$s" shared_port)"
-    lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null
+    [ -f "$pidfile" ] && stop_pidfile "$pidfile" "$port"
+    kill_port "$port"
     echo "shared $s :$port stopped — every worktree pointed at it now reaches nothing"
   done
 }
@@ -416,7 +551,7 @@ cleanup() {
       echo "  slot $slot        released — $holder left it claimed with nothing running"
     elif [ -n "$held" ] && [ "$held" != "$slot" ]; then
       # No pid file points at an orphan any more; the port is the only way in.
-      for port in $(slot_ports "$slot"); do lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null; done
+      for port in $(slot_ports "$slot"); do kill_port "$port"; done
       rm -f "$SLOTS/$slot"; found=1
       echo "  slot $slot        orphan of $holder killed — its state had moved to slot $held"
     elif [ -z "$(worktree_root "$holder")" ]; then
@@ -429,7 +564,7 @@ cleanup() {
     [ -n "$wt" ] || continue
     if [ -z "$(worktree_root "$wt")" ]; then
       kill_worktree "$wt" >/dev/null
-      rm -f "$STATE_DIR/$wt".*.log "$STATE_DIR/$wt".*.pid "$STATE_DIR/$wt.env" "$STATE_DIR/$wt.errors"
+      rm -rf "$STATE_DIR/$wt".*.log "$STATE_DIR/$wt".*.pid "$STATE_DIR/$wt.env" "$STATE_DIR/$wt.errors" "$STATE_DIR/$wt.up.lock"
       echo "  state          $wt removed — its worktree no longer exists"; found=1
     elif ! holds_a_slot "$wt" && stack_is_down "$wt"; then
       # Logs stay as the post-mortem; only state that lies about what runs goes.
@@ -443,6 +578,13 @@ cleanup() {
       [ "$removed" = 1 ] && { echo "  state          $wt cleared — its stack is not running any more"; found=1; }
     fi
   done < <(ls "$STATE_DIR" 2>/dev/null | sed -n -E 's/\.(env|[a-z0-9_]+(\.prepare)?\.(log|pid))$//p' | sort -u)
+
+  local g s
+  while read -r g wt s; do
+    [ -n "$g" ] || continue
+    stop_group "$g"; found=1
+    echo "  stray          $wt $s killed (process group $g) — no pid file pointed at it"
+  done < <(strays)
 
   close_merged_tickets && found=1
   [ "$found" = 0 ] && echo "nothing to clean — every claimed slot has a live stack behind it"
@@ -514,7 +656,7 @@ prune() { # [--apply]
 
 forget_worktree() { # worktree — stop its stack, drop its state and logs
   [ -n "$CONFIG" ] && kill_worktree "$1" >/dev/null
-  rm -f "$STATE_DIR/$1".*.log "$STATE_DIR/$1".*.pid "$STATE_DIR/$1.env" "$STATE_DIR/$1.errors"
+  rm -rf "$STATE_DIR/$1".*.log "$STATE_DIR/$1".*.pid "$STATE_DIR/$1.env" "$STATE_DIR/$1.errors" "$STATE_DIR/$1.up.lock"
 }
 
 # One worktree and its branch, merged or not. Says what is lost, then wants --yes or a yes.
@@ -762,10 +904,32 @@ projects() { # [all]
   done
 }
 
+# Compiler daemons outlive the build that started them, and every checkout of the machine shares
+# them: `kind count MB` per kind running. MSBuild nodes count only when reusable — a
+# `/nodeReuse:false` node dies with its build.
+build_servers() {
+  ps -axww -o rss=,command= | awk '
+    { k = "" }
+    /MSBuild[.]dll/ && /nodeReuse:true/ { k = "msbuild" }
+    /MSBuild[.]dll/ && /nodemode:8/     { k = "msbuild-server" }
+    /VBCSCompiler[.]dll/                { k = "roslyn" }
+    /rzc[.]dll/ && / server/            { k = "razor" }
+    k != "" { n[k]++; m[k] += $1 }
+    END { for (k in n) printf "%s %d %d\n", k, n[k], m[k] / 1024 }' | sort
+}
+
+build_servers_line() {
+  local k n mb line=""
+  while read -r k n mb; do line="$line$k ×$n ${mb} MB   "; done < <(build_servers)
+  if [ -n "$line" ]; then printf 'build servers  %s(dotnet build-server shutdown stops them)\n\n' "$line"
+  else printf 'build servers  none\n\n'; fi
+}
+
 dash() {
   local list n p
   list="$(projects)"; n="$(printf '%s' "$list" | grep -c .)"
   [ "$n" = 0 ] && { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; return 0; }
+  build_servers_line
   while read -r p; do
     [ "$n" -gt 1 ] && printf '━━ %s ━━\n' "$(basename "$p")"
     RAMIFY_ROOT="$p" "$SELF" dash-project
@@ -797,6 +961,10 @@ dash_project() {
     fi
     tile "$holder" && claimed=$((claimed + 1))
   done
+  local g wt sv_
+  while read -r g wt sv_; do
+    [ -n "$g" ] && printf 'STRAY  %s %s still runs (process group %s) with no pid file pointing at it (ramify cleanup)\n\n' "$wt" "$sv_" "$g"
+  done < <(strays)
   [ "$claimed" = 0 ] && echo "no stack running — 'ramify up' in a worktree starts one"
   return 0
 }
@@ -845,6 +1013,15 @@ dash_project_json() {
     printf '{"service":%s,"port":%s,"up":%s}' "$(js "$s")" "$port" \
       "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$port")" && echo true || echo false)"
   done
+  printf '],"build_servers":['
+  i=0; while read -r c port held; do
+    jsep "$i"; i=1; printf '{"kind":%s,"count":%s,"mb":%s}' "$(js "$c")" "$port" "$held"
+  done < <(build_servers)
+  printf '],"strays":['
+  i=0; while read -r c wt s; do
+    [ -n "$c" ] || continue
+    jsep "$i"; i=1; printf '{"pgid":%s,"worktree":%s,"service":%s}' "$c" "$(js "$wt")" "$(js "$s")"
+  done < <(strays)
   printf '],"orphans":['
   i=0; for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
     [ -f "$SLOTS/$slot" ] || continue

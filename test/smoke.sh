@@ -12,7 +12,7 @@ fails=0
 
 teardown() {
   for p in $(seq 17000 17010) $(seq 17100 17100) $(seq 17200 17210); do
-    lsof -ti:"$p" 2>/dev/null | xargs kill 2>/dev/null
+    lsof -ti tcp:"$p" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null
   done
   rm -rf "$T"
 }
@@ -101,6 +101,53 @@ check "up returns through a pipe"               bash -c "RAMIFY_ROOT='$WT' perl 
 check "new returns through a pipe"              bash -c "RAMIFY_AUTOSTART=1 RAMIFY_BOOTSTRAP='sleep 30' perl -e 'alarm 20; exec @ARGV' '$RAMIFY' new piped | cat"
 git worktree remove --force "$T/app-wt/piped" 2>/dev/null; git branch -D -q story/piped 2>/dev/null
 
+# ── the guard in front of every signal, checked without sending one ──
+guard() { # pgid → exit 0 when ramify would signal it
+  bash -c '
+    RAMIFY_PROJECT=app STATE_DIR="$RAMIFY_STATE_DIR/app"
+    eval "$(sed -n "/^TAG_NS=/,/^}/p; /^BUILD_SERVER_RE=/p; /^tagged_groups() {/,/^}/p" "$1")"
+    our_group "$2"' _ "$RAMIFY" "$1"
+}
+WEB_PGID="$(cat "$RAMIFY_STATE_DIR/app/feat.web.pid")"
+check "the guard accepts a tagged service group" guard "$WEB_PGID"
+refuses() { ! guard "$1"; }
+for g in 1 0 -1 '' abc "$(ps -o pgid= -p $$ | tr -d ' ')" "$(ps -o pgid= -p "$PPID" | tr -d ' ')"; do
+  check "the guard refuses pgid '$g'"           refuses "$g"
+done
+refuses_elsewhere() { RAMIFY_STATE_DIR=/elsewhere refuses "$1"; }
+check "another state dir's tag is not ours"     refuses_elsewhere "$WEB_PGID"
+
+# ── strays: a group no pid file names is found by the tag in its environment ──
+# What a second `up` overwriting the pid file leaves behind: a pid that names nothing. NEVER a
+# low pid such as 1 — `kill -- -1` is every process of the user.
+true & DEAD=$!; wait "$DEAD"
+echo "$DEAD" >"$RAMIFY_STATE_DIR/app/feat.web.pid"
+check "dash --json lists the stray"             bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; s=json.load(sys.stdin)[0][\"strays\"]; assert [(x[\"worktree\"], x[\"service\"]) for x in s] == [(\"feat\", \"web\")], s'"
+check "dash names the stray"                    bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -q '^STRAY  feat web'"
+"$RAMIFY" cleanup >"$T/cleanup-stray.log" 2>&1
+check "cleanup kills the stray"                 bash -c "! curl -sf -o /dev/null --max-time 2 http://localhost:17201/ && grep -q 'stray .*feat web' '$T/cleanup-stray.log'"
+check "cleanup kills the stray's children"      bash -c "! pgrep -f 'sleep [9]17201'"
+check "cleanup keeps the shared api"            answers 17100
+check "dash --json carries the build servers"   bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)[0][\"build_servers\"], list)'"
+check "dash draws the build servers line"       bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -q '^build servers'"
+
+# ── one up per worktree: a live lock turns the second one away, a dead one does not ──
+LOCK="$RAMIFY_STATE_DIR/app/feat.up.lock"
+bash -c 'sleep 60; :' ramify-up-stand-in & LOCKER=$!   # a live holder whose command names ramify
+mkdir "$LOCK"; echo "$LOCKER" >"$LOCK/pid"
+check "a second up leaves the first one alone"  bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' up | grep -q 'already running' && ! curl -sf -o /dev/null --max-time 2 http://localhost:17201/"
+kill "$LOCKER" 2>/dev/null; wait "$LOCKER" 2>/dev/null
+sleep 60 & REUSED=$!                                    # a pid the system gave to another program
+echo "$REUSED" >"$LOCK/pid"
+check "a lock whose pid runs something else is stale" bash -c "! RAMIFY_ROOT='$WT' '$RAMIFY' up | grep -q 'already running'"
+kill "$REUSED" 2>/dev/null; wait "$REUSED" 2>/dev/null
+RAMIFY_ROOT="$WT" "$RAMIFY" down >/dev/null 2>&1
+mkdir -p "$LOCK"; echo "$LOCKER" >"$LOCK/pid"           # its holder is dead now
+RAMIFY_ROOT="$WT" "$RAMIFY" up >/dev/null 2>&1
+check "a dead lock does not block up"           answers 17201
+check "up drops its lock on the way out"        test ! -e "$RAMIFY_STATE_DIR/app/feat.up.lock"
+check "up after a stray keeps slot 1"           grep -qx SLOT=1 "$ENV1"
+
 # ── a service that never answers: up records why, the JSON carries it, down clears it ──
 "$RAMIFY" new broken >/dev/null 2>&1
 WT3="$T/app-wt/broken"
@@ -124,12 +171,31 @@ check "a _when service starts once a match changes" grep -q '^WEB_PORT=' "$RAMIF
 RAMIFY_ROOT="$WT4" "$RAMIFY" down >/dev/null 2>&1
 git worktree remove --force "$WT4"; git branch -D -q story/lean
 
+# ── a compiler server a build starts inside a service is shared: down spares it, it is no stray ──
+"$RAMIFY" new comp >/dev/null 2>&1
+WT5="$T/app-wt/comp"
+printf '%s\n' "web_cmd='python3 -c \"import time; time.sleep(120)\" VBCSCompiler.dll & echo \$! >\"$T/compiler.pid\"; exec python3 -m http.server \$PORT'" >>"$WT5/.ramify.conf"
+RAMIFY_ROOT="$WT5" "$RAMIFY" up >/dev/null 2>&1
+COMP="$(cat "$T/compiler.pid" 2>/dev/null)"
+check "the stand-in compiler shares the service's group" bash -c "[ \"\$(ps -o pgid= -p '$COMP' | tr -d ' ')\" = \"\$(cat '$RAMIFY_STATE_DIR/app/comp.web.pid')\" ]"
+RAMIFY_ROOT="$WT5" "$RAMIFY" down >/dev/null 2>&1
+check "down stops the service"                  bash -c "! curl -sf -o /dev/null --max-time 2 http://localhost:17203/"
+check "down spares the compiler server"         kill -0 "$COMP"
+check "a compiler server is never a stray"      bash -c "RAMIFY_ROOT='$WT5' '$RAMIFY' dash --json | python3 -c 'import json,sys; assert json.load(sys.stdin)[0][\"strays\"] == []'"
+[[ "$COMP" =~ ^[0-9]+$ ]] && [ "$COMP" -gt 1 ] && kill "$COMP" 2>/dev/null
+git worktree remove --force "$WT5"; git branch -D -q story/comp
+
 # ── status line: the pinned worktree and its branch, nothing outside ramify ──
 mkdir -p "$RAMIFY_STATE_DIR/sessions"; printf '%s\n' "$WT" >"$RAMIFY_STATE_DIR/sessions/sl.root"
 check "statusline follows the session's pin"     bash -c "[ \"\$(printf '{\"session_id\":\"sl\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 feat ⎇ story/feat · 2/2 up' ]"
 check "statusline shows the primary's branch"    bash -c "[ \"\$(printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 main' ]"
 check "statusline is silent outside ramify"      bash -c "[ -z \"\$(printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$other\"}}' | '$RAMIFY' statusline)\" ]"
 rm -f "$RAMIFY_STATE_DIR/sessions/sl.root"
+
+# ── a stack from before tags: no tag, but its pid file and its port agree, so down stops it ──
+perl -e 'setpgrp(0, 0); exec @ARGV' python3 -m http.server 17208 >/dev/null 2>&1 & LEGACY=$!
+printf 'API_PORT=17208\nAPI_SHARED=0\n' >>"$ENV1"; echo "$LEGACY" >"$RAMIFY_STATE_DIR/app/feat.api.pid"
+sleep 1
 
 # ── down leaves shared things alone ──
 RAMIFY_ROOT="$WT" "$RAMIFY" down >/dev/null 2>&1
@@ -139,14 +205,21 @@ check "down stops the web's grandchildren"      bash -c "! pgrep -f 'sleep [9]17
 check "down keeps the shared api"               answers 17100
 check "down releases the slot"                  test ! -f "$RAMIFY_STATE_DIR/app/slots/1"
 check "ping fails once down"                    bash -c "! RAMIFY_ROOT='$WT' '$RAMIFY' ping"
+check "down stops an untagged stack its pid file and port agree on" bash -c "! curl -sf -o /dev/null --max-time 2 http://localhost:17208/"
 
 # ── cleanup: a worktree deleted under a running stack ──
+# An unrelated program now holds a port that a dead worktree's state still names: not ours.
+perl -e 'setpgrp(0, 0); exec @ARGV' python3 -m http.server 17207 >/dev/null 2>&1 & OTHER=$!
+printf 'WEB_PORT=17207\nWEB_SHARED=0\n' >"$RAMIFY_STATE_DIR/app/ghost.env"
+sleep 1
 git worktree remove --force "$WT2"
 "$RAMIFY" cleanup >"$T/cleanup.log" 2>&1
 sleep 1
 check "cleanup stops the deleted tree's api"    bash -c "! curl -sf -o /dev/null --max-time 2 http://localhost:17002/"
 check "cleanup releases its slot"               test ! -f "$RAMIFY_STATE_DIR/app/slots/2"
 check "cleanup keeps the shared api"            answers 17100
+check "cleanup leaves a listener that is not ours" bash -c "curl -sf -o /dev/null --max-time 2 http://localhost:17207/ && grep -q 'left pid .* alone on :17207' '$T/cleanup.log'"
+kill "$OTHER" 2>/dev/null; wait "$OTHER" 2>/dev/null
 "$RAMIFY" shared-down >/dev/null 2>&1
 
 # ── prune: a merged branch (GitHub merge commit) ──
