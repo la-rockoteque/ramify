@@ -4,7 +4,7 @@
 # Usage:  ramify setup [--print | --force] [--local] | config [-q | get VAR]
 #         ramify new <slug> | label [slug]
 #         ramify up | down | ping | card | dash [--json] | watch [seconds] | status | shared-down
-#         ramify cleanup | prune [--apply] | delete <worktree> [--yes] | complete <worktree> [--yes]
+#         ramify cleanup | prune [--all] [--apply] | delete <worktree> [--yes] | complete <worktree> [--yes]
 #         ramify jira login | check | statusline [--json] | app
 #         ramify write-set <file> | write-set --self-test
 #
@@ -31,8 +31,9 @@ REPO_ROOT="${RAMIFY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
 # Claude config, not in /tmp: the app lists a repo whose stacks are all down, and a reboot
 # empties /tmp.
 REGISTRY="${RAMIFY_REGISTRY:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ramify/projects}"
-# The dashboard is machine-wide, so it runs from anywhere: outside a checkout, borrow any project.
-case "${1:-}" in dash|watch)
+# The dashboard and `prune --all` are machine-wide, so they run from anywhere: outside a checkout,
+# borrow any project.
+case "${1:-} ${*:2}" in dash\ *|watch\ *|prune\ *--all*)
   [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cat "$REGISTRY" "${RAMIFY_STATE_DIR:-/tmp/ramify}"/*/primary 2>/dev/null \
     | while read -r p; do [ -d "$p" ] && { echo "$p"; break; }; done)"
   [ -n "$REPO_ROOT" ] || { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; exit 0; } ;;
@@ -654,6 +655,17 @@ prune() { # [--apply]
   else echo "$n to prune, $kept kept — 'ramify prune --apply' does it"; fi
 }
 
+# `prune` in every configured project on the machine, branching-only ones too.
+prune_all() { # [--apply]
+  local p
+  while read -r p; do
+    printf '━━ %s ━━\n' "$(basename "$p")"
+    RAMIFY_ROOT="$p" "$SELF" prune ${1:+"$1"}
+    echo
+  done < <(projects all)
+  [ -n "${1:-}" ] || echo "dry run — 'ramify prune --all --apply' does it"
+}
+
 forget_worktree() { # worktree — stop its stack, drop its state and logs
   [ -n "$CONFIG" ] && kill_worktree "$1" >/dev/null
   rm -rf "$STATE_DIR/$1".*.log "$STATE_DIR/$1".*.pid "$STATE_DIR/$1.env" "$STATE_DIR/$1.errors" "$STATE_DIR/$1.up.lock"
@@ -1175,7 +1187,9 @@ case "${1:-}" in
   watch) watch_dash "${2:-2}" ;;
   status) status ;;
   cleanup) cleanup ;;
-  prune) prune "${2:-}" ;;
+  prune)
+    case " ${*:2} " in *" --all "*) prune_all "$(case " ${*:2} " in *" --apply "*) echo --apply ;; esac)" ;;
+      *) prune "${2:-}" ;; esac ;;
   delete) force_delete "${2:-}" "${3:-}" ;;
   complete) complete_tree "${2:-}" "${3:-}" ;;
   jira)

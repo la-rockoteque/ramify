@@ -228,6 +228,7 @@ git merge -q --no-ff story/feat -m "Merge pull request #1 from someone/story/fea
 git push -q origin main 2>/dev/null
 check "prune dry run lists the merged branch"   bash -c "'$RAMIFY' prune | grep -q 'prune  story/feat'"
 check "prune dry run deletes nothing"           test -d "$WT"
+check "prune --all runs from anywhere, every repo" bash -c "cd / && env -u RAMIFY_ROOT '$RAMIFY' prune --all | grep -q 'prune  story/feat' && cd / && env -u RAMIFY_ROOT '$RAMIFY' prune --all | grep -q '━━ plain ━━'"
 "$RAMIFY" prune --apply >/dev/null 2>&1
 check "a repo with nothing running stays listed" bash -c "rm -rf '$RAMIFY_STATE_DIR'/*/primary; cd / && env -u RAMIFY_ROOT '$RAMIFY' dash --json | grep -qF '\"primary\":\"$T/app\"'"
 check "prune --apply removes worktree + branch" bash -c "[ ! -d '$WT' ] && ! git show-ref -q refs/heads/story/feat"
