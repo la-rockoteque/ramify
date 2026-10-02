@@ -70,8 +70,8 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `ping` | Exit 0 when every service of this worktree answers |
 | `card` / `dash [--json]` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
 | `app` | Open the desktop dashboard, see [The app](#the-app) |
-| `cleanup` | Release crashed claims, kill orphans, stop stacks of deleted worktrees, close the tickets of merged branches |
-| `prune [--apply]` | Delete merged local branches and their worktrees, and close their tickets |
+| `cleanup` | Release crashed claims, kill orphans and strays, stop stacks of deleted worktrees, close the tickets of merged branches |
+| `prune [--all] [--apply]` | Delete merged local branches and their worktrees, and close their tickets. `--all` does it in every project on the machine |
 | `complete <worktree> [--yes]` | Close its ticket, stop its stack, remove the worktree and its local branch |
 | `jira login` / `jira check` | Store a Jira API token in the Keychain, or test it |
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |
@@ -117,7 +117,30 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |
 | `RAMIFY_TICKET_PATTERN` / `RAMIFY_JIRA_DONE` | `[A-Za-z][A-Za-z0-9]*-[0-9]+` / none | The key in a branch name; the done transition to pick when there are several |
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
-| `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `3` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
+| `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `5` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
+
+### Processes
+
+Each service leads its own process group. Its environment carries
+`RAMIFY_TAG=<project>@<hash>/<worktree>/<service>`, and every child inherits it. The hash comes
+from the state directory, so two repos with the same name stay apart. A shared instance has
+`@shared` as its worktree. ramify signals a group only when a member carries a tag of the
+project. A stack started before tags is also stopped when its pid file names the group that
+listens on its port. ramify leaves any other process alone and says so: a reboot keeps `/tmp`,
+and the system gives old pids and ports to new programs.
+
+- `down` stops every tagged group of the worktree, also the groups that no pid file names.
+- A **stray** is a tagged group that no pid file names. A worktree deleted from the Finder
+  leaves strays. So does an `up` that overwrote the pid file of an older one. `dash` and the
+  app list strays, and `cleanup` stops them.
+- Only one `up` runs per worktree at a time. A second one sees the lock and exits. The Stop
+  hook fires after every turn, and without the lock it starts a second stack beside a slow API.
+- **Build servers** (reusable MSBuild nodes, the Roslyn `VBCSCompiler`, the MSBuild and Razor
+  servers) serve every checkout on the machine and outlive the build. One that a service's build
+  starts joins the service's group and inherits its tag. ramify still never signals it: it
+  stops a group member by member and leaves build servers out. They exit on their own when idle,
+  Roslyn after 10 minutes and MSBuild nodes after 15. `dash` and the app show their count and
+  memory. `dotnet build-server shutdown` stops them.
 
 ### Tickets
 
@@ -190,7 +213,7 @@ any more, drops out of the list; delete its line to forget it for good.
 ## Test
 
 ```bash
-test/smoke.sh                 # new, up, shared/private, dash --json, down, cleanup, prune, write-set, hooks, setup
+test/smoke.sh                 # new, up, shared/private, dash --json, strays, up lock, down, cleanup, prune, write-set, hooks, setup
 ramify write-set --self-test
 ```
 
