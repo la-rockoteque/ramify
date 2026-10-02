@@ -82,6 +82,10 @@ check "second tree gets slot 2"                 grep -qx SLOT=2 "$ENV2"
 check "changed api is private"                  grep -qx API_SHARED=0 "$ENV2"
 check "private api answers on slot port"        answers 17002
 check "dash draws both tiles"                   bash -c "[ \$(RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -c '^┌') = 2 ]"
+check "dash is plain through a pipe"            bash -c "! RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -q \$'\\e'"
+check "dash paints ready green on a terminal"    bash -c "RAMIFY_ROOT='$WT' RAMIFY_COLOR=1 '$RAMIFY' dash | grep -q \$'\\e\\[32mready'"
+check "dash borders take the project colour"     bash -c "RAMIFY_ROOT='$WT' RAMIFY_COLOR=1 '$RAMIFY' dash | grep -qE \$'^\\e\\[(3[3-6]|9[3-6])m┌'"
+check "NO_COLOR wins"                            bash -c "! RAMIFY_ROOT='$WT' NO_COLOR=1 RAMIFY_COLOR=1 '$RAMIFY' dash | grep -q \$'\\e'"
 check "dash --json lists both running stacks"   bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; p=json.load(sys.stdin)[0]; assert sorted(w[\"slot\"] for w in p[\"worktrees\"] if w[\"slot\"]) == [1, 2]; assert p[\"shared\"][0][\"up\"] is True'"
 
 other="$T/other"; git init -q "$other"

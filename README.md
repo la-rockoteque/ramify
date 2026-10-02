@@ -81,6 +81,10 @@ ramify prune --apply       # remove merged branches and their worktrees
 
 `RAMIFY_ROOT=<path>` points any command at another worktree.
 
+On a terminal, `card`, `dash` and `watch` draw each project's tiles in a colour of its own, taken
+from its name. A state is green when ready or up, yellow when starting and red when down.
+`NO_COLOR` turns colour off. Output through a pipe and `--json` stay plain.
+
 ### The config
 
 `.ramify.conf` is sourced bash. Single-quote the commands so `$PORT` expands when the service

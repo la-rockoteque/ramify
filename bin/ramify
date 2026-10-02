@@ -866,8 +866,28 @@ ping() {
 
 BOX_W=64
 BOX_LINE="$(printf '─%.0s' $(seq 1 $((BOX_W + 2))))"
-row() { printf '│ %s%*s │\n' "$1" $((BOX_W - ${#1})) ''; }
-row2() { printf '│ %s%*s %s │\n' "$1" $((BOX_W - ${#1} - ${#2} - 1)) '' "$2"; }
+
+# Colour on a terminal only, never under NO_COLOR. `watch` reads the dash through a pipe and sets
+# RAMIFY_COLOR=1 when it draws on a terminal itself.
+color_on() { [ -z "${NO_COLOR:-}" ] && { [ "${RAMIFY_COLOR:-}" = 1 ] || [ -t 1 ]; }; }
+if color_on; then
+  RC=$'\e[0m'
+  # One border colour per project, from its name. No red or green: they mean down and ready.
+  BC=$'\e['"$(printf '%s' "$RAMIFY_PROJECT" | cksum | awk '{ split("34 35 36 33 94 95 96 93", c, " "); print c[$1 % 8 + 1] }')m"
+else
+  RC='' BC=''
+fi
+state_color() { # state word → its colour
+  [ -n "$RC" ] || return 0
+  case "$1" in ready|up) printf '\e[32m' ;; down|DOWN|'not running') printf '\e[31m' ;; starting) printf '\e[33m' ;; esac
+}
+paint() { local c; c="$(state_color "$1")"; printf '%s%s%s' "$c" "$1" "${c:+$RC}"; } # a state word, coloured
+
+row() { printf '%s│%s %s%*s %s│%s\n' "$BC" "$RC" "$1" $((BOX_W - ${#1})) '' "$BC" "$RC"; }
+row2() { # left, right — the right one coloured when it is a state
+  printf '%s│%s %s%*s %s %s│%s\n' "$BC" "$RC" "$1" $((BOX_W - ${#1} - ${#2} - 1)) '' "$(paint "$2")" "$BC" "$RC"
+}
+box() { printf '%s%s%s%s%s\n' "$BC" "$1" "$BOX_LINE" "$2" "$RC"; } # left corner, right corner
 
 # Bound but not answering is "starting": a build holds its port a while before it serves.
 probe() { # service, port
@@ -889,10 +909,10 @@ tile() { # worktree, [smoke]
   root="$(worktree_root "$wt")"
   branch="$(branch_of "${root:-$REPO_ROOT}")"
   [ -n "$(git -C "${root:-$REPO_ROOT}" status --porcelain 2>/dev/null)" ] && branch="$branch *"
-  printf '┌%s┐\n' "$BOX_LINE"
+  box ┌ ┐
   row2 "$wt" "slot $(envget "$env" SLOT)"
   row2 "$branch" "up $(uptime_of "$env")"
-  printf '├%s┤\n' "$BOX_LINE"
+  box ├ ┤
   for s in $RAMIFY_SERVICES; do
     U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
     kind="$s"; has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind="$s shared" || kind="$s private"; }
@@ -901,7 +921,7 @@ tile() { # worktree, [smoke]
       row "$(printf '%-12s %s' '  smoke' "$out")"
     fi
   done
-  printf '└%s┘\n' "$BOX_LINE"
+  box └ ┘
 }
 
 # Primary checkouts of every configured project, one per line: the ones that run QA stacks, or
@@ -941,24 +961,25 @@ dash() {
   local list n p
   list="$(projects)"; n="$(printf '%s' "$list" | grep -c .)"
   [ "$n" = 0 ] && { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; return 0; }
+  color_on && export RAMIFY_COLOR=1   # the projects draw through `$SELF`, which has its own stdout check
   build_servers_line
   while read -r p; do
-    [ "$n" -gt 1 ] && printf '━━ %s ━━\n' "$(basename "$p")"
-    RAMIFY_ROOT="$p" "$SELF" dash-project
+    RAMIFY_ROOT="$p" "$SELF" dash-project "$([ "$n" -gt 1 ] && echo --header)"
     [ "$n" -gt 1 ] && echo
   done <<<"$list"
   return 0
 }
 
-dash_project() {
+dash_project() { # [--header]
   need_config
   local c s claimed=0 slot holder held line=""
+  [ "${1:-}" = --header ] && printf '%s━━ %s ━━%s\n' "$BC" "$(basename "$PRIMARY")" "$RC"
   for c in $RAMIFY_CONTAINERS; do
-    line="$line$c $(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo up || echo DOWN)   "
+    line="$line$c $(paint "$(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo up || echo DOWN)")   "
   done
   for s in $RAMIFY_SERVICES; do
     has_shared "$s" || continue
-    line="${line}shared $s :$(sv "$s" shared_port) $(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')   "
+    line="${line}shared $s :$(sv "$s" shared_port) $(paint "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')")   "
   done
   [ -n "$line" ] && printf '%s\n\n' "$line"
   for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
@@ -1143,7 +1164,7 @@ watch_dash() {
   [ -t 0 ] && hint='m = menu · ctrl-c to stop'
   trap 'printf "\n"; exit 0' INT TERM
   while :; do
-    now="$(dash 2>&1)"
+    now="$(RAMIFY_COLOR="$(color_on && echo 1)" dash 2>&1)"
     if [ "$now" != "$prev" ]; then
       clear_screen
       printf '%s\nwatching every %ss — %s   (last change %s)\n' "$now" "$interval" "$hint" "$(date +%H:%M:%S)"
@@ -1182,7 +1203,7 @@ case "${1:-}" in
   ping) ping ;;
   card) need_config; tile "$WORKTREE" smoke ;;
   dash) [ "${2:-}" = --json ] && dash_json || dash ;;
-  dash-project) [ "${2:-}" = --json ] && dash_project_json || dash_project ;;
+  dash-project) [ "${2:-}" = --json ] && dash_project_json || dash_project "${2:-}" ;;
   menu) need_config any; menu ;;
   watch) watch_dash "${2:-2}" ;;
   status) status ;;
