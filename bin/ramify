@@ -871,23 +871,28 @@ BOX_LINE="$(printf '─%.0s' $(seq 1 $((BOX_W + 2))))"
 # RAMIFY_COLOR=1 when it draws on a terminal itself.
 color_on() { [ -z "${NO_COLOR:-}" ] && { [ "${RAMIFY_COLOR:-}" = 1 ] || [ -t 1 ]; }; }
 if color_on; then
-  RC=$'\e[0m'
+  RC=$'\e[0m' END=$'\e[0m'
   # One border colour per project, from its name. No red or green: they mean down and ready.
   BC=$'\e['"$(printf '%s' "$RAMIFY_PROJECT" | cksum | awk '{ split("34 35 36 33 94 95 96 93", c, " "); print c[$1 % 8 + 1] }')m"
 else
-  RC='' BC=''
+  RC='' BC='' END=''
 fi
+# One colour per shared service, from its name, so a shared instance and the tiles that use it
+# match. 256-colour, apart from the project borders.
+svc_color() { [ -n "$RC" ] || return 0; printf '\e[38;5;%sm' "$(printf '%s' "$1" | cksum | awk '{ split("208 213 141 117 222 180 75 177", c, " "); print c[$1 % 8 + 1] }')"; }
 state_color() { # state word → its colour
   [ -n "$RC" ] || return 0
   case "$1" in ready|up) printf '\e[32m' ;; down|DOWN|'not running') printf '\e[31m' ;; starting) printf '\e[33m' ;; esac
 }
 paint() { local c; c="$(state_color "$1")"; printf '%s%s%s' "$c" "$1" "${c:+$RC}"; } # a state word, coloured
 
-row() { printf '%s│%s %s%*s %s│%s\n' "$BC" "$RC" "$1" $((BOX_W - ${#1})) '' "$BC" "$RC"; }
-row2() { # left, right — the right one coloured when it is a state
-  printf '%s│%s %s%*s %s %s│%s\n' "$BC" "$RC" "$1" $((BOX_W - ${#1} - ${#2} - 1)) '' "$(paint "$2")" "$BC" "$RC"
+# RC ends a coloured word and END a line: they differ inside a main card, where RC goes back to its fill.
+row() { printf '%s│%s %s%*s %s│%s\n' "$BC" "$RC" "$1" $((BOX_W - ${#1})) '' "$BC" "$END"; }
+row2() { # left, right, [left colour] — the right one coloured when it is a state
+  printf '%s│%s %s%s%s%*s %s %s│%s\n' "$BC" "$RC" "${3:-}" "$1" "${3:+$RC}" $((BOX_W - ${#1} - ${#2} - 1)) '' \
+    "$(paint "$2")" "$BC" "$END"
 }
-box() { printf '%s%s%s%s%s\n' "$BC" "$1" "$BOX_LINE" "$2" "$RC"; } # left corner, right corner
+box() { printf '%s%s%s%s%s\n' "$BC" "$1" "$BOX_LINE" "$2" "$END"; } # left corner, right corner
 
 # Bound but not answering is "starting": a build holds its port a while before it serves.
 probe() { # service, port
@@ -904,10 +909,12 @@ uptime_of() { # file
 }
 
 tile() { # worktree, [smoke]
-  local wt="$1" env="$STATE_DIR/$1.env" root branch s U port kind out
+  local wt="$1" env="$STATE_DIR/$1.env" root branch s U port kind kc out RC="$RC" BC="$BC"
   [ -f "$env" ] || { echo "no stack for $wt — run 'ramify up'"; return 1; }
   root="$(worktree_root "$wt")"
   branch="$(branch_of "${root:-$REPO_ROOT}")"
+  # The main branch's card is filled with the project colour, to find it at a glance.
+  [ -n "$RC" ] && [ "$branch" = "$RAMIFY_MAIN" ] && { BC="$BC"$'\e[7m'; RC="$END$BC"; }
   [ -n "$(git -C "${root:-$REPO_ROOT}" status --porcelain 2>/dev/null)" ] && branch="$branch *"
   box ┌ ┐
   row2 "$wt" "slot $(envget "$env" SLOT)"
@@ -915,8 +922,9 @@ tile() { # worktree, [smoke]
   box ├ ┤
   for s in $RAMIFY_SERVICES; do
     U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
-    kind="$s"; has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind="$s shared" || kind="$s private"; }
-    row2 "$(printf '%-12s %s' "$kind" "http://localhost:$port")" "$(probe "$s" "$port")"
+    kind="$s" kc=''
+    has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind="$s shared" kc="$(svc_color "$s")" || kind="$s private"; }
+    row2 "$(printf '%-12s %s' "$kind" "http://localhost:$port")" "$(probe "$s" "$port")" "$kc"
     if [ "${2:-}" = smoke ] && ! out="$(smoke "$s" "$port")"; then
       row "$(printf '%-12s %s' '  smoke' "$out")"
     fi
@@ -979,7 +987,8 @@ dash_project() { # [--header]
   done
   for s in $RAMIFY_SERVICES; do
     has_shared "$s" || continue
-    line="${line}shared $s :$(sv "$s" shared_port) $(paint "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')")   "
+    c="$(svc_color "$s")"
+    line="${line}$c""shared $s :$(sv "$s" shared_port)${c:+$RC} $(paint "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')")   "
   done
   [ -n "$line" ] && printf '%s\n\n' "$line"
   for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
@@ -1160,11 +1169,13 @@ menu() {
 
 # Redraws only when the rendered text changes: the text is the change detection.
 watch_dash() {
-  local interval="${1:-2}" prev='' now key hint='ctrl-c to stop'
+  local interval="${1:-2}" prev='' now key hint='ctrl-c to stop' color=''
   [ -t 0 ] && hint='m = menu · ctrl-c to stop'
+  # Asked here, not inside the $(…) below: there stdout is a pipe and the answer always no.
+  color_on && color=1
   trap 'printf "\n"; exit 0' INT TERM
   while :; do
-    now="$(RAMIFY_COLOR="$(color_on && echo 1)" dash 2>&1)"
+    now="$(RAMIFY_COLOR="$color" dash 2>&1)"
     if [ "$now" != "$prev" ]; then
       clear_screen
       printf '%s\nwatching every %ss — %s   (last change %s)\n' "$now" "$interval" "$hint" "$(date +%H:%M:%S)"
