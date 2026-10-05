@@ -83,6 +83,8 @@ ramify prune --apply       # remove merged branches and their worktrees
 
 On a terminal, `card`, `dash` and `watch` draw each project's tiles in a colour of its own, taken
 from its name. A state is green when ready or up, yellow when starting and red when down.
+The card of the main branch is filled with the project colour. Each shared service has a colour of
+its own: the shared instance and every tile that uses it show in that colour.
 `NO_COLOR` turns colour off. Output through a pipe and `--json` stay plain.
 
 ### The config
