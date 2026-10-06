@@ -650,6 +650,19 @@ prune() { # [--apply]
     # work is merged; it is said, and the ticket stays for a human.
     [ -n "$key" ] && { jira close "$key" 2>&1 | sed 's/^jira: //; s/^/         /'; }
   done < <(git -C "$PRIMARY" for-each-ref --format='%(refname:short)' refs/heads)
+  # A detached tree has no branch for the loop above to find. Its HEAD in main means nothing is lost.
+  while read -r path; do
+    [ -d "$path" ] && [ "$path" != "$PRIMARY" ] && [ "$path" != "$here" ] || continue
+    git -C "$PRIMARY" merge-base --is-ancestor "$(git -C "$path" rev-parse HEAD)" "$RAMIFY_REMOTE/$RAMIFY_MAIN" || continue
+    if [ -n "$(git -C "$path" status --porcelain)" ]; then
+      printf '  keep   %-45s has uncommitted changes\n' "$(basename "$path") (detached)"; kept=$((kept + 1)); continue
+    fi
+    printf '  prune  %-45s detached, HEAD in main\n' "$(basename "$path") (detached)"
+    n=$((n + 1))
+    [ "$apply" = --apply ] || continue
+    git -C "$PRIMARY" worktree remove "$path" || { echo "    worktree remove failed — stack kept"; continue; }
+    forget_worktree "$(basename "$path")"
+  done < <(git -C "$PRIMARY" worktree list --porcelain | awk '/^worktree /{p=$2} $0=="detached"{print p}')
   if [ "$n" = 0 ]; then echo "nothing merged to prune"
   elif [ "$apply" = --apply ]; then echo "$n pruned, $kept kept"
   else echo "$n to prune, $kept kept — 'ramify prune --apply' does it"; fi
