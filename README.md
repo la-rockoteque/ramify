@@ -31,7 +31,7 @@ In Claude Code:
 A teammate installs from the remote instead:
 
 ```
-/plugin marketplace add git@git.nexapptech.com:vbernier/ramify.git
+/plugin marketplace add https://github.com/la-rockoteque/ramify.git
 /plugin install ramify@ramify
 ```
 
