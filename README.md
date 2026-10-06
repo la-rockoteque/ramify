@@ -71,7 +71,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `card` / `dash [--json]` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
 | `app` | Open the desktop dashboard, see [The app](#the-app) |
 | `cleanup` | Release crashed claims, kill orphans and strays, stop stacks of deleted worktrees, close the tickets of merged branches |
-| `prune [--all] [--apply]` | Delete merged local branches and their worktrees, and close their tickets. `--all` does it in every project on the machine |
+| `prune [--all] [--apply]` | Delete merged local branches and their worktrees, detached trees already in main, and close their tickets. `--all` does it in every project on the machine. Then Docker, once: it shows disk use and removes stopped non-compose containers, unused images and build cache. Volumes and compose containers stay |
 | `complete <worktree> [--yes]` | Close its ticket, stop its stack, remove the worktree and its local branch |
 | `jira login` / `jira check` | Store a Jira API token in the Keychain, or test it |
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |

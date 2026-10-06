@@ -650,6 +650,19 @@ prune() { # [--apply]
     # work is merged; it is said, and the ticket stays for a human.
     [ -n "$key" ] && { jira close "$key" 2>&1 | sed 's/^jira: //; s/^/         /'; }
   done < <(git -C "$PRIMARY" for-each-ref --format='%(refname:short)' refs/heads)
+  # A detached tree has no branch for the loop above to find. Its HEAD in main means nothing is lost.
+  while read -r path; do
+    [ -d "$path" ] && [ "$path" != "$PRIMARY" ] && [ "$path" != "$here" ] || continue
+    git -C "$PRIMARY" merge-base --is-ancestor "$(git -C "$path" rev-parse HEAD)" "$RAMIFY_REMOTE/$RAMIFY_MAIN" || continue
+    if [ -n "$(git -C "$path" status --porcelain)" ]; then
+      printf '  keep   %-45s has uncommitted changes\n' "$(basename "$path") (detached)"; kept=$((kept + 1)); continue
+    fi
+    printf '  prune  %-45s detached, HEAD in main\n' "$(basename "$path") (detached)"
+    n=$((n + 1))
+    [ "$apply" = --apply ] || continue
+    git -C "$PRIMARY" worktree remove "$path" || { echo "    worktree remove failed — stack kept"; continue; }
+    forget_worktree "$(basename "$path")"
+  done < <(git -C "$PRIMARY" worktree list --porcelain | awk '/^worktree /{p=$2} $0=="detached"{print p}')
   if [ "$n" = 0 ]; then echo "nothing merged to prune"
   elif [ "$apply" = --apply ]; then echo "$n pruned, $kept kept"
   else echo "$n to prune, $kept kept — 'ramify prune --apply' does it"; fi
@@ -660,10 +673,27 @@ prune_all() { # [--apply]
   local p
   while read -r p; do
     printf '━━ %s ━━\n' "$(basename "$p")"
-    RAMIFY_ROOT="$p" "$SELF" prune ${1:+"$1"}
+    RAMIFY_ROOT="$p" RAMIFY_NO_DOCKER=1 "$SELF" prune ${1:+"$1"}
     echo
   done < <(projects all)
+  docker_prune "${1:-}"
   [ -n "${1:-}" ] || echo "dry run — 'ramify prune --all --apply' does it"
+}
+
+# Docker is machine-wide, so this runs once per prune. Volumes hold data and are never touched.
+# Containers from a compose project are someone's stack, stopped or not, and are kept; so are the
+# images they use. What goes: other stopped containers, images no container uses, build cache.
+docker_prune() { # [--apply]
+  docker info >/dev/null 2>&1 || return 0
+  echo "docker:"
+  docker system df --format '{{printf "%-15s" .Type}} {{.Size}} total, {{.Reclaimable}} reclaimable' | sed 's/^/  /'
+  if [ "${1:-}" = --apply ]; then
+    docker container prune -f --filter 'label!=com.docker.compose.project' >/dev/null
+    docker image prune -a -f | tail -1 | sed 's/^/  images  /'
+    docker builder prune -f | tail -1 | sed 's/^/  build   /'
+  else
+    echo "  --apply removes stopped non-compose containers, unused images and build cache; volumes stay"
+  fi
 }
 
 forget_worktree() { # worktree — stop its stack, drop its state and logs
@@ -1221,7 +1251,7 @@ case "${1:-}" in
   cleanup) cleanup ;;
   prune)
     case " ${*:2} " in *" --all "*) prune_all "$(case " ${*:2} " in *" --apply "*) echo --apply ;; esac)" ;;
-      *) prune "${2:-}" ;; esac ;;
+      *) prune "${2:-}"; [ -n "${RAMIFY_NO_DOCKER:-}" ] || docker_prune "${2:-}" ;; esac ;;
   delete) force_delete "${2:-}" "${3:-}" ;;
   complete) complete_tree "${2:-}" "${3:-}" ;;
   jira)
