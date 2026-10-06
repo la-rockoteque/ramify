@@ -91,6 +91,8 @@ check "dash paints ready green on a terminal"    bash -c "RAMIFY_ROOT='$WT' RAMI
 check "dash borders take the project colour"     bash -c "RAMIFY_ROOT='$WT' RAMIFY_COLOR=1 '$RAMIFY' dash | grep -qE \$'^\\e\\[(3[3-6]|9[3-6])m┌'"
 check "NO_COLOR wins"                            bash -c "! RAMIFY_ROOT='$WT' NO_COLOR=1 RAMIFY_COLOR=1 '$RAMIFY' dash | grep -q \$'\\e'"
 check "dash --json lists both running stacks"   bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; p=json.load(sys.stdin)[0]; assert sorted(w[\"slot\"] for w in p[\"worktrees\"] if w[\"slot\"]) == [1, 2]; assert p[\"shared\"][0][\"up\"] is True'"
+check "dash shows a private service's memory"  bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash | grep -qE 'api private +http://localhost:17002 +[0-9]+ MB'"
+check "dash --json carries memory, null on shared" bash -c "RAMIFY_ROOT='$WT' '$RAMIFY' dash --json | python3 -c 'import json,sys; p=json.load(sys.stdin)[0]; s=[x for w in p[\"worktrees\"] for x in w[\"services\"]]; assert all(isinstance(x[\"mb\"], int) for x in s if x[\"kind\"] != \"shared\"), s; assert all(x[\"mb\"] is None for x in s if x[\"kind\"] == \"shared\"), s; assert isinstance(p[\"shared\"][0][\"mb\"], int)'"
 
 other="$T/other"; git init -q "$other"
 check "dash works from a repo without a config"  bash -c "cd '$other' && [ \$(env -u RAMIFY_ROOT '$RAMIFY' dash | grep -c '^┌') = 2 ]"
