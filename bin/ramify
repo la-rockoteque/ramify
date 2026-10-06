@@ -954,7 +954,9 @@ tile() { # worktree, [smoke]
     U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
     kind="$s" kc=''
     has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind="$s shared" kc="$(svc_color "$s")" || kind="$s private"; }
-    row2 "$(printf '%-12s %s' "$kind" "http://localhost:$port")" "$(probe "$s" "$port")" "$kc"
+    # A shared instance's memory shows once, on the shared line above the tiles.
+    row2 "$(printf '%-12s %-22s%s' "$kind" "http://localhost:$port" \
+      "$([ "$kind" != "$s shared" ] && mb_label "$(service_mb "$STATE_DIR/$wt.$s.pid")")")" "$(probe "$s" "$port")" "$kc"
     if [ "${2:-}" = smoke ] && ! out="$(smoke "$s" "$port")"; then
       row "$(printf '%-12s %s' '  smoke' "$out")"
     fi
@@ -988,6 +990,32 @@ build_servers() {
     END { for (k in n) printf "%s %d %d\n", k, n[k], m[k] / 1024 }' | sort
 }
 
+# Resident memory of a service, in MB: its whole process group, build servers left out (they show
+# on their own line). Empty when the pid file names no live group.
+service_mb() { # pidfile
+  local g; g="$(cat "$1" 2>/dev/null)"
+  [[ "$g" =~ ^[0-9]+$ ]] || return 0
+  ps -axww -o rss=,pgid=,command= | awk -v g="$g" -v re="$BUILD_SERVER_RE" \
+    '$2 == g && $0 !~ re { m += $1; n++ } END { if (n) printf "%d\n", m / 1024 }'
+}
+
+# `name MB` per running container, in one `docker stats` call: it takes about 2s however many it reads.
+containers_mb() {
+  local up=() c
+  for c in $RAMIFY_CONTAINERS; do
+    docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && up+=("$c")
+  done
+  [ ${#up[@]} -gt 0 ] || return 0
+  docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "${up[@]}" 2>/dev/null | awk '{
+    v = $2; u = v; sub(/[0-9.]+/, "", u); sub(/[A-Za-z]+$/, "", v)
+    f = (u == "GiB" || u == "GB") ? 1024 : (u == "KiB" || u == "kB") ? 1 / 1024 : (u == "B") ? 1 / 1048576 : 1
+    printf "%s %d\n", $1, v * f }'
+}
+
+mb_of() { awk -v k="$1" '$1 == k { print $2 }' <<<"$2"; } # name, `containers_mb` output
+mb_json() { printf '%s' "${1:-null}"; }
+mb_label() { [ -n "$1" ] && printf ' %s MB' "$1"; return 0; }
+
 build_servers_line() {
   local k n mb line=""
   while read -r k n mb; do line="$line$k ×$n ${mb} MB   "; done < <(build_servers)
@@ -1010,15 +1038,16 @@ dash() {
 
 dash_project() { # [--header]
   need_config
-  local c s claimed=0 slot holder held line=""
+  local c s claimed=0 slot holder held line="" mem
   [ "${1:-}" = --header ] && printf '%s━━ %s ━━%s\n' "$BC" "$(basename "$PRIMARY")" "$RC"
+  mem="$(containers_mb)"
   for c in $RAMIFY_CONTAINERS; do
-    line="$line$c $(paint "$(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo up || echo DOWN)")   "
+    line="$line$c $(paint "$(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo up || echo DOWN)")$(mb_label "$(mb_of "$c" "$mem")")   "
   done
   for s in $RAMIFY_SERVICES; do
     has_shared "$s" || continue
     c="$(svc_color "$s")"
-    line="${line}$c""shared $s :$(sv "$s" shared_port)${c:+$RC} $(paint "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')")   "
+    line="${line}$c""shared $s :$(sv "$s" shared_port)${c:+$RC} $(paint "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$(sv "$s" shared_port)")" && echo up || echo 'not running')")$(mb_label "$(service_mb "$STATE_DIR/shared/$s.pid")")   "
   done
   [ -n "$line" ] && printf '%s\n\n' "$line"
   for slot in $(seq 1 "$RAMIFY_MAX_SLOT"); do
@@ -1070,20 +1099,23 @@ errors_json() { # errors file → [{"service","log","message"}]
 # branching-only project comes with `"stacks":false` and no services.
 dash_project_json() {
   need_config any
-  local c s i path wt env slot U port kind held first log b key
+  local c s i path wt env slot U port kind held first log b key mem
   printf '{"name":%s,"primary":%s,"stacks":%s,"jira":%s,"containers":[' "$(js "$RAMIFY_PROJECT")" "$(js "$PRIMARY")" \
     "$([ -n "$RAMIFY_SERVICES" ] && echo true || echo false)" "$([ -n "$RAMIFY_JIRA_URL" ] && js "${RAMIFY_JIRA_URL%/}" || echo null)"
+  mem="$([ -n "$RAMIFY_CONTAINERS" ] && containers_mb)"
   i=0; for c in $RAMIFY_CONTAINERS; do
     jsep "$i"; i=1
-    printf '{"name":%s,"up":%s}' "$(js "$c")" \
-      "$(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo true || echo false)"
+    printf '{"name":%s,"up":%s,"mb":%s}' "$(js "$c")" \
+      "$(docker ps --filter "name=^${c}\$" --filter status=running -q 2>/dev/null | grep -q . && echo true || echo false)" \
+      "$(mb_json "$(mb_of "$c" "$mem")")"
   done
   printf '],"shared":['
   i=0; for s in $RAMIFY_SERVICES; do
     has_shared "$s" || continue
     jsep "$i"; i=1; port="$(sv "$s" shared_port)"
-    printf '{"service":%s,"port":%s,"up":%s}' "$(js "$s")" "$port" \
-      "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$port")" && echo true || echo false)"
+    printf '{"service":%s,"port":%s,"up":%s,"mb":%s}' "$(js "$s")" "$port" \
+      "$(curl -sf -o /dev/null --max-time 2 "$(health_url "$s" "$port")" && echo true || echo false)" \
+      "$(mb_json "$(service_mb "$STATE_DIR/shared/$s.pid")")"
   done
   printf '],"build_servers":['
   i=0; while read -r c port held; do
@@ -1117,8 +1149,9 @@ dash_project_json() {
       kind=own; has_shared "$s" && { [ "$(envget "$env" "${U}_SHARED")" = 1 ] && kind=shared || kind=private; }
       jsep "$i"; i=1
       log="$STATE_DIR/$wt.$s.log"; [ "$kind" = shared ] && log="$STATE_DIR/shared/$s.log"
-      printf '{"name":%s,"port":%s,"kind":"%s","state":"%s","log":%s}' "$(js "$s")" "$port" "$kind" "$(probe "$s" "$port")" \
-        "$([ -f "$log" ] && js "$log" || echo null)"
+      # A shared instance's memory is on its `shared` entry, not repeated on each worktree.
+      printf '{"name":%s,"port":%s,"kind":"%s","state":"%s","log":%s,"mb":%s}' "$(js "$s")" "$port" "$kind" "$(probe "$s" "$port")" \
+        "$([ -f "$log" ] && js "$log" || echo null)" "$(mb_json "$([ "$kind" != shared ] && service_mb "$STATE_DIR/$wt.$s.pid")")"
     done
     printf ']}'
   done < <(git -C "$PRIMARY" worktree list --porcelain | awk '/^worktree /{print $2}')

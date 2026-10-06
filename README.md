@@ -87,6 +87,11 @@ The card of the main branch is filled with the project colour. Each shared servi
 its own: the shared instance and every tile that uses it show in that colour.
 `NO_COLOR` turns colour off. Output through a pipe and `--json` stay plain.
 
+`dash`, `watch` and `dash --json` (`"mb"`) show the resident memory of each container and each
+service. A service counts its whole process group, build servers left out. A shared instance shows
+on the shared line only, not on each tile that uses it. Container memory comes from
+`docker stats`, which adds about 2s to each draw.
+
 ### The config
 
 `.ramify.conf` is sourced bash. Single-quote the commands so `$PORT` expands when the service
@@ -219,7 +224,7 @@ any more, drops out of the list; delete its line to forget it for good.
 ## Test
 
 ```bash
-test/smoke.sh                 # new, up, shared/private, dash --json, strays, up lock, down, cleanup, prune, write-set, hooks, setup
+test/smoke.sh                 # new, up, shared/private, dash --json, memory, strays, up lock, down, cleanup, prune, write-set, hooks, setup
 ramify write-set --self-test
 ```
 
