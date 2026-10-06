@@ -673,10 +673,27 @@ prune_all() { # [--apply]
   local p
   while read -r p; do
     printf '━━ %s ━━\n' "$(basename "$p")"
-    RAMIFY_ROOT="$p" "$SELF" prune ${1:+"$1"}
+    RAMIFY_ROOT="$p" RAMIFY_NO_DOCKER=1 "$SELF" prune ${1:+"$1"}
     echo
   done < <(projects all)
+  docker_prune "${1:-}"
   [ -n "${1:-}" ] || echo "dry run — 'ramify prune --all --apply' does it"
+}
+
+# Docker is machine-wide, so this runs once per prune. Volumes hold data and are never touched.
+# Containers from a compose project are someone's stack, stopped or not, and are kept; so are the
+# images they use. What goes: other stopped containers, images no container uses, build cache.
+docker_prune() { # [--apply]
+  docker info >/dev/null 2>&1 || return 0
+  echo "docker:"
+  docker system df --format '{{printf "%-15s" .Type}} {{.Size}} total, {{.Reclaimable}} reclaimable' | sed 's/^/  /'
+  if [ "${1:-}" = --apply ]; then
+    docker container prune -f --filter 'label!=com.docker.compose.project' >/dev/null
+    docker image prune -a -f | tail -1 | sed 's/^/  images  /'
+    docker builder prune -f | tail -1 | sed 's/^/  build   /'
+  else
+    echo "  --apply removes stopped non-compose containers, unused images and build cache; volumes stay"
+  fi
 }
 
 forget_worktree() { # worktree — stop its stack, drop its state and logs
@@ -1234,7 +1251,7 @@ case "${1:-}" in
   cleanup) cleanup ;;
   prune)
     case " ${*:2} " in *" --all "*) prune_all "$(case " ${*:2} " in *" --apply "*) echo --apply ;; esac)" ;;
-      *) prune "${2:-}" ;; esac ;;
+      *) prune "${2:-}"; [ -n "${RAMIFY_NO_DOCKER:-}" ] || docker_prune "${2:-}" ;; esac ;;
   delete) force_delete "${2:-}" "${3:-}" ;;
   complete) complete_tree "${2:-}" "${3:-}" ;;
   jira)

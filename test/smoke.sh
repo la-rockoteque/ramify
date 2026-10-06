@@ -8,6 +8,10 @@ RAMIFY="$(cd "$(dirname "$0")/.." && pwd)/bin/ramify"
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/hooks/ramify-hook"
 T="$(cd "$(mktemp -d)" && pwd -P)"
 export RAMIFY_STATE_DIR="$T/state" RAMIFY_REGISTRY="$T/registry" RAMIFY_AUTOSTART=0
+# A fake docker: prune --apply must never reach the machine's real images. It logs each call.
+mkdir -p "$T/bin"
+printf '#!/bin/sh\necho "$*" >>"%s/docker.log"\n' "$T" >"$T/bin/docker"; chmod +x "$T/bin/docker"
+export PATH="$T/bin:$PATH"
 fails=0
 
 teardown() {
@@ -237,6 +241,7 @@ git worktree add -q --detach "$T/app-detached" main
 check "prune dry run lists a detached tree in main" bash -c "'$RAMIFY' prune | grep -q 'prune  app-detached (detached)'"
 "$RAMIFY" prune --apply >/dev/null 2>&1
 check "prune --apply removes the detached tree"  test ! -d "$T/app-detached"
+check "prune --apply keeps compose containers and volumes" bash -c "grep -qx \"container prune -f --filter label!=com.docker.compose.project\" '$T/docker.log' && grep -q '^builder prune' '$T/docker.log' && ! grep -q volume '$T/docker.log'"
 check "a repo with nothing running stays listed" bash -c "rm -rf '$RAMIFY_STATE_DIR'/*/primary; cd / && env -u RAMIFY_ROOT '$RAMIFY' dash --json | grep -qF '\"primary\":\"$T/app\"'"
 check "prune --apply removes worktree + branch" bash -c "[ ! -d '$WT' ] && ! git show-ref -q refs/heads/story/feat"
 
