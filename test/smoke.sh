@@ -62,6 +62,9 @@ check "new names the branch with the prefix"    test "$(git -C "$WT" rev-parse -
 check "new copies gitignored paths"             test -f "$WT/.claude/notes.md"
 check "new skips nested worktrees"              test ! -e "$WT/.claude/worktrees"
 check "new prints the hook marker"              grep -q "^ramify: worktree $WT\$" <<<"$out"
+check "every command takes --help"              bash -c "for c in \$('$RAMIFY' --help | awk 'NR>1{print \$1}'); do '$RAMIFY' \$c --help | grep -q \"^usage: ramify \$c\" || exit 1; done"
+check "new --help creates nothing"              bash -c "'$RAMIFY' new --help && [ ! -e '$T/app-wt/--help' ] && ! git show-ref -q refs/heads/story/--help"
+check "new refuses a dash slug"                 bash -c "! '$RAMIFY' new --new && [ ! -e '$T/app-wt/--new' ]"
 check "new prints the session label"            grep -qE '^/color (red|blue|green|yellow|purple|orange|pink|cyan)$' <<<"$out"
 
 # ── up, frontend-only branch → shared api ──

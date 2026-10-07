@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # ramify — one branch per worktree, one QA stack per worktree, many at once.
 #
-# Usage:  ramify setup [--print | --force] [--local] | config [-q | get VAR]
-#         ramify new <slug> | label [slug]
-#         ramify up | down | ping | card | dash [--json] | watch [seconds] | status | shared-down
-#         ramify cleanup | prune [--all] [--apply] | delete <worktree> [--yes] | complete <worktree> [--yes]
-#         ramify jira login | check | statusline [--json] | app
-#         ramify write-set <file> | write-set --self-test
+# Usage: `ramify --help`, or `ramify <command> --help`. The commands are in COMMANDS below.
 #
 # THE CONTAINERS ARE SHARED AND THE APPS ARE NOT. Databases and emulators are expensive, stateful
 # and identical for every branch, so they run once under a fixed compose project. The services a
@@ -23,6 +18,50 @@ SELF="$RAMIFY_HOME/bin/ramify"
 
 die() { echo "ramify: $*" >&2; exit 1; }
 
+# One line per command: name, usage, what it does. `ramify <command> --help` prints its line and
+# exits before anything runs, so a flag can never become a slug or a worktree name.
+COMMANDS="$(cat <<'EOF'
+setup;setup [--print | --force] [--local];write .ramify.conf for this repo
+config;config [-q | get VAR];show the resolved config; -q tests that one exists
+new;new <slug>;cut a worktree and branch from the remote main, copy, bootstrap, start its stack
+label;label [slug];print the /rename and /color lines for a session
+up;up;start this worktree's QA stack
+down;down;stop this worktree's own services
+ping;ping;exit 0 when this worktree's services answer their health check
+card;card;this worktree's URLs and health
+dash;dash [--json];every stack on the machine
+watch;watch [seconds];redraw the dashboard every few seconds (default 2)
+menu;menu;interactive menu for this project
+status;status;this worktree's slot, ports and processes
+shared-down;shared-down;stop the shared services
+cleanup;cleanup;release stale slots, kill orphans and strays, drop dead state
+prune;prune [--all] [--apply];remove merged branches and their worktrees; dry run without --apply
+delete;delete <worktree> [--yes];force-delete a worktree and its branch, merged or not
+complete;complete <worktree> [--yes];close its ticket, stop its stack, remove the worktree and branch
+jira;jira login | check;store a Jira token in the Keychain, or test it
+statusline;statusline [--json];status line for Claude Code, from its JSON on stdin
+app;app;open the desktop dashboard
+write-set;write-set <file> | --self-test;check a branch's diff against the write set its QA plan declared
+EOF
+)"
+usage() { # [command]
+  local name use what
+  if [ -n "${1:-}" ]; then
+    IFS=';' read -r name use what < <(grep "^$1;" <<<"$COMMANDS") || return 1
+    printf 'usage: ramify %s\n  %s\n' "$use" "$what"
+  else
+    echo "usage: ramify <command> [--help]"
+    while IFS=';' read -r name use what; do printf '  %-40s %s\n' "$use" "$what"; done <<<"$COMMANDS"
+  fi
+}
+case "${1:-}" in
+  ''|-h|--help) usage; exit 0 ;;
+  help) usage "${2:-}" || { usage; exit 2; }; exit 0 ;;
+esac
+for a in "${@:2}"; do
+  case "$a" in -h|--help) usage "$1" || { usage >&2; exit 2; }; exit 0 ;; esac
+done
+
 # `RAMIFY_ROOT` wins over the working directory: hooks run from the session's project directory,
 # not from the worktree under test, and a `down` aimed at the wrong tree kills nothing and
 # reports success.
@@ -38,7 +77,6 @@ case "${1:-} ${*:2}" in dash\ *|watch\ *|prune\ *--all*)
     | while read -r p; do [ -d "$p" ] && { echo "$p"; break; }; done)"
   [ -n "$REPO_ROOT" ] || { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; exit 0; } ;;
 esac
-case "${1:-}" in ''|-h|--help|help) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 case "${1:-}" in write-set) exec "$RAMIFY_HOME/libexec/write-set.sh" "${@:2}" ;; esac
 # The app is machine-wide like the dashboard: it runs from anywhere.
 case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; esac
@@ -825,6 +863,7 @@ label() { # [slug]
 new() { # slug
   local slug="${1:-}" parent dest branch p wt autostart=0
   [ -n "$slug" ] || die "usage: ramify new <slug>"
+  case "$slug" in -*) die "'$slug' is not a slug: it starts with a dash" ;; esac
   case "$RAMIFY_WORKTREES" in /*) parent="$RAMIFY_WORKTREES" ;; *) parent="$PRIMARY/$RAMIFY_WORKTREES" ;; esac
   mkdir -p "$parent" && parent="$(cd "$parent" && pwd)"
   dest="$parent/$slug"; branch="$RAMIFY_BRANCH_PREFIX$slug"; wt="$slug"
@@ -1295,5 +1334,5 @@ case "${1:-}" in
       *) die "usage: ramify jira login | check" ;;
     esac ;;
   shared-down) shared_down ;;
-  *) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) usage >&2; exit 2 ;;
 esac
