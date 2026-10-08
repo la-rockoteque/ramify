@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code hook dispatcher: ramify-hook worktree-add | push | behind | stop | session-end
+# Claude Code hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | session-start | stop | session-end
 #
 # Installed as a plugin, these fire in every repo. Each one exits 0 silently unless the checkout
 # has a ramify config, and none of them ever fails a turn.
@@ -20,7 +20,7 @@ print(d if isinstance(d, str) else json.dumps(d))' "$1" 2>/dev/null
 }
 
 context() { # event, text
-  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": sys.argv[1], "additionalContext": sys.argv[2]}}))' "$1" "$2"
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": sys.argv[1], "additionalContext": sys.argv[2]}}, ensure_ascii=False))' "$1" "$2"
 }
 
 configured() { RAMIFY_ROOT="$1" "$RAMIFY" config -q >/dev/null 2>&1; }
@@ -36,6 +36,61 @@ session_root() {
   elif [ -f "$pin" ]; then cat "$pin"
   else git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${CLAUDE_PROJECT_DIR:-$PWD}"
   fi
+}
+
+# Does the Bash command open a PR for review: `gh [global flags] pr create` that is not a draft,
+# or `gh pr ready` without --undo? Parsed with shlex, so a body that mentions --draft is text.
+# ponytail: a heuristic over the command text — `$(which gh) pr create` or an alias is not seen.
+is_pr_open() {
+  printf '%s' "$1" | python3 -c '
+import os, shlex, sys
+cmd = sys.stdin.read().replace("\\\n", " ")
+try:
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()")
+    lex.whitespace_split = True
+    toks = list(lex)
+except ValueError:
+    sys.exit(1)
+cmds, cur = [], []
+for t in toks:
+    if t and set(t) <= set(";&|()"):
+        cmds.append(cur); cur = []
+    else:
+        cur.append(t)
+cmds.append(cur)
+for c in cmds:
+    while c and "=" in c[0] and not c[0].startswith("-"):
+        c = c[1:]                                    # FOO=bar gh pr create
+    if not c or os.path.basename(c[0]) != "gh":
+        continue
+    i = 1
+    while i < len(c) and c[i].startswith("-"):     # gh -R owner/repo pr create
+        i += 2 if c[i] in ("-R", "--repo") else 1
+    if c[i:i + 2] == ["pr", "create"]:
+        rest = c[i + 2:]
+        draft = any(t in ("--draft", "--draft=true") or (t.startswith("-") and not t.startswith("--") and "d" in t[1:])
+                    for t in rest)
+        if not draft:
+            sys.exit(0)
+    if c[i:i + 2] == ["pr", "ready"] and "--undo" not in c[i + 2:]:
+        sys.exit(0)
+sys.exit(1)' 2>/dev/null
+}
+
+# A checkout has workflows only with a .ramify folder in it or in its primary: every other repo
+# leaves the workflow checks before any python runs on them.
+has_workflows() {
+  [ -d "$1/.ramify" ] && return 0
+  local primary; primary="$(git -C "$1" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+  [ -n "$primary" ] && [ -d "$primary/.ramify" ]
+}
+
+# What the agent is told about the branch's work order, or nothing without one.
+flow_note() { # root
+  has_workflows "$1" || return 0
+  local out; out="$(RAMIFY_ROOT="$1" "$RAMIFY" step 2>/dev/null)" || return 0
+  case "$out" in ''|"workflows are off"*) return 0 ;; esac
+  printf 'This branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate takes `--approved`, and only after the user has explicitly said OK. `gh pr create` is refused until every step before the PR step is recorded.' "$out"
 }
 
 is_push() { grep -qE '(^|[;&|[:space:]])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)' <<<"$1"; }
@@ -83,9 +138,10 @@ on_worktree_add() {
   local wt how ready log
   { read -r wt; read -r how; } < <(new_worktree) || return 0
   [ -n "${wt:-}" ] && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  serviced "$wt" || return 0
+  local note; note="$(flow_note "$wt")"
+  serviced "$wt" || { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
   mkdir -p "$PINS" && printf '%s\n' "$wt" >"$PINS/$(field session_id).root"
-  [ "$(conf "$wt" RAMIFY_AUTOSTART)" = 0 ] && return 0
+  [ "$(conf "$wt" RAMIFY_AUTOSTART)" = 0 ] && { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
 
   # Under the project's state dir, like the CLI's own logs: two repos may both have a `feat` tree.
   log="$(conf "$wt" STATE_DIR)/$(basename "$wt").autostart.log"
@@ -101,7 +157,9 @@ on_worktree_add() {
       exec "$2" up' _ "$wt" "$RAMIFY" "$ready" >"$log" 2>&1 </dev/null &
     disown 2>/dev/null
   fi
-  context PostToolUse "Worktree $wt created — QA starts now, not at the push. Its stack comes up in the background once it is bootstrapped (log: ${log}); do not start a second install. Run every command in this session from $wt (absolute path in each one). Once \`RAMIFY_ROOT=$wt ramify card\` answers, invoke the \`ramify:ask-for-qa\` skill in kickoff mode: URLs and the checklist, then keep implementing."
+  context PostToolUse "Worktree $wt created — QA starts now, not at the push. Its stack comes up in the background once it is bootstrapped (log: ${log}); do not start a second install. Run every command in this session from $wt (absolute path in each one). Once \`RAMIFY_ROOT=$wt ramify card\` answers, invoke the \`ramify:ask-for-qa\` skill in kickoff mode: URLs and the checklist, then keep implementing.${note:+
+
+$note}"
 }
 
 on_push() {
@@ -140,7 +198,32 @@ $missing
 
 Merge $main in, make the tests pass on the result, then push:
   git merge $remote/$main"
-  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}))' "$reason"
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}, ensure_ascii=False))' "$reason"
+}
+
+# The workflow's own gate: the PR opens once every step before it is recorded.
+on_pr_gate() {
+  case "$INPUT" in *gh*pr*) ;; *) return 0 ;; esac   # most Bash calls: no python at all
+  is_pr_open "$(field tool_input.command)" || return 0
+  local root out rc; root="$(field cwd)"
+  root="$(git -C "${root:-$PWD}" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  has_workflows "$root" || return 0
+  [ "$(conf "$root" RAMIFY_GATE_WORKFLOW)" = 0 ] && return 0
+  # 1 is steps missing. 2 is a broken order or definitions: `ramify step` says why, and a
+  # gate the agent cannot satisfy by doing the work would only teach it to go around.
+  out="$(RAMIFY_ROOT="$root" "$RAMIFY" step gate --pr 2>&1)"; rc=$?
+  [ "$rc" = 1 ] || return 0
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}, ensure_ascii=False))' \
+    "The work order is not ready for a pull request: $out
+
+Do and record those steps first (\`ramify step\` shows them). A draft (\`gh pr create --draft\`) is not gated."
+}
+
+# startup, resume, clear and compact: after a compaction the agent has lost the work order too.
+on_session_start() {
+  local note; note="$(flow_note "$(session_root)")"
+  [ -n "$note" ] && context SessionStart "$note"
+  return 0
 }
 
 # Fires after every turn, so the fast path — already answering — is one curl per service.
@@ -169,6 +252,8 @@ case "${1:-}" in
   worktree-add) on_worktree_add ;;
   push) on_push ;;
   behind) on_behind ;;
+  pr-gate) on_pr_gate ;;
+  session-start) on_session_start ;;
   stop) on_stop ;;
   session-end) on_session_end ;;
 esac

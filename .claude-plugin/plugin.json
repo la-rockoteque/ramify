@@ -1,6 +1,6 @@
 {
   "name": "ramify",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Parallel branches for AI agents: one worktree per branch, one QA stack per worktree on its own port slot, shared containers, and a hand-over to a human reviewer.",
   "author": {
     "name": "Rocko Bernier",
@@ -25,6 +25,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" behind",
             "timeout": 25
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" pr-gate",
+            "timeout": 10
           }
         ]
       }
@@ -41,6 +46,17 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" session-start",
             "timeout": 10
           }
         ]

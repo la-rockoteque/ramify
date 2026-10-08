@@ -39,6 +39,8 @@ workflows:
       default: [frame, prototype, decide]
 
 # What each step is. `gate: human` means the step is recorded only after the user's explicit OK.
+# `opens_pr: true` marks the step that opens the pull request: `gh pr create` waits on every
+# step before it.
 steps:
   spec:      { skill: ramify:spec,      gate: human, does: write what to build and the acceptance criteria }
   qa-plan:   { skill: ramify:qa-plan,   gate: human, does: "plan how each acceptance criterion is checked, before the build" }
@@ -46,7 +48,7 @@ steps:
   audit:     { skill: ramify:audit,     does: "check the diff against the spec or the report, criterion by criterion" }
   qa:        { skill: ramify:qa,        does: run the QA plan on the running stack and record the results }
   review:    { skill: ramify:review,    gate: human, does: review the diff and fix every finding }
-  pr:        { skill: ramify:pr,        does: open the pull request }
+  pr:        { skill: ramify:pr,        opens_pr: true, does: open the pull request }
   finale:    { skill: ramify:finale,    does: "after the merge, remove the worktree and branch and close the ticket" }
   diagnose:  { skill: ramify:diagnose,  gate: human, does: "reproduce, find the root cause, write a failing test" }
   fix:       { skill: ramify:fix,       does: the smallest change that makes the failing test pass }
