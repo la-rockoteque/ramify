@@ -198,6 +198,15 @@ ramify lane standard                 # raise the lane; lowering is refused
 - `min_lane` maps a tag to the lightest lane allowed: `--tag auth` puts a feature on `standard`.
   A lane goes up, never down.
 
+The reports show the progress of a branch with a work order. `card` and `dash` add a line
+`feature/light 3/6 → review` to its tile, and the status line appends the same. The app draws
+one segment per step of the lane: green when recorded, grey when n/a, yellow for the next one.
+`dash --json` gives each worktree a `workflow` object (`workflow`, `lane`, `order`, `done`,
+`total`, `next` {`step`, `skill`, `gate`}, `steps` [{`step`, `state`}]), or `null` without one.
+It is `{"error"}` when the definitions do not load, or when the work order names a workflow or
+lane they do not define. A work order without frontmatter, or without `workflow`, `lane` and
+`branch`, belongs to no branch and is not reported.
+
 A repo replaces the defaults with its own `.ramify/workflows.yml` in the same shape, or turns
 workflows off with a file that holds `workflows: off`. `RAMIFY_WORKFLOWS=0` in the config does
 the same. A repo with workflows off keeps its own process, and ramify does not touch it. The
@@ -217,8 +226,8 @@ answer; `stack down` means none do. It prints nothing where ramify is not set up
 
 `ramify` must be on the PATH (see [Install](#install)): the plugin's `bin/` is on the Bash
 tool's PATH only. A status line script of your own can call `ramify statusline --json` for
-`root`, `worktree`, `branch`, `primary`, `icon`, `slot`, `ticket` and `stack` (`up`, `partial`,
-`down` or `stopped`), and run its git segment from `root`.
+`root`, `worktree`, `branch`, `primary`, `icon`, `slot`, `ticket`, `stack` (`up`, `partial`,
+`down` or `stopped`) and `workflow` (as in `dash --json`), and run its git segment from `root`.
 `RAMIFY_STATUSLINE_ICON` replaces the tree.
 
 ### The app

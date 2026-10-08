@@ -14,7 +14,7 @@ printf '#!/bin/sh\necho "$*" >>"%s/docker.log"\n' "$T" >"$T/bin/docker"; chmod +
 export PATH="$T/bin:$PATH"
 fails=0
 
-teardown() {
+teardown() { [ -n "${KEEP:-}" ] && { echo "kept $T"; return; }
   for p in $(seq 17000 17010) $(seq 17100 17100) $(seq 17200 17210); do
     lsof -ti tcp:"$p" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null
   done
@@ -331,6 +331,16 @@ check "a human gate needs --approved"           bash -c "! '$RAMIFY' step done s
 check "step done records the step"              bash -c "'$RAMIFY' step done spec --approved && grep -q 'step: spec' '$ORDER'"
 check "step na records n/a"                     bash -c "'$RAMIFY' step na qa-plan && grep -q 'step: qa-plan.*na: true' '$ORDER'"
 check "a lane is never lowered"                 bash -c "! '$RAMIFY' lane light"
+check "status --line sums up the lane"          test "$(WF_ROOT="$WFA" WF_BRANCH=feat/wfa python3 "$WFPY" status --line)" = "feature/standard 2/8 → build"
+check "dash --json carries the work order"      bash -c "'$RAMIFY' dash --json | python3 -c 'import json,sys; w={w[\"name\"]: w for w in json.load(sys.stdin)[0][\"worktrees\"]}; f=w[\"wfa\"][\"workflow\"]; assert f[\"next\"][\"step\"] == \"build\" and [s[\"state\"] for s in f[\"steps\"][:3]] == [\"done\", \"na\", \"next\"], f; assert w[\"app\"][\"workflow\"] is None'"
+cp "$ORDER" "$ORDER.keep"; sed -i '' 's/^lane: .*/lane: zz/' "$ORDER" 2>/dev/null || sed -i 's/^lane: .*/lane: zz/' "$ORDER"
+check "a broken order is a short line"          test "$(WF_ROOT="$WFA" WF_BRANCH=feat/wfa python3 "$WFPY" status --line)" = 'workflow: broken, see `ramify step`'
+check "a broken order is an error in dash"      bash -c "'$RAMIFY' dash --json | python3 -c 'import json,sys; w={w[\"name\"]: w for w in json.load(sys.stdin)[0][\"worktrees\"]}; assert \"zz\" in w[\"wfa\"][\"workflow\"][\"error\"]'"
+mv "$ORDER.keep" "$ORDER"
+check "statusline shows the next step"          bash -c "printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$WFA\"}}' | '$RAMIFY' statusline | grep -q ' · feature/standard 2/8 → build\$'"
+echo 'export RAMIFY_WORKFLOWS=0   # off here' >>"$WFA/.ramify.conf"
+check "statusline honours workflows off"        bash -c "! printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$WFA\"}}' | '$RAMIFY' statusline | grep -q feature/"
+git -C "$WFA" checkout -q .ramify.conf
 check "the pr gate names what is missing"       bash -c "out=\$(WF_ROOT='$WFA' WF_BRANCH=feat/wfa python3 '$WFPY' gate pr); [ \$? = 1 ] && grep -q 'build, audit, qa, review' <<<\"\$out\""
 mkdir -p .ramify && printf 'workflows: off\n' >.ramify/workflows.yml
 check "a repo turns workflows off"              bash -c "'$RAMIFY' workflow | grep -qx 'workflows are off for this repo'"

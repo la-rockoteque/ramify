@@ -61,6 +61,14 @@
     .svc a { color: var(--text); text-decoration: none; font-family: ui-monospace, Menlo, monospace; }
     .svc a:hover { color: var(--accent); text-decoration: underline; }
     .svc .kind { color: var(--muted); }
+    .flow { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; font-size: 12px; }
+    .flow .name { color: var(--muted); }
+    .flow .bar { display: flex; gap: 2px; }
+    .flow .seg { flex: 1; height: 6px; border-radius: 2px; background: var(--line); }
+    .flow .seg.done { background: var(--ok); }
+    .flow .seg.na { background: var(--idle); }
+    .flow .seg.next { background: var(--warn); }
+    .flow.broken { display: block; color: var(--bad); overflow-wrap: anywhere; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
     .dot.ready, .dot.true { background: var(--ok); }
     .dot.starting { background: var(--warn); }

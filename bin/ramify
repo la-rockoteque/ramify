@@ -870,6 +870,14 @@ wf() { # $WF_AT, else this worktree
     RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-}" python3 "$RAMIFY_HOME/libexec/workflow.py" "$@"
 }
 
+# A worktree's progress for the reports: `--json` or `--line`. Without a .ramify folder there is
+# no work order and no custom work_dir, so the reports skip python for it.
+wf_report() { # path, branch, --json|--line
+  [ -d "$1/.ramify" ] || [ -d "$PRIMARY/.ramify" ] || { [ "$3" = --json ] && echo null; return 0; }
+  local out; out="$(WF_AT="$1" WF_BRANCH="$2" wf status "$3" 2>/dev/null)"
+  [ "$3" = --json ] && printf '%s\n' "${out:-null}" || { [ -z "$out" ] || printf '%s\n' "$out"; }
+}
+
 # Base on the remote main, never on this checkout's HEAD: it may sit on someone else's branch.
 new() { # slug [--workflow W] [--lane L] [--tag T]...
   local slug="" parent dest branch p wt autostart=0 flow="" wfopts=()
@@ -1015,6 +1023,7 @@ tile() { # worktree, [smoke]
   box ┌ ┐
   row2 "$wt" "slot $(envget "$env" SLOT)"
   row2 "$branch" "up $(uptime_of "$env")"
+  out="$(wf_report "${root:-$REPO_ROOT}" "${branch% \*}" --line)"; [ -z "$out" ] || row "$out"
   box ├ ┤
   for s in $RAMIFY_SERVICES; do
     U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
@@ -1205,8 +1214,8 @@ dash_project_json() {
     wt="$(basename "$path")"; env="$STATE_DIR/$wt.env"; slot="$(envget "$env" SLOT)"
     jsep "$first"; first=1
     b="$(branch_of "$path")"; key="$(ticket_of "$b")"
-    printf '{"name":%s,"path":%s,"branch":%s,"ticket":%s,"primary":%s,"dirty":%s,"slot":%s,"uptime":%s,"errors":%s,"services":[' \
-      "$(js "$wt")" "$(js "$path")" "$(js "$b")" "$([ -n "$key" ] && js "$key" || echo null)" \
+    printf '{"name":%s,"path":%s,"branch":%s,"ticket":%s,"workflow":%s,"primary":%s,"dirty":%s,"slot":%s,"uptime":%s,"errors":%s,"services":[' \
+      "$(js "$wt")" "$(js "$path")" "$(js "$b")" "$([ -n "$key" ] && js "$key" || echo null)" "$(wf_report "$path" "$b" --json)" \
       "$([ "$path" = "$PRIMARY" ] && echo true || echo false)" \
       "$([ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ] && echo true || echo false)" \
       "${slot:-null}" "$([ -f "$env" ] && js "$(uptime_of "$env")" || echo null)" "$(errors_json "$STATE_DIR/$wt.errors")"
