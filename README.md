@@ -235,7 +235,8 @@ answer; `stack down` means none do. It prints nothing where ramify is not set up
 `ramify` must be on the PATH (see [Install](#install)): the plugin's `bin/` is on the Bash
 tool's PATH only. A status line script of your own can call `ramify statusline --json` for
 `root`, `worktree`, `branch`, `primary`, `icon`, `slot`, `ticket`, `stack` (`up`, `partial`,
-`down` or `stopped`) and `workflow` (as in `dash --json`), and run its git segment from `root`.
+`down` or `stopped`), `workflow` (as in `dash --json`) and `ports` (each running service and its
+port, `{"web": 5174}`), and run its git segment from `root`.
 `RAMIFY_STATUSLINE_ICON` replaces the tree.
 
 ### The app

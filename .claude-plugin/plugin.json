@@ -1,6 +1,6 @@
 {
   "name": "ramify",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Parallel branches for AI agents: one worktree per branch, one QA stack per worktree on its own port slot, shared containers, and a hand-over to a human reviewer.",
   "author": {
     "name": "Rocko Bernier",
