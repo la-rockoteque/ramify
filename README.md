@@ -194,7 +194,8 @@ ramify lane standard                 # raise the lane; lowering is refused
   the branch. The step outputs go in the same folder.
 - The `branch` in the frontmatter ties the work order to its worktree. A slug whose work order
   is already on main is refused: pick another one.
-- Steps are recorded in lane order. A step that does not apply is recorded `na`.
+- Steps are recorded in lane order. A step that does not apply is recorded `na`. `finale` is not
+  recorded: it removes the worktree that holds the work order.
 - A step with `gate: human` is recorded only with `--approved`, after the user's explicit OK.
 - The step marked `opens_pr: true` (`pr` in the defaults) waits on every step before it. The
   plugin refuses `gh pr create` and `gh pr ready` until they are recorded, and names the next
@@ -267,6 +268,11 @@ The hooks do nothing in a repo without a config. The workflow hooks need only a 
 - **SessionEnd**: stops this worktree's stack.
 
 Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`.
+Workflow skills: `ramify:workflow` (the contract every step follows), then one per step of the
+feature lanes: `ramify:spec`, `ramify:qa-plan`, `ramify:build`, `ramify:audit`, `ramify:qa`,
+`ramify:review`, `ramify:pr`, `ramify:finale`. Every step runs the prose it writes through the
+[ocre-jelly](https://git.nexapptech.com/vbernier/ocre-jelly) skill. Without it, the step follows
+the same rules by hand and says so.
 
 State lives in `/tmp/ramify/<project>/`, machine-wide, so every session sees the same slot registry.
 The list of configured repos lives in `~/.claude/ramify/projects` (`$CLAUDE_CONFIG_DIR` if set),
