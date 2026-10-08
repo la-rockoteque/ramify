@@ -7,8 +7,9 @@
 #
 # Plain: "𖣂 tm-127-pagination ⎇ story/tm-127-pagination", or "𖣂 main" in the primary checkout.
 # With a work order: "… · feature/light 3/6 → review".
-# --json: {"root","worktree","branch","primary","icon","slot","ticket","stack","answering","services","workflow"},
-# for a status line that draws its own. slot is set while the worktree's stack runs; ticket once
+# --json: {"root","worktree","branch","primary","icon","slot","ticket","stack","answering","services","workflow","ports"},
+# for a status line that draws its own. ports maps each running service to its port, {"web": 5174}.
+# slot is set while the worktree's stack runs; ticket once
 # RAMIFY_JIRA_URL is set. stack is "up", "partial", "down", "stopped", or null without services.
 # Prints nothing where ramify is not set up. RAMIFY_STATUSLINE_ICON replaces the tree.
 set -uo pipefail
@@ -83,13 +84,26 @@ if [ "${1:-}" = --json ]; then
     s="-${branch//\//-}-"
     [[ "$s" =~ -(${pattern:-[A-Za-z][A-Za-z0-9]*-[0-9]+})- ]] && ticket="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
   fi
-  WORKFLOW="${flow_json:-null}" STACK="$stack" ANSWERING="$answering" TOTAL="$total" SLOT="$slot" TICKET="$ticket" ROOT="$root" WT="$wt" BRANCH="$branch" PRIMARY="$([ "$root" = "$primary" ] && echo 1)" ICON="$icon" python3 -c '
+  ENVFILE="$env" WORKFLOW="${flow_json:-null}" STACK="$stack" ANSWERING="$answering" TOTAL="$total" SLOT="$slot" TICKET="$ticket" ROOT="$root" WT="$wt" BRANCH="$branch" PRIMARY="$([ "$root" = "$primary" ] && echo 1)" ICON="$icon" python3 -c '
 import json, os
 e = os.environ
+
+def ports():
+    """Each running service and its port, from the env file `up` wrote: WEB_PORT=5174 → web."""
+    out = {}
+    try:
+        with open(e["ENVFILE"]) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k.endswith("_PORT") and v.isdigit():
+                    out[k[:-5].lower()] = int(v)
+    except OSError:
+        pass
+    return out
 print(json.dumps({"root": e["ROOT"], "worktree": e["WT"], "branch": e["BRANCH"], "primary": e["PRIMARY"] == "1", "icon": e["ICON"],
                   "slot": int(e["SLOT"]) if e["SLOT"].isdigit() else None, "ticket": e["TICKET"] or None,
                   "stack": e["STACK"] or None, "answering": int(e["ANSWERING"]), "services": int(e["TOTAL"]),
-                  "workflow": json.loads(e["WORKFLOW"])}))'
+                  "workflow": json.loads(e["WORKFLOW"]), "ports": ports()}))'
 elif [ "$root" = "$primary" ]; then
   printf '%s %s%s%s\n' "$icon" "$branch" "$health" "${flow:+ · $flow}"
 else

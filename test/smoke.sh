@@ -201,6 +201,7 @@ git worktree remove --force "$WT5"; git branch -D -q story/comp
 # ── status line: the pinned worktree and its branch, nothing outside ramify ──
 mkdir -p "$RAMIFY_STATE_DIR/sessions"; printf '%s\n' "$WT" >"$RAMIFY_STATE_DIR/sessions/sl.root"
 check "statusline follows the session's pin"     bash -c "[ \"\$(printf '{\"session_id\":\"sl\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 feat ⎇ story/feat · 2/2 up' ]"
+check "statusline --json gives each port"      bash -c "printf '{\"session_id\":\"sl\"}' | '$RAMIFY' statusline --json | python3 -c 'import json,sys; p=json.load(sys.stdin)[\"ports\"]; assert p == {\"api\": 17100, \"web\": 17201}, p'"
 check "statusline shows the primary's branch"    bash -c "[ \"\$(printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$T/app\"}}' | '$RAMIFY' statusline)\" = '𖣂 main' ]"
 check "statusline is silent outside ramify"      bash -c "[ -z \"\$(printf '{\"session_id\":\"none\",\"workspace\":{\"current_dir\":\"$other\"}}' | '$RAMIFY' statusline)\" ]"
 rm -f "$RAMIFY_STATE_DIR/sessions/sl.root"
