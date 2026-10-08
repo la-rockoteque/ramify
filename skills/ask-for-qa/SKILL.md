@@ -51,14 +51,17 @@ answers, hand over the URLs and the checklist so the reviewer can watch the work
 
 Once the URLs answer, tell the reviewer **what to look at**, not that the stack runs.
 
-1. Read the QA plan when the repo has one: `ramify config get RAMIFY_QA_PLAN` gives the glob,
-   with `<slug>` standing for the worktree name. Its cases are the checklist.
+1. Read the QA plan when the repo has one: the `qa-plan.md` next to the branch's work order
+   (`ramify step` prints its path), else `ramify config get RAMIFY_QA_PLAN`, a glob with
+   `<slug>` standing for the worktree name. Its cases are the checklist.
 2. Otherwise derive the list from the diff: which screens and behaviours changed, and what a
    test run could not show.
 3. Name the **route** for each item, not only the component.
 4. Call out anything visible but not obviously in scope, especially shared components.
 5. Say what you could **not** verify yourself and why.
 6. Add `RAMIFY_QA_NOTES` when the config has it (seed data, test accounts).
+7. Run the hand-over text through the `ocre-jelly` skill before you send it. Keep the URLs,
+   routes and quoted UI text as they are.
 
 Then stop and wait. Do not start the next task, poll logs, or summarise the work again.
 

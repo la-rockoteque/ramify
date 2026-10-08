@@ -90,7 +90,7 @@ flow_note() { # root
   has_workflows "$1" || return 0
   local out; out="$(RAMIFY_ROOT="$1" "$RAMIFY" step 2>/dev/null)" || return 0
   case "$out" in ''|"workflows are off"*) return 0 ;; esac
-  printf 'This branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate takes `--approved`, and only after the user has explicitly said OK. `gh pr create` is refused until every step before the PR step is recorded.' "$out"
+  printf 'This branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate takes `--approved`, and only after the user has explicitly said OK. `gh pr create` is refused until every step before the PR step is recorded. Run all prose you write (work order, spec, QA plan and results, findings, comments, commit messages, PR body) through the `ocre-jelly` skill before you save or send it. The `ramify:workflow` skill has the full contract.' "$out"
 }
 
 is_push() { grep -qE '(^|[;&|[:space:]])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)' <<<"$1"; }
