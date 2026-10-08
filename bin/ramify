@@ -23,7 +23,10 @@ die() { echo "ramify: $*" >&2; exit 1; }
 COMMANDS="$(cat <<'EOF'
 setup;setup [--print | --force] [--local];write .ramify.conf for this repo
 config;config [-q | get VAR];show the resolved config; -q tests that one exists
-new;new <slug>;cut a worktree and branch from the remote main, copy, bootstrap, start its stack
+new;new <slug> [--workflow W [--lane L] [--tag T]...];cut a worktree and branch from the remote main, copy, bootstrap, start its stack, and write its work order
+workflow;workflow [list | show <workflow>];the workflows this repo offers, or one workflow's lanes and steps
+step;step [done <step> [--approved] | na <step>] [--note TEXT];this branch's work order and next step, or record a step
+lane;lane <lane>;raise this branch's lane; a lane is never lowered
 label;label [slug];print the /rename and /color lines for a session
 up;up;start this worktree's QA stack
 down;down;stop this worktree's own services
@@ -859,14 +862,34 @@ label() { # [slug]
   echo "/color ${c[$(( 0x$h % 8 ))]}"
 }
 
+# ── Workflows ── the logic is in libexec/workflow.py; this tells it which worktree it is about.
+wf() { # $WF_AT, else this worktree
+  local at="${WF_AT:-$REPO_ROOT}"
+  command -v python3 >/dev/null || die "workflows need python3"
+  WF_BASE="$RAMIFY_REMOTE/$RAMIFY_MAIN" WF_ROOT="$at" WF_PRIMARY="$PRIMARY" WF_BRANCH="${WF_BRANCH:-$(branch_of "$at")}" WF_HOME="$RAMIFY_HOME" \
+    RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-}" python3 "$RAMIFY_HOME/libexec/workflow.py" "$@"
+}
+
 # Base on the remote main, never on this checkout's HEAD: it may sit on someone else's branch.
-new() { # slug
-  local slug="${1:-}" parent dest branch p wt autostart=0
-  [ -n "$slug" ] || die "usage: ramify new <slug>"
-  case "$slug" in -*) die "'$slug' is not a slug: it starts with a dash" ;; esac
+new() { # slug [--workflow W] [--lane L] [--tag T]...
+  local slug="" parent dest branch p wt autostart=0 flow="" wfopts=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workflow) case "${2:-}" in ''|-*) die "--workflow needs a value" ;; esac; flow="$2"; shift ;;
+      --lane|--tag) case "${2:-}" in ''|-*) die "$1 needs a value" ;; esac; wfopts+=("$1" "$2"); shift ;;
+      --*=*) die "write '${1%%=*} ${1#*=}', not '$1'" ;;
+      -*) die "'$1' is not a slug: it starts with a dash" ;;
+      *) [ -z "$slug" ] || die "usage: ramify new <slug> [--workflow W]"; slug="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$slug" ] || die "usage: ramify new <slug> [--workflow W [--lane L] [--tag T]...]"
+  [ -n "$flow" ] || [ ${#wfopts[@]} = 0 ] || die "--lane and --tag need --workflow"
   case "$RAMIFY_WORKTREES" in /*) parent="$RAMIFY_WORKTREES" ;; *) parent="$PRIMARY/$RAMIFY_WORKTREES" ;; esac
   mkdir -p "$parent" && parent="$(cd "$parent" && pwd)"
   dest="$parent/$slug"; branch="$RAMIFY_BRANCH_PREFIX$slug"; wt="$slug"
+  # The workflow names the branch, and refuses a bad lane before anything is cut.
+  if [ -n "$flow" ]; then branch="$(wf branch "$flow" "$slug" ${wfopts[@]+"${wfopts[@]}"})" || exit 1; fi
   git -C "$PRIMARY" fetch -q "$RAMIFY_REMOTE" "$RAMIFY_MAIN" || echo "  (fetch failed — cutting from the last known $RAMIFY_REMOTE/$RAMIFY_MAIN)"
   # --no-track: a branch tracking main would pull main and never show its own remote as gone.
   git -C "$PRIMARY" worktree add -q --no-track -b "$branch" "$dest" "$RAMIFY_REMOTE/$RAMIFY_MAIN" || exit 1
@@ -881,6 +904,10 @@ new() { # slug
       mkdir -p "$(dirname "$dest/$p")" && cp -p "$PRIMARY/$p" "$dest/$p"
     fi
   done
+  if [ -n "$flow" ]; then
+    WF_AT="$dest" WF_BRANCH="$branch" wf start "$flow" "$slug" ${wfopts[@]+"${wfopts[@]}"} \
+      || echo "  (no work order written — 'ramify step' will say why)"
+  fi
 
   [ -n "$CONFIG" ] && [ -n "$RAMIFY_SERVICES" ] && [ "${RAMIFY_AUTOSTART:-1}" = 1 ] && autostart=1
   if [ -n "$RAMIFY_BOOTSTRAP" ] || [ "$autostart" = 1 ]; then
@@ -1308,7 +1335,10 @@ show_config() { # [-q | get VAR]
 
 case "${1:-}" in
   setup) exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
-  new) new "${2:-}" ;;
+  new) new "${@:2}" ;;
+  workflow) case "${2:-list}" in list|show) wf "${2:-list}" "${@:3}" ;; *) usage workflow >&2; exit 2 ;; esac ;;
+  step) case "${2:-}" in done|na) wf "${@:2}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step>]" ;; esac ;;
+  lane) wf lane "${@:2}" ;;
   label) label "${2:-}" ;;
   config) show_config "${2:-}" "${3:-}" ;;
   up) up ;;

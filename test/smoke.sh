@@ -315,6 +315,41 @@ check "write-set passes an allowed diff"        "$RAMIFY" write-set "$T/ws-ok.tx
 check "write-set refuses an outside diff"       bash -c "! '$RAMIFY' write-set '$T/ws-bad.txt'"
 git checkout -q main; rm -f src/new.txt
 
+# ── workflows ──
+"$RAMIFY" new wfa --workflow feature --lane light --tag auth >"$T/wf-new.log" 2>&1
+WFA="$T/app-wt/wfa"; ORDER="$WFA/.ramify/work/wfa/order.md"
+WFPY="$(dirname "$RAMIFY")/../libexec/workflow.py"
+check "new --workflow names the branch"         test "$(git -C "$WFA" rev-parse --abbrev-ref HEAD)" = feat/wfa
+check "new --workflow writes the work order"    grep -qx 'branch: feat/wfa' "$ORDER"
+check "a tag raises the lane to its floor"      grep -qx 'lane: standard' "$ORDER"
+check "new refuses an unknown lane"             bash -c "! '$RAMIFY' new wfb --workflow bug --lane light && [ ! -e '$T/app-wt/wfb' ]"
+check "new refuses an unknown workflow"         bash -c "! '$RAMIFY' new wfb --workflow nope && [ ! -e '$T/app-wt/wfb' ]"
+cd "$WFA"
+check "step names the next step"                bash -c "'$RAMIFY' step | grep -q '→ spec'"
+check "steps are recorded in order"             bash -c "! '$RAMIFY' step done build"
+check "a human gate needs --approved"           bash -c "! '$RAMIFY' step done spec"
+check "step done records the step"              bash -c "'$RAMIFY' step done spec --approved && grep -q 'step: spec' '$ORDER'"
+check "step na records n/a"                     bash -c "'$RAMIFY' step na qa-plan && grep -q 'step: qa-plan.*na: true' '$ORDER'"
+check "a lane is never lowered"                 bash -c "! '$RAMIFY' lane light"
+check "the pr gate names what is missing"       bash -c "out=\$(WF_ROOT='$WFA' WF_BRANCH=feat/wfa python3 '$WFPY' gate pr); [ \$? = 1 ] && grep -q 'build, audit, qa, review' <<<\"\$out\""
+mkdir -p .ramify && printf 'workflows: off\n' >.ramify/workflows.yml
+check "a repo turns workflows off"              bash -c "'$RAMIFY' workflow | grep -qx 'workflows are off for this repo'"
+printf 'workflows:\n  x: { lanes: { a: [nope] } }\nsteps: {}\n' >.ramify/workflows.yml
+check "a lane naming an undefined step fails"   bash -c "'$RAMIFY' workflow 2>&1 | grep -q \"names step 'nope'\""
+rm -f .ramify/workflows.yml
+sed -i.bak '/^- {step/d' "$ORDER"
+check "a hand-emptied steps: is not a traceback" bash -c "'$RAMIFY' step 2>&1 | grep -q '→ spec' && ! '$RAMIFY' step 2>&1 | grep -q Traceback"
+mv "$ORDER.bak" "$ORDER"
+check "step done needs a step"                  bash -c "'$RAMIFY' step done 2>&1 | grep -q 'usage: ramify step done'"
+check "workflow keeps internal verbs out"       bash -c "! '$RAMIFY' workflow gate pr"
+cd "$T/app"
+check "gate passes a branch with no work order" env WF_ROOT="$T/app" WF_BRANCH=main python3 "$WFPY" gate pr
+check "new refuses a slug with a slash"         bash -c "! '$RAMIFY' new a/b --workflow tweak && [ ! -e '$T/app-wt/a' ]"
+check "an unknown tag is reported"              bash -c "'$RAMIFY' new wfc --workflow feature --lane light --tag authh | grep -q \"'authh' sets no lane floor\""
+mkdir -p .ramify/work/merged && printf -- '---\nworkflow: tweak\nlane: default\nbranch: chore/merged\n---\n' >.ramify/work/merged/order.md
+git add .ramify && git commit -qm merged && git push -q origin main 2>/dev/null
+check "a merged slug is refused before the cut" bash -c "'$RAMIFY' new merged --workflow tweak 2>&1 | grep -q 'pick another slug' && [ ! -e '$T/app-wt/merged' ]"
+
 # ── hooks ──
 bare="$(mktemp -d)"; git -C "$bare" init -q
 check "hooks are silent without a config"       bash -c "[ -z \"\$(echo '{\"tool_input\":{\"command\":\"git push\"},\"cwd\":\"$bare\"}' | '$HOOK' behind)\" ]"
