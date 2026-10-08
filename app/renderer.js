@@ -154,6 +154,19 @@ function serviceRow(w, s) {
     el('span', { class: 'kind' }, s.state));
 }
 
+// The work order's lane as one segment per step: done, n/a, next, still to do.
+function flowRow(w) {
+  const f = w.workflow;
+  if (!f) return null;
+  if (f.error) return el('div', { class: 'flow broken' }, `workflow: ${f.error}`);
+  const next = f.next ? `→ ${f.next.step}${f.next.gate === 'human' ? ' · human gate' : ''}` : 'every step recorded';
+  return el('div', { class: 'flow', title: f.order },
+    el('span', { class: 'name' }, `${f.workflow} · ${f.lane} ${f.done}/${f.total}`),
+    el('span', { class: 'bar', role: 'img', 'aria-label': `${f.done} of ${f.total} steps recorded` },
+      f.steps.map((s) => el('span', { class: `seg ${s.state}`, title: `${s.step}: ${s.state === 'na' ? 'n/a' : s.state}` }))),
+    el('span', { class: 'name' }, next));
+}
+
 function worktreeCard(project, w) {
   const running = w.slot != null;
   const doing = busy.get(w.path);
@@ -193,6 +206,7 @@ function worktreeCard(project, w) {
 
   return el('div', { class: `card${running || !project.stacks ? '' : ' idle'}${doing ? ' busy' : ''}` },
     el('div', { class: 'card-top' }, el('div', {}, el('div', { class: 'card-name' }, w.name, ticket), branch), meta),
+    flowRow(w),
     // Failures of a step, not of a listed service: containers, slots, bootstrap, or a service
     // whose failed prepare took the whole stack down with it.
     w.errors.filter((e) => !w.services.some((s) => s.name === e.service)).map((e) =>

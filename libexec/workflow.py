@@ -5,7 +5,7 @@ Usage:  workflow.py list                          the workflows and their lanes
         workflow.py show <workflow>               each lane's steps, with skill and gate
         workflow.py branch <workflow> <slug>      the branch name the workflow gives a slug
         workflow.py start <workflow> <slug> [--lane L] [--tag T]...   write the work order
-        workflow.py status [--json]               this branch's progress and next step
+        workflow.py status [--json | --line]      this branch's progress and next step
         workflow.py done <step> [--approved] [--note TEXT]
         workflow.py na <step> [--note TEXT]       record the step as not applicable
         workflow.py lane <lane>                   raise the lane; never lowers it
@@ -315,26 +315,53 @@ def cmd_start(defs, args):
         print(f"  lane            raised from {asked} to {lane} by its tags")
 
 
-def cmd_status(defs, args):
+def progress(defs):
+    """This branch's work order as data, or None when it has none."""
     path = find_order(defs)
     if path is None:
+        return None
+    path, meta, _, wf = current(defs)
+    lane = wf["lanes"][meta["lane"]]
+    todo = pending(meta, wf)
+    nxt = todo[0] if todo else None
+    by_step = {s.get("step"): s for s in meta["steps"]}
+    step = defs["steps"][nxt] if nxt else {}
+    return {
+        "workflow": meta["workflow"], "lane": meta["lane"], "order": os.path.relpath(path, env("WF_ROOT")),
+        "done": len(lane) - len(todo), "total": len(lane),
+        "next": {"step": nxt, "skill": step.get("skill"), "gate": step.get("gate", "auto")} if nxt else None,
+        "steps": [{"step": s, "state": ("na" if by_step[s].get("na") else "done") if s in by_step
+                   else "next" if s == nxt else "todo"} for s in lane],
+    }
+
+
+def line(p):
+    nxt = p["next"]
+    where = f"→ {nxt['step']}{' (human)' if nxt['gate'] == 'human' else ''}" if nxt else "✓ done"
+    return f"{p['workflow']}/{p['lane']} {p['done']}/{p['total']} {where}"
+
+
+def cmd_status(defs, args):
+    if "--json" in args or "--line" in args:
+        # The dashboard and the status line read this: a broken order is data, not a crash.
+        try:
+            p = progress(defs)
+        except Fail as e:
+            p = {"error": str(e)}
         if "--json" in args:
-            print("null")
-            return
+            print(json.dumps(p))
+        elif p:
+            # The card and the status line are narrow: the reason is in `ramify step`.
+            print("workflow: broken, see `ramify step`" if "error" in p else line(p))
+        return
+    path = find_order(defs)
+    if path is None:
         raise Fail(f"no work order for branch {env('WF_BRANCH')}")
     path, meta, _, wf = current(defs)
     lane = wf["lanes"][meta["lane"]]
     todo = pending(meta, wf)
     nxt = todo[0] if todo else None
     rel = os.path.relpath(path, env("WF_ROOT"))
-    if "--json" in args:
-        step = defs["steps"][nxt] if nxt else {}
-        print(json.dumps({
-            "workflow": meta["workflow"], "lane": meta["lane"], "order": rel,
-            "done": len(lane) - len(todo), "total": len(lane),
-            "next": {"step": nxt, "skill": step.get("skill"), "gate": step.get("gate", "auto")} if nxt else None,
-        }))
-        return
     print(f"{meta['workflow']} · {meta['lane']} lane · {rel}")
     by_step = {s.get("step"): s for s in meta["steps"]}
     for s in lane:
@@ -429,6 +456,8 @@ def main(argv):
         if cmd == "status" and "--json" in args:
             print("null")
             return 0
+        if cmd == "status" and "--line" in args:
+            return 0
         if cmd == "gate":
             return 0
         if cmd in ("branch", "start", "done", "na", "lane"):
@@ -437,6 +466,12 @@ def main(argv):
         print("workflows are off for this repo")
         return 0
     except Fail as e:
+        if cmd == "status" and "--json" in args:
+            print(json.dumps({"error": str(e)}))
+            return 0
+        if cmd == "status" and "--line" in args:
+            print("workflow: broken, see `ramify step`")
+            return 0
         print(f"ramify: {e}", file=sys.stderr)
         return 1
 

@@ -6,7 +6,8 @@
 # where it started: without the pin, the status line shows the primary checkout's branch.
 #
 # Plain: "𖣂 tm-127-pagination ⎇ story/tm-127-pagination", or "𖣂 main" in the primary checkout.
-# --json: {"root","worktree","branch","primary","icon","slot","ticket","stack","answering","services"},
+# With a work order: "… · feature/light 3/6 → review".
+# --json: {"root","worktree","branch","primary","icon","slot","ticket","stack","answering","services","workflow"},
 # for a status line that draws its own. slot is set while the worktree's stack runs; ticket once
 # RAMIFY_JIRA_URL is set. stack is "up", "partial", "down", "stopped", or null without services.
 # Prints nothing where ramify is not set up. RAMIFY_STATUSLINE_ICON replaces the tree.
@@ -61,6 +62,14 @@ if grep -q '^RAMIFY_SERVICES=.' "$conf"; then
     else stack=partial; fi
   fi
 fi
+# The work order's progress, when the branch has one: "feature/light 3/6 → review".
+flow=""; flow_json=null
+if [ -d "$root/.ramify" ] || [ -d "$primary/.ramify" ]; then
+  off="$(sed -n "s/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}RAMIFY_WORKFLOWS=['\"]*\([^'\" #]*\).*/\2/p" "$conf" | tail -1)"
+  wfenv=(WF_ROOT="$root" WF_PRIMARY="$primary" WF_BRANCH="$branch" RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-$off}")
+  if [ "${1:-}" = --json ]; then flow_json="$(env "${wfenv[@]}" python3 "$(dirname "$0")/workflow.py" status --json 2>/dev/null)"
+  else flow="$(env "${wfenv[@]}" python3 "$(dirname "$0")/workflow.py" status --line 2>/dev/null)"; fi
+fi
 case "$stack" in
   up|partial) health=" · $answering/$total up" ;;
   down) health=" · stack down" ;;
@@ -74,14 +83,15 @@ if [ "${1:-}" = --json ]; then
     s="-${branch//\//-}-"
     [[ "$s" =~ -(${pattern:-[A-Za-z][A-Za-z0-9]*-[0-9]+})- ]] && ticket="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
   fi
-  STACK="$stack" ANSWERING="$answering" TOTAL="$total" SLOT="$slot" TICKET="$ticket" ROOT="$root" WT="$wt" BRANCH="$branch" PRIMARY="$([ "$root" = "$primary" ] && echo 1)" ICON="$icon" python3 -c '
+  WORKFLOW="${flow_json:-null}" STACK="$stack" ANSWERING="$answering" TOTAL="$total" SLOT="$slot" TICKET="$ticket" ROOT="$root" WT="$wt" BRANCH="$branch" PRIMARY="$([ "$root" = "$primary" ] && echo 1)" ICON="$icon" python3 -c '
 import json, os
 e = os.environ
 print(json.dumps({"root": e["ROOT"], "worktree": e["WT"], "branch": e["BRANCH"], "primary": e["PRIMARY"] == "1", "icon": e["ICON"],
                   "slot": int(e["SLOT"]) if e["SLOT"].isdigit() else None, "ticket": e["TICKET"] or None,
-                  "stack": e["STACK"] or None, "answering": int(e["ANSWERING"]), "services": int(e["TOTAL"])}))'
+                  "stack": e["STACK"] or None, "answering": int(e["ANSWERING"]), "services": int(e["TOTAL"]),
+                  "workflow": json.loads(e["WORKFLOW"])}))'
 elif [ "$root" = "$primary" ]; then
-  printf '%s %s%s\n' "$icon" "$branch" "$health"
+  printf '%s %s%s%s\n' "$icon" "$branch" "$health" "${flow:+ · $flow}"
 else
-  printf '%s %s ⎇ %s%s\n' "$icon" "$wt" "$branch" "$health"
+  printf '%s %s ⎇ %s%s%s\n' "$icon" "$wt" "$branch" "$health" "${flow:+ · $flow}"
 fi
