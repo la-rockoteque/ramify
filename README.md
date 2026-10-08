@@ -64,7 +64,10 @@ ramify prune --apply       # remove merged branches and their worktrees
 |---|---|
 | `setup [--print\|--force] [--local]` | Draft a config from the repo |
 | `config [-q\|get VAR]` | Show the resolved config, or one value |
-| `new <slug>` | Cut a worktree and branch from the remote main, copy gitignored paths, bootstrap, start the stack |
+| `new <slug> [--workflow W [--lane L] [--tag T]…]` | Cut a worktree and branch from the remote main, copy gitignored paths, bootstrap, start the stack. With `--workflow`, also write the work order, see [Workflows](#workflows) |
+| `workflow [list\|show <workflow>]` | The workflows of this repo, or the lanes and steps of one |
+| `step [done <step> [--approved]\|na <step>] [--note TEXT]` | This branch's work order and next step, or record a step |
+| `lane <lane>` | Raise this branch's lane. A lane is never lowered |
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
 | `ping` | Exit 0 when every service of this worktree answers |
@@ -128,6 +131,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |
 | `RAMIFY_TICKET_PATTERN` / `RAMIFY_JIRA_DONE` | `[A-Za-z][A-Za-z0-9]*-[0-9]+` / none | The key in a branch name; the done transition to pick when there are several |
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
+| `RAMIFY_WORKFLOWS` | `1` | `0` turns workflows off for the repo, see [Workflows](#workflows) |
 | `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `5` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
 
 ### Processes
@@ -167,6 +171,37 @@ With `RAMIFY_JIRA_URL` set, ramify reads a Jira key from each branch name as a w
 Run `ramify jira login` once per Jira site. It stores your email and an
 [API token](https://id.atlassian.com/manage-profile/security/api-tokens) in the macOS Keychain,
 not in the repo config. On Linux, export `RAMIFY_JIRA_EMAIL` and `RAMIFY_JIRA_TOKEN` instead.
+
+### Workflows
+
+A workflow is the path a piece of work takes, from the spec to the merge. ramify ships four in
+[workflows.yml](workflows.yml): `feature`, `bug`, `tweak` and `spike`. Each workflow has one or
+more lanes. A lane is the ordered list of steps that work goes through. `feature` has `light`
+and `standard`, and `bug` has `hotfix` and `standard`.
+
+```bash
+ramify new login-form --workflow feature --lane light --tag auth   # auth puts it on standard
+ramify step                          # the work order, ✓ recorded, → next, with its skill
+ramify step done spec --approved     # a human gate: only after the user's explicit OK
+ramify step na qa-plan --note "no UI"
+ramify lane standard                 # raise the lane; lowering is refused
+```
+
+- `new --workflow` takes the branch name from the workflow (`feat/login-form`), and writes the
+  work order to `.ramify/work/<slug>/order.md`. The work order is YAML frontmatter
+  (`workflow`, `lane`, `branch`, `tags`, `created`, `steps`), then free prose. Commit it with
+  the branch. The step outputs go in the same folder.
+- The `branch` in the frontmatter ties the work order to its worktree. A slug whose work order
+  is already on main is refused: pick another one.
+- Steps are recorded in lane order. A step that does not apply is recorded `na`.
+- A step with `gate: human` is recorded only with `--approved`, after the user's explicit OK.
+- `min_lane` maps a tag to the lightest lane allowed: `--tag auth` puts a feature on `standard`.
+  A lane goes up, never down.
+
+A repo replaces the defaults with its own `.ramify/workflows.yml` in the same shape, or turns
+workflows off with a file that holds `workflows: off`. `RAMIFY_WORKFLOWS=0` in the config does
+the same. A repo with workflows off keeps its own process, and ramify does not touch it. The
+YAML is parsed with a vendored copy of PyYAML 6.0.2 (pure python, MIT, `libexec/vendor/yaml`).
 
 ### The status line
 
@@ -224,7 +259,7 @@ any more, drops out of the list; delete its line to forget it for good.
 ## Test
 
 ```bash
-test/smoke.sh                 # new, up, shared/private, dash --json, memory, strays, up lock, down, cleanup, prune, write-set, hooks, setup
+test/smoke.sh                 # new, up, shared/private, dash --json, memory, strays, up lock, down, cleanup, prune, write-set, workflows, hooks, setup
 ramify write-set --self-test
 ```
 

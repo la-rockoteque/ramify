@@ -1,0 +1,58 @@
+# ramify's default workflows. A repo replaces them with its own .ramify/workflows.yml, or turns
+# them off with a file that holds only `workflows: off`.
+#
+# A workflow is a set of lanes. A lane is the ordered list of steps a piece of work goes through.
+# Lanes are listed from the lightest to the heaviest: a lane can be raised, never lowered.
+# `min_lane` maps a tag to the lightest lane that work with this tag may take.
+
+work_dir: .ramify/work
+
+workflows:
+  feature:
+    does: new behaviour, one branch and one PR
+    branch: feat/{slug}
+    default_lane: standard
+    lanes:
+      light:    [spec, qa-plan, build, review, pr, finale]
+      standard: [spec, qa-plan, build, audit, qa, review, pr, finale]
+    min_lane: { auth: standard, payments: standard, permissions: standard, personal-data: standard }
+
+  bug:
+    does: fix broken behaviour, root cause first
+    branch: fix/{slug}
+    default_lane: standard
+    lanes:
+      hotfix:   [diagnose, fix, review, pr, finale]
+      standard: [diagnose, fix, audit, verify, review, pr, finale]
+    min_lane: { auth: standard, payments: standard, permissions: standard, personal-data: standard }
+
+  tweak:
+    does: a small change that is neither a bug nor a feature
+    branch: chore/{slug}
+    lanes:
+      default: [scope, apply, review, pr, finale]
+
+  spike:
+    does: a throwaway prototype that answers one question, no PR
+    branch: spike/{slug}
+    lanes:
+      default: [frame, prototype, decide]
+
+# What each step is. `gate: human` means the step is recorded only after the user's explicit OK.
+steps:
+  spec:      { skill: ramify:spec,      gate: human, does: write what to build and the acceptance criteria }
+  qa-plan:   { skill: ramify:qa-plan,   gate: human, does: "plan how each acceptance criterion is checked, before the build" }
+  build:     { skill: ramify:build,     does: write the code and its tests against the spec }
+  audit:     { skill: ramify:audit,     does: "check the diff against the spec or the report, criterion by criterion" }
+  qa:        { skill: ramify:qa,        does: run the QA plan on the running stack and record the results }
+  review:    { skill: ramify:review,    gate: human, does: review the diff and fix every finding }
+  pr:        { skill: ramify:pr,        does: open the pull request }
+  finale:    { skill: ramify:finale,    does: "after the merge, remove the worktree and branch and close the ticket" }
+  diagnose:  { skill: ramify:diagnose,  gate: human, does: "reproduce, find the root cause, write a failing test" }
+  fix:       { skill: ramify:fix,       does: the smallest change that makes the failing test pass }
+  verify:    { skill: ramify:verify,    does: "build, type-check, lint and run the whole suite" }
+  scope:     { skill: ramify:scope,     gate: human, does: say what changes and check it is not a feature or a bug }
+  apply:     { skill: ramify:apply,     does: make the change }
+  frame:     { skill: ramify:frame,     gate: human, does: "state the question, the time box and what would answer it" }
+  prototype: { skill: ramify:prototype, does: "build the least that answers the question, write the finding" }
+  decide:    { skill: ramify:decide,    gate: human, does: "discard the branch, or seed a feature from the finding" }
