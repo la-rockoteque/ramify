@@ -25,7 +25,7 @@ setup;setup [--print | --force] [--local];write .ramify.conf for this repo
 config;config [-q | get VAR];show the resolved config; -q tests that one exists
 new;new <slug> [--workflow W [--lane L] [--tag T]...];cut a worktree and branch from the remote main, copy, bootstrap, start its stack, and write its work order
 workflow;workflow [list | show <workflow>];the workflows this repo offers, or one workflow's lanes and steps
-step;step [done <step> [--approved] | na <step>] [--note TEXT];this branch's work order and next step, or record a step
+step;step [done <step> [--approved] | na <step> | gate <step>|--pr] [--note TEXT];this branch's work order and next step, record a step, or exit 1 while <step> waits on earlier ones
 lane;lane <lane>;raise this branch's lane; a lane is never lowered
 label;label [slug];print the /rename and /color lines for a session
 up;up;start this worktree's QA stack
@@ -119,6 +119,7 @@ done
 : "${RAMIFY_QA_NOTES:=}"
 : "${RAMIFY_JIRA_URL:=}"
 : "${RAMIFY_JIRA_DONE:=}"
+: "${RAMIFY_GATE_WORKFLOW:=1}"
 : "${RAMIFY_TICKET_PATTERN:=[A-Za-z][A-Za-z0-9]*-[0-9]+}"
 
 # A fixed /tmp, not $TMPDIR: a sandboxed agent shell and a hook see different $TMPDIRs, and the
@@ -1346,7 +1347,7 @@ case "${1:-}" in
   setup) exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
   new) new "${@:2}" ;;
   workflow) case "${2:-list}" in list|show) wf "${2:-list}" "${@:3}" ;; *) usage workflow >&2; exit 2 ;; esac ;;
-  step) case "${2:-}" in done|na) wf "${@:2}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step>]" ;; esac ;;
+  step) case "${2:-}" in done|na|gate) wf "${@:2}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr]" ;; esac ;;
   lane) wf lane "${@:2}" ;;
   label) label "${2:-}" ;;
   config) show_config "${2:-}" "${3:-}" ;;

@@ -66,7 +66,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `config [-q\|get VAR]` | Show the resolved config, or one value |
 | `new <slug> [--workflow W [--lane L] [--tag T]…]` | Cut a worktree and branch from the remote main, copy gitignored paths, bootstrap, start the stack. With `--workflow`, also write the work order, see [Workflows](#workflows) |
 | `workflow [list\|show <workflow>]` | The workflows of this repo, or the lanes and steps of one |
-| `step [done <step> [--approved]\|na <step>] [--note TEXT]` | This branch's work order and next step, or record a step |
+| `step [done <step> [--approved]\|na <step>\|gate <step>\|--pr] [--note TEXT]` | This branch's work order and next step, record a step, or exit 1 while a step waits on earlier ones |
 | `lane <lane>` | Raise this branch's lane. A lane is never lowered |
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
@@ -131,6 +131,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |
 | `RAMIFY_TICKET_PATTERN` / `RAMIFY_JIRA_DONE` | `[A-Za-z][A-Za-z0-9]*-[0-9]+` / none | The key in a branch name; the done transition to pick when there are several |
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
+| `RAMIFY_GATE_WORKFLOW` | `1` | `0` lets `gh pr create` through before the work order is ready |
 | `RAMIFY_WORKFLOWS` | `1` | `0` turns workflows off for the repo, see [Workflows](#workflows) |
 | `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `5` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
 
@@ -195,6 +196,12 @@ ramify lane standard                 # raise the lane; lowering is refused
   is already on main is refused: pick another one.
 - Steps are recorded in lane order. A step that does not apply is recorded `na`.
 - A step with `gate: human` is recorded only with `--approved`, after the user's explicit OK.
+- The step marked `opens_pr: true` (`pr` in the defaults) waits on every step before it. The
+  plugin refuses `gh pr create` and `gh pr ready` until they are recorded, and names the next
+  one with its skill. `gh pr create --draft` (or `-d`) is not gated. A broken work order does not
+  block the PR either: `ramify step` says what is wrong. The command is parsed as shell words, so
+  `gh -R owner/repo pr create` is caught, but an alias or `$(which gh)` is not. A lane without such a step opens
+  PRs freely. `ramify step gate --pr` runs the same check.
 - `min_lane` maps a tag to the lightest lane allowed: `--tag auth` puts a feature on `standard`.
   A lane goes up, never down.
 
@@ -249,10 +256,12 @@ version). Plugin updates reuse it. The window runs detached from the shell that 
 
 ### The plugin
 
-The hooks do nothing in a repo without a config.
+The hooks do nothing in a repo without a config. The workflow hooks need only a `.ramify` folder.
 
 - **PreToolUse `git push`**: refuses the push while the branch is behind main.
-- **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack.
+- **PreToolUse `gh pr create` / `gh pr ready`**: refuses while the work order has steps missing before its PR step. Drafts pass.
+- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step.
+- **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
 - **SessionEnd**: stops this worktree's stack.

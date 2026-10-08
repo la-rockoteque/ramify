@@ -371,6 +371,28 @@ git checkout -q -b behind; git checkout -q main
 echo more >>src/api.txt; git commit -qam more; git push -q origin main 2>/dev/null; git checkout -q behind
 out="$(printf '{"cwd":"%s","tool_input":{"command":"git push -u origin behind"}}' "$T/app" | "$HOOK" behind)"
 check "behind hook denies a stale push"         grep -q '"permissionDecision": "deny"' <<<"$out"
+prg() { printf '{"cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2" | "$HOOK" pr-gate; }
+out="$(prg "$WFA" 'gh pr create --fill')"
+check "pr-gate refuses a PR with steps missing" bash -c "grep -q '\"permissionDecision\": \"deny\"' <<<'$out' && grep -q 'pr waits on: build, audit, qa, review' <<<'$out'"
+check "pr-gate names the next skill"            grep -q 'Next: build — invoke ramify:build' <<<"$out"
+check "pr-gate lets a draft through"            test -z "$(prg "$WFA" 'gh pr create --draft --fill')"
+check "pr-gate ignores a branch with no order"  test -z "$(prg "$T/app" 'gh pr create --fill')"
+check "pr-gate ignores other commands"          test -z "$(prg "$WFA" 'gh pr view 3')"
+mkdir -p "$WFA/sub"
+check "pr-gate holds from a subfolder"          grep -q '"permissionDecision": "deny"' <<<"$(prg "$WFA/sub" 'gh pr create --fill')"
+check "pr-gate sees gh -R owner/repo"           grep -q '"permissionDecision": "deny"' <<<"$(prg "$WFA" 'gh -R o/r pr create --fill')"
+check "pr-gate lets a multi-line draft through" test -z "$(prg "$WFA" 'gh pr create --title x \\\n  --draft')"
+cp "$ORDER" "$ORDER.keep"; sed -i.bak 's/^lane: .*/lane: zz/' "$ORDER"
+check "pr-gate lets a broken order through"     test -z "$(prg "$WFA" 'gh pr create --fill')"
+mv "$ORDER.keep" "$ORDER"; rm -f "$ORDER.bak"
+echo 'RAMIFY_GATE_WORKFLOW=0' >>"$WFA/.ramify.conf"
+check "RAMIFY_GATE_WORKFLOW=0 turns it off"     test -z "$(prg "$WFA" 'gh pr create --fill')"
+git -C "$WFA" checkout -q .ramify.conf
+(cd "$WFA" && "$RAMIFY" step done build && "$RAMIFY" step done audit && "$RAMIFY" step done qa && "$RAMIFY" step done review --approved) >/dev/null
+check "pr-gate opens once the steps are in"     test -z "$(prg "$WFA" 'gh pr ready')"
+out="$(printf '{"session_id":"none","source":"startup"}' | CLAUDE_PROJECT_DIR="$WFA" "$HOOK" session-start)"
+check "session-start names the next step"       bash -c "grep -q '\"hookEventName\": \"SessionStart\"' <<<'$out' && grep -q '→ pr' <<<'$out'"
+check "session-start is silent without workflows" test -z "$(printf '{"session_id":"none"}' | CLAUDE_PROJECT_DIR=/ "$HOOK" session-start)"
 
 # ── setup drafts a config from what the repo shows ──
 S="$T/drafted"; git init -q -b trunk "$S"; mkdir -p "$S/ui"

@@ -9,7 +9,8 @@ Usage:  workflow.py list                          the workflows and their lanes
         workflow.py done <step> [--approved] [--note TEXT]
         workflow.py na <step> [--note TEXT]       record the step as not applicable
         workflow.py lane <lane>                   raise the lane; never lowers it
-        workflow.py gate <step>                   exit 0 when every step before <step> is recorded
+        workflow.py gate <step> | --pr            exit 0 when every step before <step> is recorded,
+                                                  1 while some are not, 2 when the order is broken
 
 Context comes from the environment: WF_ROOT (the worktree), WF_PRIMARY (the primary checkout),
 WF_BRANCH (the current branch), WF_HOME (ramify's install, default this script's),
@@ -94,7 +95,7 @@ def check_definitions(defs, path):
     for s, d in steps.items():
         if d is not None and not isinstance(d, dict):
             raise Fail(f"{path}: step {s} is not a map")
-        extra = set(d or {}) - {"skill", "gate", "does"}
+        extra = set(d or {}) - {"skill", "gate", "does", "opens_pr"}
         if extra:
             raise Fail(f"{path}: step {s} has unknown keys {sorted(map(str, extra))} — quote a `does` that holds a comma")
         if (d or {}).get("gate", "auto") not in ("auto", "human"):
@@ -421,17 +422,24 @@ def cmd_lane(defs, args):
 
 
 def cmd_gate(defs, args):
+    """`gate --pr` gates on the lane's first `opens_pr` step; a lane without one opens PRs freely."""
     if len(args) != 1:
-        raise Fail("usage: workflow.py gate <step>")
+        raise Fail("usage: workflow.py gate <step> | --pr")
     if find_order(defs) is None:
         return 0  # a branch without a work order is not in a workflow
     path, meta, _, wf = current(defs)
     lane = wf["lanes"][meta["lane"]]
-    if args[0] not in lane:
+    target = args[0]
+    if target == "--pr":
+        target = next((s for s in lane if (defs["steps"][s] or {}).get("opens_pr")), None)
+    if target not in lane:
         return 0
-    missing = [s for s in lane[:lane.index(args[0])] if s not in recorded(meta)]
+    missing = [s for s in lane[:lane.index(target)] if s not in recorded(meta)]
     if missing:
-        print(f"{args[0]} waits on: {', '.join(missing)} ({os.path.relpath(path, env('WF_ROOT'))})")
+        d = defs["steps"][missing[0]] or {}
+        print(f"{target} waits on: {', '.join(missing)} ({os.path.relpath(path, env('WF_ROOT'))}). "
+              f"Next: {missing[0]}{' — invoke ' + d['skill'] if d.get('skill') else ''}"
+              f"{', a human gate' if d.get('gate') == 'human' else ''}.")
         return 1
     return 0
 
@@ -466,6 +474,9 @@ def main(argv):
         print("workflows are off for this repo")
         return 0
     except Fail as e:
+        if cmd == "gate":
+            print(f"ramify: {e}", file=sys.stderr)
+            return 2  # not "steps missing": the hook lets the PR through on this one
         if cmd == "status" and "--json" in args:
             print(json.dumps({"error": str(e)}))
             return 0
