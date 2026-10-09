@@ -262,7 +262,7 @@ The hooks do nothing in a repo without a config. The workflow hooks need only a 
 
 - **PreToolUse `git push`**: refuses the push while the branch is behind main.
 - **PreToolUse `gh pr create` / `gh pr ready`**: refuses while the work order has steps missing before its PR step. Drafts pass.
-- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step.
+- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step. On startup, resume and fork in a linked worktree, it also names the session after the slug, unless the session already has a name.
 - **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.

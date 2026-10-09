@@ -394,6 +394,11 @@ check "pr-gate opens once the steps are in"     test -z "$(prg "$WFA" 'gh pr rea
 out="$(printf '{"session_id":"none","source":"startup"}' | CLAUDE_PROJECT_DIR="$WFA" "$HOOK" session-start)"
 check "session-start names the next step"       bash -c "grep -q '\"hookEventName\": \"SessionStart\"' <<<'$out' && grep -q '→ pr' <<<'$out'"
 check "session-start is silent without workflows" test -z "$(printf '{"session_id":"none"}' | CLAUDE_PROJECT_DIR=/ "$HOOK" session-start)"
+check "session-start names a worktree session"  grep -q "\"sessionTitle\": \"$(basename "$WFA")\"" <<<"$out"
+ss() { printf '{"session_id":"none",%s}' "$2" | CLAUDE_PROJECT_DIR="$1" "$HOOK" session-start; }
+check "session-start keeps a custom name"       bash -c "! grep -q sessionTitle <<<'$(ss "$WFA" '"source":"resume","session_title":"mine"')'"
+check "session-start leaves /clear alone"       bash -c "! grep -q sessionTitle <<<'$(ss "$WFA" '"source":"clear"')'"
+check "session-start leaves the primary unnamed" bash -c "! grep -q sessionTitle <<<'$(ss "$T/app" '"source":"startup"')'"
 
 # ── setup drafts a config from what the repo shows ──
 S="$T/drafted"; git init -q -b trunk "$S"; mkdir -p "$S/ui"

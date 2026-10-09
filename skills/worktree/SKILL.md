@@ -33,7 +33,8 @@ are `main`, no prefix and `../<repo>-wt`.
 
 `new` prints two lines: `/rename <slug>` and `/color <name>`. Give them to the human to paste —
 both are built-ins an agent cannot run. The colour is hashed from the slug, so a tree keeps it
-across sessions and `/clear`.
+across sessions and `/clear`. A session that starts or resumes in the worktree gets the name from
+the SessionStart hook, so it only needs the `/color` line.
 
 ## Every command starts in the worktree
 
