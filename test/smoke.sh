@@ -7,7 +7,7 @@ set -uo pipefail
 RAMIFY="$(cd "$(dirname "$0")/.." && pwd)/bin/ramify"
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/hooks/ramify-hook"
 T="$(cd "$(mktemp -d)" && pwd -P)"
-export RAMIFY_STATE_DIR="$T/state" RAMIFY_REGISTRY="$T/registry" RAMIFY_AUTOSTART=0
+export RAMIFY_STATE_DIR="$T/state" RAMIFY_REGISTRY="$T/registry" RAMIFY_AUTOSTART=0 RAMIFY_POPUP=0 WF_POLL=0.2
 # A fake docker: prune --apply must never reach the machine's real images. It logs each call.
 mkdir -p "$T/bin"
 printf '#!/bin/sh\necho "$*" >>"%s/docker.log"\n' "$T" >"$T/bin/docker"; chmod +x "$T/bin/docker"
@@ -338,7 +338,26 @@ cd "$WFA"
 check "step names the next step"                bash -c "'$RAMIFY' step | grep -q '→ spec'"
 check "steps are recorded in order"             bash -c "! '$RAMIFY' step done build"
 check "a human gate needs --approved"           bash -c "! '$RAMIFY' step done spec"
-check "step done records the step"              bash -c "'$RAMIFY' step done spec --approved && grep -q 'step: spec' '$ORDER'"
+# approvals: the agent asks, the human decides, the agent waits
+SPEC="$WFA/.ramify/work/wfa/spec.md"
+check "ask needs the file it shows"             bash -c "! '$RAMIFY' step ask spec"
+printf '# Spec\n\n- AC1: it works\n' >"$SPEC"
+check "ask refuses a step that is not a gate"   bash -c "! '$RAMIFY' step ask build"
+check "approve needs an open request"           bash -c "! '$RAMIFY' approve spec"
+check "ask puts the gate up"                    bash -c "'$RAMIFY' step ask spec && grep -q 'step: spec' '$ORDER' && grep -q 'asked:' '$ORDER'"
+check "status --line says it waits on you"      test "$(WF_ROOT="$WFA" WF_BRANCH=feat/wfa python3 "$WFPY" status --line)" = "feature/standard 0/8 ⏳ spec waits on you"
+check "gates --json lists it with its text"     bash -c "'$RAMIFY' gates --json | python3 -c 'import json,sys; g=json.load(sys.stdin); assert len(g) == 1 and g[0][\"ask\"][\"step\"] == \"spec\", g; f=g[0][\"ask\"][\"files\"]; assert [x[\"path\"] for x in f] == [\".ramify/work/wfa/spec.md\", \".ramify/work/wfa/order.md\"] and \"AC1\" in f[0][\"text\"], f'"
+check "wait times out without a decision"       bash -c "! '$RAMIFY' step wait spec --timeout 0"
+check "a rejection needs a note"                bash -c "! '$RAMIFY' reject spec"
+check "reject answers the request"              bash -c "'$RAMIFY' reject spec --note 'add an error state' && ! grep -q '^- {step: spec' '$ORDER'"
+check "wait reports the rejection and its note" test "$("$RAMIFY" step wait spec --timeout 1)" = "rejected: add an error state"
+check "a rejected request leaves gates"         test "$("$RAMIFY" gates --json)" = "[]"
+"$RAMIFY" step ask spec >/dev/null
+"$RAMIFY" step wait spec --timeout 10 >"$T/wait.out" & waiter=$!
+"$RAMIFY" approve spec --note 'ship it' >/dev/null
+wait "$waiter"; rc=$?
+check "approve wakes a waiting agent"           bash -c "[ $rc = 0 ] && [ \"\$(cat '$T/wait.out')\" = 'approved: ship it' ]"
+check "approve records the step"                bash -c "grep -q 'step: spec' '$ORDER' && grep -q 'note: ship it' '$ORDER' && ! grep -q '^ask:' '$ORDER'"
 check "step na records n/a"                     bash -c "'$RAMIFY' step na qa-plan && grep -q 'step: qa-plan.*na: true' '$ORDER'"
 check "a lane is never lowered"                 bash -c "! '$RAMIFY' lane light"
 check "status --line sums up the lane"          test "$(WF_ROOT="$WFA" WF_BRANCH=feat/wfa python3 "$WFPY" status --line)" = "feature/standard 2/8 → build"
@@ -382,6 +401,11 @@ echo more >>src/api.txt; git commit -qam more; git push -q origin main 2>/dev/nu
 out="$(printf '{"cwd":"%s","tool_input":{"command":"git push -u origin behind"}}' "$T/app" | "$HOOK" behind)"
 check "behind hook denies a stale push"         grep -q '"permissionDecision": "deny"' <<<"$out"
 prg() { printf '{"cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2" | "$HOOK" pr-gate; }
+dg() { printf '{"cwd":"%s","tool_input":{"command":"%s"}}' "$WFA" "$1" | "$HOOK" decide-guard; }
+check "decide-guard keeps approve from the agent" grep -q '"permissionDecision": "deny"' <<<"$(dg 'ramify approve spec')"
+check "decide-guard sees a reject after &&"     grep -q '"permissionDecision": "deny"' <<<"$(dg 'cd x && RAMIFY_ROOT=y ramify reject spec --note no')"
+check "decide-guard lets ask and wait through"  test -z "$(dg 'ramify step ask spec; ramify step wait spec')"
+check "decide-guard ignores a word in a message" test -z "$(dg 'git commit -m \\"approve the spec\\"')"
 out="$(prg "$WFA" 'gh pr create --fill')"
 check "pr-gate refuses a PR with steps missing" bash -c "grep -q '\"permissionDecision\": \"deny\"' <<<'$out' && grep -q 'pr waits on: build, audit, qa, review' <<<'$out'"
 check "pr-gate names the next skill"            grep -q 'Next: build — invoke ramify:build' <<<"$out"

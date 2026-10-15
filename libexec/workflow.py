@@ -11,6 +11,11 @@ Usage:  workflow.py list                          the workflows and their lanes
         workflow.py lane <lane>                   raise the lane; never lowers it
         workflow.py gate <step> | --pr            exit 0 when every step before <step> is recorded,
                                                   1 while some are not, 2 when the order is broken
+        workflow.py ask <step> [--file F]...      put a human gate up for a decision in the approvals window
+        workflow.py approve <step> [--note TEXT]  the human's OK: records the step --approved
+        workflow.py reject <step> --note TEXT     the human's no, with what to change
+        workflow.py wait <step> [--timeout S]     block until the human decides; print the decision
+        workflow.py asked --json                  the open request with its files' text, or null
 
 Context comes from the environment: WF_ROOT (the worktree), WF_PRIMARY (the primary checkout),
 WF_BRANCH (the current branch), WF_HOME (ramify's install, default this script's),
@@ -24,6 +29,7 @@ frontmatter is what ties it to a worktree, so a renamed folder still resolves.
 """
 import datetime
 import glob
+import time
 import json
 import os
 import re
@@ -331,6 +337,7 @@ def progress(defs):
         "workflow": meta["workflow"], "lane": meta["lane"], "order": os.path.relpath(path, env("WF_ROOT")),
         "done": len(lane) - len(todo), "total": len(lane),
         "next": {"step": nxt, "skill": step.get("skill"), "gate": step.get("gate", "auto")} if nxt else None,
+        "asked": open_ask(meta),
         "steps": [{"step": s, "state": ("na" if by_step[s].get("na") else "done") if s in by_step
                    else "next" if s == nxt else "todo"} for s in lane],
     }
@@ -339,6 +346,8 @@ def progress(defs):
 def line(p):
     nxt = p["next"]
     where = f"→ {nxt['step']}{' (human)' if nxt['gate'] == 'human' else ''}" if nxt else "✓ done"
+    if p.get("asked"):
+        where = f"⏳ {p['asked']} waits on you"
     return f"{p['workflow']}/{p['lane']} {p['done']}/{p['total']} {where}"
 
 
@@ -399,9 +408,138 @@ def record(defs, step, na, args):
     if opts.get("note"):
         entry["note"] = opts["note"][-1]
     meta["steps"].append(entry)
+    if (meta.get("ask") or {}).get("step") == step:
+        del meta["ask"]  # an OK given in the chat answers the window's request too
     write_order(path, meta, body)
     rest = todo[1:]
     print(f"  recorded {step}{' (n/a)' if na else ''} — next: {rest[0] if rest else 'nothing, every step is recorded'}")
+
+
+# ── Approvals ── the agent asks, the human decides in the approvals window (or the CLI), the
+# agent waits. The request lives in the work order's frontmatter as `ask:`, so it travels with
+# the branch and every reader sees the same state.
+
+def open_ask(meta):
+    """The step that waits on the human, or None. A rejected request is answered, not open."""
+    ask = meta.get("ask")
+    return ask.get("step") if isinstance(ask, dict) and not ask.get("decision") else None
+
+
+def gate_step(defs, meta, wf, step):
+    todo = pending(meta, wf)
+    if step not in wf["lanes"][meta["lane"]]:
+        raise Fail(f"{step} is not a step of the {meta['lane']} lane")
+    if step in recorded(meta):
+        raise Fail(f"{step} is already recorded")
+    if step != todo[0]:
+        raise Fail(f"the next step is {todo[0]}, not {step}")
+    if defs["steps"][step].get("gate") != "human":
+        raise Fail(f"{step} is not a human gate: record it with `ramify step done {step}`")
+
+
+def now():
+    return datetime.datetime.now().replace(microsecond=0).isoformat()
+
+
+def cmd_ask(defs, args):
+    pos, opts = options(args, values=("file",))
+    if len(pos) != 1:
+        raise Fail("usage: ramify step ask <step> [--file PATH]...")
+    step = pos[0]
+    path, meta, body, wf = current(defs)
+    gate_step(defs, meta, wf, step)
+    root, folder = env("WF_ROOT"), os.path.dirname(path)
+    files = []
+    for f in opts.get("file") or [os.path.join(folder, f"{step}.md")]:
+        full = os.path.realpath(f if os.path.isabs(f) else os.path.join(root, f))
+        if not os.path.isfile(full):
+            raise Fail(f"{f}: no such file — write it before you ask, or name it with --file")
+        if os.path.commonpath([full, os.path.realpath(root)]) != os.path.realpath(root):
+            raise Fail(f"{f} is outside the worktree")
+        files.append(os.path.relpath(full, os.path.realpath(root)))
+    order = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+    if order not in files:
+        files.append(order)
+    meta["ask"] = {"step": step, "asked": now(), "files": files}
+    write_order(path, meta, body)
+    print(f"  {step} waits on the human — the approvals window shows {', '.join(files)}")
+
+
+def cmd_decide(defs, args, approve):
+    pos, opts = options(args, values=("note",))
+    verb = "approve" if approve else "reject"
+    if len(pos) != 1:
+        raise Fail(f"usage: ramify {verb} <step> {'[--note TEXT]' if approve else '--note TEXT'}")
+    note = (opts.get("note") or [""])[-1].strip()
+    if not approve and not note:
+        raise Fail("a rejection needs --note: say what to change")
+    step = pos[0]
+    path, meta, body, wf = current(defs)
+    if open_ask(meta) != step:
+        raise Fail(f"nothing asks for a decision on {step} — the agent puts it up with `ramify step ask {step}`")
+    gate_step(defs, meta, wf, step)
+    if approve:
+        entry = {"step": step, "date": today()}
+        if note:
+            entry["note"] = note
+        meta["steps"].append(entry)
+        del meta["ask"]
+    else:
+        meta["ask"].update({"decision": "rejected", "decided": now(), "note": note})
+    write_order(path, meta, body)
+    print(f"  {step} {'approved' if approve else 'rejected'}{': ' + note if note else ''}")
+
+
+def cmd_wait(defs, args):
+    """Exit 0 with `approved` or `rejected: <note>` on stdout; 1 on timeout. Polls the file: the
+    decision can come from the window, the CLI or the chat, and they all end in the work order."""
+    pos, opts = options(args, values=("timeout",))
+    if len(pos) != 1:
+        raise Fail("usage: ramify step wait <step> [--timeout SECONDS]")
+    step = pos[0]
+    deadline = time.monotonic() + float((opts.get("timeout") or [86400])[-1])
+    while True:
+        path, meta, _, wf = current(defs)
+        by_step = {s.get("step"): s for s in meta["steps"]}
+        if step in by_step:
+            note = by_step[step].get("note")
+            print(f"approved{': ' + note if note else ''}")
+            return 0
+        ask = meta.get("ask") or {}
+        if ask.get("step") == step and ask.get("decision") == "rejected":
+            print(f"rejected: {ask.get('note', '')}")
+            return 0
+        if ask.get("step") != step:
+            raise Fail(f"nothing asks for a decision on {step} — run `ramify step ask {step}` first")
+        if time.monotonic() >= deadline:
+            print(f"no decision on {step} yet")
+            return 1
+        time.sleep(float(env("WF_POLL") or 2))
+
+
+def cmd_asked(defs, args):
+    """The approvals window reads this: the open request and the text of its files."""
+    path = find_order(defs)
+    meta = read_order(path)[0] if path else {}
+    step = open_ask(meta)
+    if not step:
+        print("null")
+        return
+    root = os.path.realpath(env("WF_ROOT"))
+    files = []
+    for rel in meta["ask"].get("files") or []:
+        full = os.path.realpath(os.path.join(root, rel))
+        try:
+            if os.path.commonpath([full, root]) != root:
+                raise OSError("outside the worktree")
+            with open(full, encoding="utf-8", errors="replace") as f:
+                text = f.read(512 << 10)
+        except OSError as e:
+            text = f"(cannot read {rel}: {e})"
+        files.append({"path": rel, "text": text})
+    print(json.dumps({"step": step, "does": (defs["steps"].get(step) or {}).get("does"), "asked": meta["ask"].get("asked"),
+                      "workflow": meta["workflow"], "lane": meta["lane"], "branch": meta["branch"], "files": files},
+                     default=str))
 
 
 def cmd_lane(defs, args):
@@ -456,6 +594,9 @@ def main(argv):
             "status": cmd_status, "lane": cmd_lane, "gate": cmd_gate,
             "done": lambda d, a: record(d, a[0] if a else "", False, a[1:]),
             "na": lambda d, a: record(d, a[0] if a else "", True, a[1:]),
+            "ask": cmd_ask, "wait": cmd_wait, "asked": cmd_asked,
+            "approve": lambda d, a: cmd_decide(d, a, True),
+            "reject": lambda d, a: cmd_decide(d, a, False),
         }
         if cmd not in table:
             raise Fail(f"unknown command {cmd}")
@@ -468,7 +609,10 @@ def main(argv):
             return 0
         if cmd == "gate":
             return 0
-        if cmd in ("branch", "start", "done", "na", "lane"):
+        if cmd == "asked":
+            print("null")
+            return 0
+        if cmd in ("branch", "start", "done", "na", "lane", "ask", "approve", "reject", "wait"):
             print("ramify: workflows are off for this repo", file=sys.stderr)
             return 1
         print("workflows are off for this repo")
@@ -482,6 +626,9 @@ def main(argv):
             return 0
         if cmd == "status" and "--line" in args:
             print("workflow: broken, see `ramify step`")
+            return 0
+        if cmd == "asked":
+            print("null")  # a broken order is the dashboard's to report; the window shows what it can
             return 0
         print(f"ramify: {e}", file=sys.stderr)
         return 1

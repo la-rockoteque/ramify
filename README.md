@@ -67,6 +67,9 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `new <slug> [--workflow W [--lane L] [--tag T]…]` | Cut a worktree and branch from the remote main, copy gitignored paths, bootstrap, start the stack. With `--workflow`, also write the work order, see [Workflows](#workflows) |
 | `workflow [list\|show <workflow>]` | The workflows of this repo, or the lanes and steps of one |
 | `step [done <step> [--approved]\|na <step>\|gate <step>\|--pr] [--note TEXT]` | This branch's work order and next step, record a step, or exit 1 while a step waits on earlier ones |
+| `step ask <step> [--file F]…` / `step wait <step>` | Put a human gate up in the approvals window, or block until the human decides. See [Approvals](#approvals) |
+| `approve <step> [--note T]` / `reject <step> --note T` | The human's decision on a gate the agent asked about |
+| `gates [--json]` / `approvals` | Every gate on the machine that waits on a decision, or open the approvals window |
 | `lane <lane>` | Raise this branch's lane. A lane is never lowered |
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
@@ -220,6 +223,37 @@ workflows off with a file that holds `workflows: off`. `RAMIFY_WORKFLOWS=0` in t
 the same. A repo with workflows off keeps its own process, and ramify does not touch it. The
 YAML is parsed with a vendored copy of PyYAML 6.0.2 (pure python, MIT, `libexec/vendor/yaml`).
 
+### Approvals
+
+A human gate (`spec`, `qa-plan`, `review`…) waits on a person. The agent puts it up, the person
+decides in a small window, and the agent goes on by itself.
+
+```bash
+ramify step ask spec          # agent: record the request, pop the approvals window open
+ramify step wait spec         # agent, in the background: exits on the decision
+ramify approve spec           # human, or the Approve button: records the step --approved
+ramify reject spec --note "add the error state"   # human, or the Reject button
+```
+
+- `step ask` shows `.ramify/work/<slug>/<step>.md` and the work order. `--file` names other
+  files instead. A file must be inside the worktree.
+- The request is `ask:` in the work order's frontmatter: `step`, `asked`, `files`. A rejection
+  adds `decision`, `decided` and `note`. An approval records the step and removes `ask:`.
+- `step wait` prints `approved[: note]` or `rejected: note` and exits 0. With `--timeout S` it
+  exits 1 when nobody decided. In Claude Code the agent runs it with `run_in_background`, and its
+  exit wakes the session.
+- An OK in the chat still works: `ramify step done <step> --approved` also closes the request.
+- The plugin refuses `ramify approve` and `ramify reject` from the agent.
+
+The approvals window lists every open request on the machine, one tab each. It renders the
+markdown, and has a note field, **Reject** (a note is required) and **Approve** (⌘↩). It runs on
+the same Electron as [the app](#the-app). A second `step ask` brings the open window to the front.
+The window closes once the last request is answered. `RAMIFY_POPUP=0` keeps it shut, and
+`ramify gates` lists the requests in a terminal.
+
+`card`, `dash` and the status line show `⏳ spec waits on you` while a request is open, and
+`dash --json` gives it as the `asked` step of the `workflow` object.
+
 ### The status line
 
 A session that `ramify new` moved to a worktree still reports the directory it started in, so a
@@ -266,6 +300,7 @@ The hooks do nothing in a repo without a config. The workflow hooks need only a 
 - **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
+- **PreToolUse `ramify approve` / `ramify reject`**: refuses them. The decision on a gate belongs to the human.
 - **SessionEnd**: stops this worktree's stack.
 
 Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`.

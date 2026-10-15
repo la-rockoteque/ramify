@@ -38,8 +38,13 @@ Run `ocre-jelly` on `qa-plan.md` before you show it.
 
 ## Gate
 
-Show the plan and ask for the OK. After the explicit OK:
+Put the plan up for the user, then wait for the decision. The
+[workflow contract](../workflow/SKILL.md#human-gates) has the loop:
 
 ```bash
-ramify step done qa-plan --approved
+ramify step ask qa-plan
+ramify step wait qa-plan     # with run_in_background: it wakes you on the decision
 ```
+
+On a rejection, apply the note and ask again. An explicit OK in the chat counts too: then
+`ramify step done qa-plan --approved`.

@@ -39,9 +39,25 @@ heavier lane.
 ## Human gates
 
 A step with `gate: human` (spec, qa-plan, review, diagnose, scope, frame, decide) ends with the
-user's explicit OK. Show the result, ask, and wait. Record it only after the OK:
-`ramify step done <step> --approved`. Silence, "looks fine so far" or your own judgement is not
-an OK. Never pass `--approved` on your own.
+user's explicit OK. Put the gate up in the approvals window, then wait for the decision:
+
+1. Write the step's file next to the work order (`spec.md`, `qa-plan.md`, `review.md`, or
+   `<step>.md`). Run `ocre-jelly` on it first.
+2. `ramify step ask <step>`. The approvals window opens on the user's screen with the file and
+   the work order. Add `--file <path>` for each other file the user must read.
+3. Tell the user in one line that the step waits on them, and name the file.
+4. Run `ramify step wait <step>` with `run_in_background`. It exits when the user decides, and
+   that wakes you. Do not poll it.
+5. Read what it printed:
+   - `approved` (maybe with a note): the step is already recorded. Take the note into account,
+     then go on with the next step.
+   - `rejected: <note>`: apply the note, update the file, and go back to step 2.
+
+The user can also answer in the chat. After an explicit OK there, record it yourself:
+`ramify step done <step> --approved`. That also closes the window's request. Silence, "looks
+fine so far" or your own judgement is not an OK. Never pass `--approved` on your own.
+
+`ramify approve` and `ramify reject` belong to the human. The plugin refuses them from the agent.
 
 ## The lane goes up, never down
 

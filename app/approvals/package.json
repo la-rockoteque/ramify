@@ -1,0 +1,7 @@
+{
+  "name": "ramify-approvals",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The window where a human approves or rejects a ramify human gate",
+  "main": "main.js"
+}

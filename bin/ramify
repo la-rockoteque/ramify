@@ -27,7 +27,11 @@ setup;setup [--print | --force] [--local];write .ramify.conf for this repo
 config;config [-q | get VAR];show the resolved config; -q tests that one exists
 new;new <slug> [--workflow W [--lane L] [--tag T]...];cut a worktree and branch from the remote main, copy, bootstrap, start its stack, and write its work order
 workflow;workflow [list | show <workflow>];the workflows this repo offers, or one workflow's lanes and steps
-step;step [done <step> [--approved] | na <step> | gate <step>|--pr] [--note TEXT];this branch's work order and next step, record a step, or exit 1 while <step> waits on earlier ones
+step;step [done <step> [--approved] | na <step> | gate <step>|--pr | ask <step> [--file F]... | wait <step>] [--note TEXT];this branch's work order and next step, record a step, exit 1 while <step> waits on earlier ones, put a human gate up in the approvals window, or wait for the decision
+approve;approve <step> [--note TEXT];the human's OK on a gate the agent asked about: records the step
+reject;reject <step> --note TEXT;the human's no on a gate the agent asked about, with what to change
+gates;gates [--json];every human gate on the machine that waits on a decision
+approvals;approvals;open the approvals window
 lane;lane <lane>;raise this branch's lane; a lane is never lowered
 label;label [slug];print the /rename and /color lines for a session
 up;up;start this worktree's QA stack
@@ -77,14 +81,14 @@ REPO_ROOT="${RAMIFY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
 REGISTRY="${RAMIFY_REGISTRY:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ramify/projects}"
 # The dashboard and `prune --all` are machine-wide, so they run from anywhere: outside a checkout,
 # borrow any project.
-case "${1:-} ${*:2}" in dash\ *|watch\ *|prune\ *--all*)
+case "${1:-} ${*:2}" in dash\ *|watch\ *|gates\ *|prune\ *--all*)
   [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cat "$REGISTRY" "${RAMIFY_STATE_DIR:-/tmp/ramify}"/*/primary 2>/dev/null \
     | while read -r p; do [ -d "$p" ] && { echo "$p"; break; }; done)"
   [ -n "$REPO_ROOT" ] || { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; exit 0; } ;;
 esac
 case "${1:-}" in write-set) exec "$RAMIFY_HOME/libexec/write-set.sh" "${@:2}" ;; esac
 # The app is machine-wide like the dashboard: it runs from anywhere.
-case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; esac
+case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; approvals) exec "$RAMIFY_HOME/libexec/app.sh" approvals ;; esac
 # The status line runs outside any checkout, many times a minute: its own script, no config load.
 case "${1:-}" in statusline) exec "$RAMIFY_HOME/libexec/statusline.sh" "${@:2}" ;; esac
 [ -n "$REPO_ROOT" ] || die "not inside a git checkout (or set RAMIFY_ROOT)"
@@ -873,6 +877,45 @@ wf() { # $WF_AT, else this worktree
     RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-}" python3 "$RAMIFY_HOME/libexec/workflow.py" "$@"
 }
 
+# A human gate goes up for a decision: record the request, then pop the approvals window open.
+# RAMIFY_POPUP=0 keeps it shut (tests, a headless box); `ramify gates` and the CLI still work.
+ask() {
+  wf ask "$@" || return 1
+  [ "${RAMIFY_POPUP:-1}" = 0 ] && return 0
+  "$RAMIFY_HOME/libexec/app.sh" approvals >/dev/null 2>&1 \
+    || echo "  the approvals window did not open — run 'ramify approvals', or decide with 'ramify approve|reject'"
+}
+
+# Every open request on the machine. A worktree without a .ramify folder (here or in its primary)
+# has no work order, so python never runs for it.
+gates_json() {
+  local p path out i=0
+  printf '['
+  while read -r p; do
+    [ -n "$p" ] || continue
+    while read -r path; do
+      [ -d "$path/.ramify" ] || [ -d "$p/.ramify" ] || continue
+      out="$(RAMIFY_ROOT="$path" "$SELF" step asked --json 2>/dev/null)"
+      case "$out" in '{'*) ;; *) continue ;; esac
+      jsep "$i"; i=1
+      printf '{"project":%s,"path":%s,"worktree":%s,"ask":%s}' "$(js "$(basename "$p")")" "$(js "$path")" "$(js "$(basename "$path")")" "$out"
+    done < <(git -C "$p" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  done < <(projects all)
+  printf ']\n'
+}
+
+gates() {
+  [ "${1:-}" = --json ] && { gates_json; return; }
+  gates_json | python3 -c '
+import json, sys
+gates = json.load(sys.stdin)
+if not gates:
+    print("nothing waits on a decision")
+for g in gates:
+    a = g["ask"]
+    print("  %s/%s  %-9s asked %s  %s" % (g["project"], g["worktree"], a["step"], a["asked"], ", ".join(f["path"] for f in a["files"])))'
+}
+
 # A worktree's progress for the reports: `--json` or `--line`. Without a .ramify folder there is
 # no work order and no custom work_dir, so the reports skip python for it.
 wf_report() { # path, branch, --json|--line
@@ -1349,7 +1392,9 @@ case "${1:-}" in
   setup) exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
   new) new "${@:2}" ;;
   workflow) case "${2:-list}" in list|show) wf "${2:-list}" "${@:3}" ;; *) usage workflow >&2; exit 2 ;; esac ;;
-  step) case "${2:-}" in done|na|gate) wf "${@:2}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr]" ;; esac ;;
+  step) case "${2:-}" in done|na|gate|wait|asked) wf "${@:2}" ;; ask) ask "${@:3}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr | ask <step> | wait <step>]" ;; esac ;;
+  approve|reject) wf "$@" ;;
+  gates) gates "${2:-}" ;;
   lane) wf lane "${@:2}" ;;
   label) label "${2:-}" ;;
   config) show_config "${2:-}" "${3:-}" ;;
