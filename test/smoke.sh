@@ -27,6 +27,13 @@ fail() { echo "FAIL  $1"; fails=$((fails + 1)); }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else fail "$name"; fi; }
 answers() { curl -sf -o /dev/null --max-time 2 "http://localhost:$1/"; }
 
+# macOS ships bash 3.2 as /bin/bash, and a shebang or a `bash -c` can land there. Every script
+# must at least parse under it.
+if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]'; then
+  parses_on_old_bash() { local f; for f in $(grep -rlE '^#!.*bash' "$(dirname "$RAMIFY")/.." --exclude-dir=.git); do /bin/bash -n "$f" || return 1; done; }
+  check "every script parses under /bin/bash $(/bin/bash -c 'echo $BASH_VERSION')" parses_on_old_bash
+fi
+
 git init -q --bare -b main "$T/origin.git"
 git clone -q "$T/origin.git" "$T/app" 2>/dev/null
 cd "$T/app"
@@ -115,11 +122,13 @@ check "new returns through a pipe"              bash -c "RAMIFY_AUTOSTART=1 RAMI
 git worktree remove --force "$T/app-wt/piped" 2>/dev/null; git branch -D -q story/piped 2>/dev/null
 
 # ── the guard in front of every signal, checked without sending one ──
+# The sed script goes in as an argument: bash 3.2 garbles a double-quoted one nested in "$(…)".
+GUARD_PARTS='/^TAG_NS=/,/^}/p; /^BUILD_SERVER_RE=/p; /^tagged_groups() {/,/^}/p'
 guard() { # pgid → exit 0 when ramify would signal it
   bash -c '
     RAMIFY_PROJECT=app STATE_DIR="$RAMIFY_STATE_DIR/app"
-    eval "$(sed -n "/^TAG_NS=/,/^}/p; /^BUILD_SERVER_RE=/p; /^tagged_groups() {/,/^}/p" "$1")"
-    our_group "$2"' _ "$RAMIFY" "$1"
+    eval "$(sed -n "$3" "$1")"
+    our_group "$2"' _ "$RAMIFY" "$1" "$GUARD_PARTS"
 }
 WEB_PGID="$(cat "$RAMIFY_STATE_DIR/app/feat.web.pid")"
 check "the guard accepts a tagged service group" guard "$WEB_PGID"

@@ -20,7 +20,9 @@ die() { echo "ramify: $*" >&2; exit 1; }
 
 # One line per command: name, usage, what it does. `ramify <command> --help` prints its line and
 # exits before anything runs, so a flag can never become a slug or a worktree name.
-COMMANDS="$(cat <<'EOF'
+# Read with `read`, not "$(cat <<'EOF' …)": bash 3.2 (macOS /bin/bash) counts the quotes inside a
+# here-doc nested in $(…), and an apostrophe in the text breaks the parse hundreds of lines later.
+IFS= read -r -d '' COMMANDS <<'EOF' || true
 setup;setup [--print | --force] [--local];write .ramify.conf for this repo
 config;config [-q | get VAR];show the resolved config; -q tests that one exists
 new;new <slug> [--workflow W [--lane L] [--tag T]...];cut a worktree and branch from the remote main, copy, bootstrap, start its stack, and write its work order
@@ -46,7 +48,7 @@ statusline;statusline [--json];status line for Claude Code, from its JSON on std
 app;app;open the desktop dashboard
 write-set;write-set <file> | --self-test;check a branch's diff against the write set its QA plan declared
 EOF
-)"
+COMMANDS="${COMMANDS%$'\n'}"
 usage() { # [command]
   local name use what
   if [ -n "${1:-}" ]; then
