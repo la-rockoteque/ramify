@@ -35,8 +35,13 @@ Run `ocre-jelly` on `review.md`, and in `docs` mode on comments the fixes added.
 
 ## Gate
 
-Show the findings and the fixes, and ask for the OK. After the explicit OK:
+Put the findings and the fixes up for the user, then wait for the decision. The
+[workflow contract](../workflow/SKILL.md#human-gates) has the loop:
 
 ```bash
-ramify step done review --approved
+ramify step ask review
+ramify step wait review      # with run_in_background: it wakes you on the decision
 ```
+
+On a rejection, apply the note and ask again. An explicit OK in the chat counts too: then
+`ramify step done review --approved`.

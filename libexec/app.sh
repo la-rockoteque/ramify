@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ramify app — open the desktop dashboard, installing Electron on first use.
+# ramify app [approvals] — open the desktop dashboard, or the approvals window, installing
+# Electron on first use. Both run on the same Electron.
 #
 # A plugin install is a git snapshot in a versioned cache directory: no node_modules, and a new
 # directory on every update. Electron goes to a fixed cache instead, keyed by the version
@@ -41,6 +42,8 @@ fi
 bin="$pkg/dist/$(cat "$pkg/path.txt" 2>/dev/null)"
 [ -x "$bin" ] || die "Electron is incomplete in $pkg — delete $CACHE and run 'ramify app' again"
 
-# Detached: the window outlives the shell (or the agent turn) that opened it.
-nohup "$bin" "$APP" >/dev/null 2>&1 </dev/null &
-echo "ramify app started"
+# Detached: the window outlives the shell (or the agent turn) that opened it. A second launch of
+# the approvals window hands over to the open one, which comes to the front and reloads.
+target="$APP"; [ "${1:-}" = approvals ] && target="$APP/approvals"
+nohup "$bin" "$target" >/dev/null 2>&1 </dev/null &
+echo "ramify ${1:-app} started"

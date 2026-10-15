@@ -34,8 +34,13 @@ Run `ocre-jelly` on `spec.md` and on the work order body before you show them.
 
 ## Gate
 
-Show the spec and ask for the OK. Apply the changes the user asks for. After the explicit OK:
+Put the spec up for the user, then wait for the decision. The
+[workflow contract](../workflow/SKILL.md#human-gates) has the loop:
 
 ```bash
-ramify step done spec --approved
+ramify step ask spec
+ramify step wait spec        # with run_in_background: it wakes you on the decision
 ```
+
+On a rejection, apply the note and ask again. An explicit OK in the chat counts too: then
+`ramify step done spec --approved`.
