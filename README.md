@@ -71,6 +71,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `approve <step> [--note T]` / `reject <step> --note T` | The human's decision on a gate the agent asked about |
 | `gates [--json]` / `approvals` | Every gate on the machine that waits on a decision, or open the approvals window |
 | `scratch [--title T] [FILE \| -]` / `scratch --list\|--clear` | Hand the human a text to copy. See [Scratch](#scratch) |
+| `run ask <script>` / `run wait <id>` / `runs [--json]` | Hand the human a script to run or block, or wait for the decision. See [Run](#run) |
 | `lane <lane>` | Raise this branch's lane. A lane is never lowered |
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
@@ -273,6 +274,39 @@ ramify scratch --list                                   # what waits in the wind
 - Items live in `$RAMIFY_STATE_DIR/scratch` (`/tmp/ramify/scratch`), one `<id>.txt` and
   `<id>.title` each. `RAMIFY_SCRATCH_DIR` moves them. `RAMIFY_POPUP=0` keeps the window shut.
 
+### Run
+
+Some commands an agent may not run itself: a write to production, a data import, a change to a
+shared account. The agent writes them as a script, and the human runs or blocks it in a small
+window. The output goes back to the agent.
+
+```bash
+ramify run ask reseed.sh --cwd . --note "Reseed prod requests"   # agent: freeze the script, pop the run window open
+ramify run wait 20261016-104206-88917   # agent, in the background: exits once the human ran or blocked it
+ramify run go 20261016-104206-88917     # human, or the Run button
+ramify run block 20261016-104206-88917 --note "not before the snapshot"   # human, or the Block button
+ramify runs                             # every run, newest first
+```
+
+- `run ask` copies the script into its run folder, read-only, and records its sha256. Run checks
+  the copy against that hash, so what the human read is what runs. A changed copy is blocked and
+  nothing runs.
+- The script runs as the human, with bash, in the `--cwd` directory (the agent's own by default).
+  Its input is `/dev/null`: a script that asks a question gets no answer. It inherits the
+  environment of the window, so an AWS SSO profile or a `gh` login works.
+- `run wait` prints `ran: exit <n>` and the last 40 lines of output, or `blocked: <reason>`, and
+  exits 0. With `--timeout S` it exits 1 when nobody decided. A run runs once.
+- The window lists the runs that wait, then the last 20 finished ones. It shows the note, the
+  directory, the hash and the script with line numbers. Run has no keyboard shortcut. A started
+  run outlives the window, and the window streams its output.
+- A run is a folder in `~/.claude/ramify/runs/<id>`: `script`, `meta.json` and `output.log`.
+  `RAMIFY_RUNS_DIR` moves them. `RAMIFY_POPUP=0` keeps the window shut, and a bare `ramify run`
+  opens it.
+- The plugin refuses `ramify run go` and `ramify run block` from the agent.
+
+`card`, `dash` and the status line show `▶ run <id> waits on you` while a run asked from that
+worktree waits.
+
 ### The status line
 
 A session that `ramify new` moved to a worktree still reports the directory it started in, so a
@@ -289,7 +323,7 @@ answer; `stack down` means none do. It prints nothing where ramify is not set up
 tool's PATH only. A status line script of your own can call `ramify statusline --json` for
 `root`, `worktree`, `branch`, `primary`, `icon`, `slot`, `ticket`, `stack` (`up`, `partial`,
 `down` or `stopped`), `workflow` (as in `dash --json`) and `ports` (each running service and its
-port, `{"web": 5174}`), and run its git segment from `root`.
+port, `{"web": 5174}`), `run` (`▶ run <id> waits on you`, or null), and run its git segment from `root`.
 `RAMIFY_STATUSLINE_ICON` replaces the tree.
 
 ### The app
@@ -319,10 +353,10 @@ The hooks do nothing in a repo without a config. The workflow hooks need only a 
 - **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
-- **PreToolUse `ramify approve` / `ramify reject`**: refuses them. The decision on a gate belongs to the human.
+- **PreToolUse `ramify approve` / `ramify reject` / `ramify run go` / `ramify run block`**: refuses them. The decision on a gate or a run belongs to the human.
 - **SessionEnd**: stops this worktree's stack.
 
-Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`.
+Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`, `ramify:run`.
 Workflow skills: `ramify:workflow` (the contract every step follows), then one per step of the
 feature lanes: `ramify:spec`, `ramify:qa-plan`, `ramify:build`, `ramify:audit`, `ramify:qa`,
 `ramify:review`, `ramify:pr`, `ramify:finale`. Every step runs the prose it writes through the

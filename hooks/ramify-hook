@@ -219,11 +219,19 @@ on_pr_gate() {
 Do and record those steps first (\`ramify step\` shows them). A draft (\`gh pr create --draft\`) is not gated."
 }
 
+# Refuse the tool call, with the reason the agent reads.
+deny() {
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}, ensure_ascii=False))' "$1"
+}
+
 # A human gate's decision belongs to the human: the agent asks (`ramify step ask`) and waits, it
-# never answers. Catches `ramify approve|reject` as a shell word, like the PR gate does.
+# never answers. The same goes for a script handed over with `ramify run ask`: only the human runs
+# or blocks it. Catches `ramify approve|reject` and `ramify run go|block` as shell words, like the
+# PR gate does.
 on_decide_guard() {
-  case "$INPUT" in *approve*|*reject*) ;; *) return 0 ;; esac
-  printf '%s' "$(field tool_input.command)" | python3 -c '
+  case "$INPUT" in *approve*|*reject*|*go*|*block*) ;; *) return 0 ;; esac
+  local hit
+  hit="$(printf '%s' "$(field tool_input.command)" | python3 -c '
 import os, shlex, sys
 cmd = sys.stdin.read().replace("\\\n", " ")
 try:
@@ -231,7 +239,7 @@ try:
     lex.whitespace_split = True
     toks = list(lex)
 except ValueError:
-    sys.exit(1)
+    sys.exit(0)
 cmds, cur = [], []
 for t in toks:
     if t and set(t) <= set(";&|()"):
@@ -242,11 +250,16 @@ cmds.append(cur)
 for c in cmds:
     while c and "=" in c[0] and not c[0].startswith("-"):
         c = c[1:]
-    if len(c) > 1 and os.path.basename(c[0]) in ("ramify", "workflow.py") and c[1] in ("approve", "reject"):
-        sys.exit(0)
-sys.exit(1)' || return 0
-  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}, ensure_ascii=False))' \
-    "Only the human approves or rejects a gate. Put it up with \`ramify step ask <step>\`, then wait for the decision with \`ramify step wait <step>\` in the background. If the user gives the OK in the chat, record it with \`ramify step done <step> --approved\`."
+    name = os.path.basename(c[0]) if c else ""
+    if len(c) > 1 and name in ("ramify", "workflow.py") and c[1] in ("approve", "reject"):
+        print("gate"); break
+    if (len(c) > 2 and name == "ramify" and c[1] == "run" and c[2] in ("go", "block")) \
+            or (len(c) > 1 and name == "run.sh" and c[1] in ("go", "block")):
+        print("run"); break')"
+  case "$hit" in
+    gate) deny "Only the human approves or rejects a gate. Put it up with \`ramify step ask <step>\`, then wait for the decision with \`ramify step wait <step>\` in the background. If the user gives the OK in the chat, record it with \`ramify step done <step> --approved\`." ;;
+    run) deny "Only the human runs or blocks a script handed over with \`ramify run ask\`: it waits in the run window. Wait for the decision with \`ramify run wait <id>\` in the background, and read what it prints." ;;
+  esac
 }
 
 # A session in a linked worktree takes its slug as its name, the `/rename` that `ramify label`

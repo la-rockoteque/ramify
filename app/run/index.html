@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>ramify — run</title>
+  <style>
+    :root {
+      --bg: #f6f4f0; --panel: #ffffff; --text: #1d1b19; --muted: #6f6a64; --line: #e3ded6;
+      --accent: #c2412d; --ok: #2f8a4c; --warn: #b7791f; --bad: #c2412d;
+      --btn: #efebe5; --btn-hover: #e4dfd7; --code: #f1ede7;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161412; --panel: #211e1b; --text: #ece8e3; --muted: #9b948c; --line: #34302b;
+        --accent: #e0654f; --ok: #5cbf7a; --warn: #e0a84a; --bad: #e0654f;
+        --btn: #2d2925; --btn-hover: #3a3530; --code: #2a2622;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    header { display: flex; align-items: center; gap: 10px; padding: 10px 18px; border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
+    header img { width: 20px; height: 20px; }
+    header h1 { margin: 0; font-size: 14px; font-weight: 650; }
+    header .status { margin-left: auto; color: var(--muted); font-size: 12px; }
+    #queue { display: flex; gap: 2px; padding: 0 18px; overflow-x: auto; border-bottom: 1px solid var(--line); }
+    #queue:empty { display: none; }
+    .tab { padding: 8px 12px 7px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
+      color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 550; white-space: nowrap; cursor: pointer; }
+    .tab:hover { color: var(--text); }
+    .tab.on { color: var(--text); border-bottom-color: var(--accent); }
+    .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    main { flex: 1; overflow-y: auto; padding: 16px 18px 24px; }
+    .head h2 { margin: 0 0 2px; font-size: 18px; }
+    .head .sub { color: var(--muted); font-size: 12px; }
+    .head code { font: 12px ui-monospace, Menlo, monospace; }
+      font: 12px ui-monospace, Menlo, monospace; cursor: pointer; }
+    .empty { margin: 18vh auto 0; max-width: 360px; text-align: center; color: var(--muted); }
+    .empty strong { display: block; margin-bottom: 4px; color: var(--text); font-size: 15px; }
+    .error { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--bad); border-radius: 8px; color: var(--bad); white-space: pre-wrap; }
+    footer { display: flex; flex-direction: column; gap: 8px; padding: 12px 18px 14px; border-top: 1px solid var(--line); background: var(--bg); }
+    footer[hidden] { display: none; }
+    textarea { width: 100%; min-height: 58px; max-height: 30vh; resize: vertical; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--panel); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.45; }
+    textarea:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .hint { color: var(--muted); font-size: 12px; margin-right: auto; }
+    button { font: inherit; padding: 6px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--btn); color: var(--text); cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--btn-hover); }
+    button:disabled { opacity: .5; cursor: default; }
+    @media (max-width: 600px) { .hint { display: none; } }
+    .meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 12px 0; font-size: 12px; }
+    .meta dt { color: var(--muted); }
+    .meta dd { margin: 0; font: 12px ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
+    .note { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--panel); border-radius: 0 8px 8px 0; white-space: pre-wrap; }
+    .label { margin: 16px 0 6px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+    .code { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: auto; font: 12.5px/1.55 ui-monospace, Menlo, monospace; }
+    .code table { border-collapse: collapse; width: 100%; }
+    .code td { padding: 0 12px; vertical-align: top; white-space: pre; }
+    .code td.n { width: 1%; padding-right: 10px; text-align: right; color: var(--muted); user-select: none; border-right: 1px solid var(--line); }
+    .code tr:first-child td { padding-top: 8px; } .code tr:last-child td { padding-bottom: 8px; }
+    .code .c { color: var(--muted); }
+    .out { margin: 0; padding: 10px 12px; max-height: 50vh; overflow: auto; background: var(--code); border-radius: 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 650; border: 1px solid currentColor; }
+    .badge.pending { color: var(--warn); } .badge.running { color: var(--accent); } .badge.ok { color: var(--ok); } .badge.bad { color: var(--bad); }
+    button.go { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
+    button.block { border-color: var(--bad); color: var(--bad); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="../../assets/ramify-512.png" alt="">
+    <h1>Run</h1>
+    <span class="status" id="status" aria-live="polite"></span>
+  </header>
+  <nav id="queue" role="tablist" aria-label="Runs"></nav>
+  <main id="main"></main>
+  <footer id="decide" hidden>
+    <label for="note" class="hint" style="margin:0">Reason for the agent, if you block it (optional)</label>
+    <textarea id="note" placeholder="Why not, or what to change"></textarea>
+    <div class="row">
+      <span class="hint" id="where"></span>
+      <button class="block" id="block">Block</button>
+      <button class="go" id="go">Run</button>
+    </div>
+  </footer>
+  <script src="renderer.js"></script>
+</body>
+</html>

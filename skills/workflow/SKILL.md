@@ -59,6 +59,21 @@ fine so far" or your own judgement is not an OK. Never pass `--approved` on your
 
 `ramify approve` and `ramify reject` belong to the human. The plugin refuses them from the agent.
 
+## Scripts that need a human
+
+Some commands are not yours to run: a write to production, a data import, a change to a shared
+account. When a permission rule or the user blocks such a command, do not route around it.
+
+1. Write the commands as one script. Make it stop on the first error (`set -euo pipefail`).
+2. `ramify run ask <script> --note "<what it does, in one line>"`. The run window opens on the
+   user's screen with the script.
+3. Tell the user in one line that the script waits on them.
+4. Run `ramify run wait <id>` with `run_in_background`. Do not poll it.
+5. Read what it printed: `ran: exit <n>` with the output, or `blocked: <reason>`.
+
+Never edit the frozen copy in the runs folder. To change the script, ask again with a new one.
+`ramify run go` and `ramify run block` belong to the human. The plugin refuses them from the agent.
+
 ## The lane goes up, never down
 
 The work can turn out heavier than its lane: it touches auth, a public contract, a schema, or
