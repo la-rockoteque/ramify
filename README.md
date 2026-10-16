@@ -70,6 +70,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `step ask <step> [--file F]…` / `step wait <step>` | Put a human gate up in the approvals window, or block until the human decides. See [Approvals](#approvals) |
 | `approve <step> [--note T]` / `reject <step> --note T` | The human's decision on a gate the agent asked about |
 | `gates [--json]` / `approvals` | Every gate on the machine that waits on a decision, or open the approvals window |
+| `scratch [--title T] [FILE \| -]` / `scratch --list\|--clear` | Hand the human a text to copy. See [Scratch](#scratch) |
 | `lane <lane>` | Raise this branch's lane. A lane is never lowered |
 | `label [slug]` | Print `/rename` and `/color` for the session |
 | `up` / `down` | Start or stop this worktree's stack |
@@ -254,6 +255,24 @@ The window closes once the last request is answered. `RAMIFY_POPUP=0` keeps it s
 `card`, `dash` and the status line show `⏳ spec waits on you` while a request is open, and
 `dash --json` gives it as the `asked` step of the `workflow` object.
 
+### Scratch
+
+An agent often writes a text for the human to paste elsewhere: a Slack message, a command, a
+ticket body. `ramify scratch` puts it in a small window with a **Copy** button.
+
+```bash
+ramify scratch --title "Slack: release note" note.md   # from a file
+gh pr view 12 --json body -q .body | ramify scratch    # from stdin
+ramify scratch --list                                   # what waits in the window
+```
+
+- The window shows the text as it will paste, one tab per item. The newest item opens in front.
+- **Copy** (⌘C) puts the whole item on the clipboard. ⌘C with a selection copies the selection.
+- **Done** deletes the item. ⌘↩ copies, then deletes. The window closes after the last one.
+- Without `--title`, the title is the file name, or the first line of the text.
+- Items live in `$RAMIFY_STATE_DIR/scratch` (`/tmp/ramify/scratch`), one `<id>.txt` and
+  `<id>.title` each. `RAMIFY_SCRATCH_DIR` moves them. `RAMIFY_POPUP=0` keeps the window shut.
+
 ### The status line
 
 A session that `ramify new` moved to a worktree still reports the directory it started in, so a
@@ -303,7 +322,7 @@ The hooks do nothing in a repo without a config. The workflow hooks need only a 
 - **PreToolUse `ramify approve` / `ramify reject`**: refuses them. The decision on a gate belongs to the human.
 - **SessionEnd**: stops this worktree's stack.
 
-Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`.
+Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`.
 Workflow skills: `ramify:workflow` (the contract every step follows), then one per step of the
 feature lanes: `ramify:spec`, `ramify:qa-plan`, `ramify:build`, `ramify:audit`, `ramify:qa`,
 `ramify:review`, `ramify:pr`, `ramify:finale`. Every step runs the prose it writes through the

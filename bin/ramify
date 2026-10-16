@@ -32,6 +32,7 @@ approve;approve <step> [--note TEXT];the human's OK on a gate the agent asked ab
 reject;reject <step> --note TEXT;the human's no on a gate the agent asked about, with what to change
 gates;gates [--json];every human gate on the machine that waits on a decision
 approvals;approvals;open the approvals window
+scratch;scratch [--title T] [FILE | -] | --list | --clear;hand the human a text to copy: it opens in the scratch window, with a Copy button
 lane;lane <lane>;raise this branch's lane; a lane is never lowered
 label;label [slug];print the /rename and /color lines for a session
 up;up;start this worktree's QA stack
@@ -88,7 +89,8 @@ case "${1:-} ${*:2}" in dash\ *|watch\ *|gates\ *|prune\ *--all*)
 esac
 case "${1:-}" in write-set) exec "$RAMIFY_HOME/libexec/write-set.sh" "${@:2}" ;; esac
 # The app is machine-wide like the dashboard: it runs from anywhere.
-case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; approvals) exec "$RAMIFY_HOME/libexec/app.sh" approvals ;; esac
+case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; approvals) exec "$RAMIFY_HOME/libexec/app.sh" approvals ;;
+  scratch) exec "$RAMIFY_HOME/libexec/scratch.sh" "${@:2}" ;; esac
 # The status line runs outside any checkout, many times a minute: its own script, no config load.
 case "${1:-}" in statusline) exec "$RAMIFY_HOME/libexec/statusline.sh" "${@:2}" ;; esac
 [ -n "$REPO_ROOT" ] || die "not inside a git checkout (or set RAMIFY_ROOT)"
