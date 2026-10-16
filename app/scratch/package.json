@@ -1,0 +1,7 @@
+{
+  "name": "ramify-scratch",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The window where a human copies a piece of text an agent handed over",
+  "main": "main.js"
+}
