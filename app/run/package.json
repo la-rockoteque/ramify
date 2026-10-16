@@ -1,0 +1,7 @@
+{
+  "name": "ramify-run",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The window where a human runs or blocks a script an agent handed over",
+  "main": "main.js"
+}

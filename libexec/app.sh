@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ramify app [approvals | scratch] — open the desktop dashboard, the approvals window or the
-# scratch window, installing Electron on first use. All three run on the same Electron.
+# ramify app [approvals | scratch | run] — open the desktop dashboard, the approvals window, the
+# scratch window or the run window, installing Electron on first use. All four run on the same Electron.
 #
 # A plugin install is a git snapshot in a versioned cache directory: no node_modules, and a new
 # directory on every update. Electron goes to a fixed cache instead, keyed by the version
@@ -43,9 +43,9 @@ bin="$pkg/dist/$(cat "$pkg/path.txt" 2>/dev/null)"
 [ -x "$bin" ] || die "Electron is incomplete in $pkg — delete $CACHE and run 'ramify app' again"
 
 # Detached: the window outlives the shell (or the agent turn) that opened it. A second launch of
-# the approvals or the scratch window hands over to the open one, which comes to the front and reloads.
+# the approvals, the scratch or the run window hands over to the open one, which comes to the front and reloads.
 case "${1:-}" in
-  approvals|scratch) target="$APP/$1" ;;
+  approvals|scratch|run) target="$APP/$1" ;;
   '') target="$APP" ;;
   *) die "no window named $1" ;;
 esac

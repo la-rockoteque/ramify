@@ -33,6 +33,8 @@ reject;reject <step> --note TEXT;the human's no on a gate the agent asked about,
 gates;gates [--json];every human gate on the machine that waits on a decision
 approvals;approvals;open the approvals window
 scratch;scratch [--title T] [FILE | -] | --list | --clear;hand the human a text to copy: it opens in the scratch window, with a Copy button
+run;run [ask <script> [--cwd DIR] [--note TEXT] | wait <id> [--timeout S] | go <id> | block <id> [--note TEXT]];hand the human a script to run: it opens in the run window (bare: open the window), with a Run and a Block button; go and block are the human's
+runs;runs [--json];every script handed to the human, newest first, with its state
 lane;lane <lane>;raise this branch's lane; a lane is never lowered
 label;label [slug];print the /rename and /color lines for a session
 up;up;start this worktree's QA stack
@@ -90,7 +92,8 @@ esac
 case "${1:-}" in write-set) exec "$RAMIFY_HOME/libexec/write-set.sh" "${@:2}" ;; esac
 # The app is machine-wide like the dashboard: it runs from anywhere.
 case "${1:-}" in app) exec "$RAMIFY_HOME/libexec/app.sh" ;; approvals) exec "$RAMIFY_HOME/libexec/app.sh" approvals ;;
-  scratch) exec "$RAMIFY_HOME/libexec/scratch.sh" "${@:2}" ;; esac
+  scratch) exec "$RAMIFY_HOME/libexec/scratch.sh" "${@:2}" ;;
+  run) exec "$RAMIFY_HOME/libexec/run.sh" "${@:2}" ;; runs) exec "$RAMIFY_HOME/libexec/run.sh" runs "${@:2}" ;; esac
 # The status line runs outside any checkout, many times a minute: its own script, no config load.
 case "${1:-}" in statusline) exec "$RAMIFY_HOME/libexec/statusline.sh" "${@:2}" ;; esac
 [ -n "$REPO_ROOT" ] || die "not inside a git checkout (or set RAMIFY_ROOT)"
@@ -1072,6 +1075,7 @@ tile() { # worktree, [smoke]
   row2 "$wt" "slot $(envget "$env" SLOT)"
   row2 "$branch" "up $(uptime_of "$env")"
   out="$(wf_report "${root:-$REPO_ROOT}" "${branch% \*}" --line)"; [ -z "$out" ] || row "$out"
+  while read -r out; do [ -z "$out" ] || row "$out"; done < <("$RAMIFY_HOME/libexec/run.sh" line "${root:-$REPO_ROOT}")
   box ├ ┤
   for s in $RAMIFY_SERVICES; do
     U="$(upper "$s")"; port="$(envget "$env" "${U}_PORT")"; [ -n "$port" ] || continue
@@ -1152,6 +1156,7 @@ dash() {
   [ "$n" = 0 ] && { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; return 0; }
   color_on && export RAMIFY_COLOR=1   # the projects draw through `$SELF`, which has its own stdout check
   build_servers_line
+  "$RAMIFY_HOME/libexec/run.sh" line | sed 's/$/  (ramify run)/' | grep . && echo
   while read -r p; do
     RAMIFY_ROOT="$p" "$SELF" dash-project "$([ "$n" -gt 1 ] && echo --header)"
     [ "$n" -gt 1 ] && echo
