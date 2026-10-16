@@ -7,7 +7,7 @@ set -uo pipefail
 RAMIFY="$(cd "$(dirname "$0")/.." && pwd)/bin/ramify"
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/hooks/ramify-hook"
 T="$(cd "$(mktemp -d)" && pwd -P)"
-export RAMIFY_STATE_DIR="$T/state" RAMIFY_REGISTRY="$T/registry" RAMIFY_AUTOSTART=0 RAMIFY_POPUP=0 WF_POLL=0.2
+export RAMIFY_STATE_DIR="$T/state" RAMIFY_REGISTRY="$T/registry" RAMIFY_AUTOSTART=0 RAMIFY_POPUP=0 WF_POLL=0.2 RAMIFY_RUNS_DIR="$T/runs" RAMIFY_RUN_POLL=0.2
 # A fake docker: prune --apply must never reach the machine's real images. It logs each call.
 mkdir -p "$T/bin"
 printf '#!/bin/sh\necho "$*" >>"%s/docker.log"\n' "$T" >"$T/bin/docker"; chmod +x "$T/bin/docker"
@@ -389,6 +389,34 @@ mkdir -p .ramify/work/merged && printf -- '---\nworkflow: tweak\nlane: default\n
 git add .ramify && git commit -qm merged && git push -q origin main 2>/dev/null
 check "a merged slug is refused before the cut" bash -c "'$RAMIFY' new merged --workflow tweak 2>&1 | grep -q 'pick another slug' && [ ! -e '$T/app-wt/merged' ]"
 
+# ── run: the agent hands a script over, the human runs or blocks it, the agent waits ──
+printf 'echo "ran in $PWD"\necho oops >&2\nexit 3\n' >"$T/job.sh"
+check "run ask needs a script"                  bash -c "! '$RAMIFY' run ask '$T/nope.sh'"
+check "run ask freezes a copy"                  bash -c "cd '$WFA' && '$RAMIFY' run ask '$T/job.sh' --note 'try it' | grep -q 'waits on the human'"
+RUN="$(ls "$T/runs" | head -1)"
+check "the copy is read-only, with its hash"    bash -c "[ ! -w '$T/runs/$RUN/script' ] && grep -q '\"sha256\": \"[0-9a-f]\\{64\\}\"' '$T/runs/$RUN/meta.json'"
+check "run line names it for its worktree"      test "$("$RAMIFY" run line "$WFA")" = "▶ run $RUN waits on you"
+check "run line skips another worktree"         test -z "$("$RAMIFY" run line "$T/elsewhere")"
+check "runs lists it as pending"                bash -c "'$RAMIFY' runs | grep -q '$RUN  pending'"
+check "runs --json carries the note"            bash -c "'$RAMIFY' runs --json | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r[0][\"note\"] == \"try it\" and r[0][\"status\"] == \"pending\", r'"
+check "run wait times out without a decision"   bash -c "! '$RAMIFY' run wait '$RUN' --timeout 0"
+"$RAMIFY" run wait "$RUN" --timeout 10 >"$T/run-wait.out" & waiter=$!
+"$RAMIFY" run go "$RUN" >"$T/run-go.out" 2>&1
+wait "$waiter"; rc=$?
+check "run go runs it in its directory"         bash -c "grep -q 'ran in $WFA' '$T/run-go.out' && grep -q oops '$T/runs/$RUN/output.log'"
+check "run go wakes the agent with the output"  bash -c "[ $rc = 0 ] && head -1 '$T/run-wait.out' | grep -qx 'ran: exit 3' && grep -q oops '$T/run-wait.out'"
+check "a run runs once"                         bash -c "! '$RAMIFY' run go '$RUN'"
+check "a finished run leaves run line"          test -z "$("$RAMIFY" run line)"
+"$RAMIFY" run ask "$T/job.sh" >/dev/null; sleep 1
+RUN2="$(ls "$T/runs" | sort | tail -1)"
+check "run block records the reason"            bash -c "'$RAMIFY' run block '$RUN2' --note 'not on prod' && [ \"\$('$RAMIFY' run wait '$RUN2')\" = 'blocked: not on prod' ]"
+check "a blocked run never runs"                bash -c "! '$RAMIFY' run go '$RUN2' && [ ! -e '$T/runs/$RUN2/output.log' ]"
+"$RAMIFY" run ask "$T/job.sh" >/dev/null; sleep 1
+RUN3="$(ls "$T/runs" | sort | tail -1)"
+chmod u+w "$T/runs/$RUN3/script"; echo 'echo sneaked in' >>"$T/runs/$RUN3/script"
+check "run go refuses a changed copy"           bash -c "! '$RAMIFY' run go '$RUN3' && [ ! -e '$T/runs/$RUN3/output.log' ]"
+check "the refusal blocks it and says why"      bash -c "'$RAMIFY' run wait '$RUN3' | grep -q 'blocked: the frozen script changed'"
+
 # ── hooks ──
 bare="$(mktemp -d)"; git -C "$bare" init -q
 check "hooks are silent without a config"       bash -c "[ -z \"\$(echo '{\"tool_input\":{\"command\":\"git push\"},\"cwd\":\"$bare\"}' | '$HOOK' behind)\" ]"
@@ -406,6 +434,9 @@ check "decide-guard keeps approve from the agent" grep -q '"permissionDecision":
 check "decide-guard sees a reject after &&"     grep -q '"permissionDecision": "deny"' <<<"$(dg 'cd x && RAMIFY_ROOT=y ramify reject spec --note no')"
 check "decide-guard lets ask and wait through"  test -z "$(dg 'ramify step ask spec; ramify step wait spec')"
 check "decide-guard ignores a word in a message" test -z "$(dg 'git commit -m \\"approve the spec\\"')"
+check "decide-guard keeps run go from the agent" grep -q 'Only the human runs or blocks' <<<"$(dg 'ramify run go 20261016-101010-1')"
+check "decide-guard sees run.sh block"          grep -q '"permissionDecision": "deny"' <<<"$(dg 'X=1 /p/libexec/run.sh block 1 --note no')"
+check "decide-guard lets run ask and wait through" test -z "$(dg 'ramify run ask s.sh && ramify run wait 1')"
 out="$(prg "$WFA" 'gh pr create --fill')"
 check "pr-gate refuses a PR with steps missing" bash -c "grep -q '\"permissionDecision\": \"deny\"' <<<'$out' && grep -q 'pr waits on: build, audit, qa, review' <<<'$out'"
 check "pr-gate names the next skill"            grep -q 'Next: build — invoke ramify:build' <<<"$out"
