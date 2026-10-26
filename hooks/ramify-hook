@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | session-start | stop | session-end
+# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | session-start | stop | session-end
 #
 # Installed as a plugin, these fire in every repo. Each one exits 0 silently unless the checkout
 # has a ramify config, and none of them ever fails a turn.
@@ -31,10 +31,12 @@ serviced() { configured "$1" && [ -n "$(conf "$1" RAMIFY_SERVICES)" ]; }
 # A session that created a worktree follows it, not CLAUDE_PROJECT_DIR — otherwise a session
 # rooted in the primary checkout keeps main up and never the tree being edited.
 session_root() {
-  local pin="$PINS/$(field session_id).root"
+  local pin="$PINS/$(field session_id).root" cwd; cwd="$(field cwd)"
   if [ -n "${RAMIFY_ROOT:-}" ]; then echo "$RAMIFY_ROOT"
   elif [ -f "$pin" ]; then cat "$pin"
-  else git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${CLAUDE_PROJECT_DIR:-$PWD}"
+  else
+    cwd="${cwd:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+    git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd"
   fi
 }
 
@@ -90,7 +92,7 @@ flow_note() { # root
   has_workflows "$1" || return 0
   local out; out="$(RAMIFY_ROOT="$1" "$RAMIFY" step 2>/dev/null)" || return 0
   case "$out" in ''|"workflows are off"*) return 0 ;; esac
-  printf 'This branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate goes to the user with `ramify step ask <step>` (the approvals window opens), then `ramify step wait <step>` in the background until they decide. It takes `--approved` only after the user has explicitly said OK in the chat. `gh pr create` is refused until every step before the PR step is recorded. Run all prose you write (work order, spec, QA plan and results, findings, comments, commit messages, PR body) through the `ocre-jelly` skill before you save or send it. The `ramify:workflow` skill has the full contract.' "$out"
+  printf 'Resume with the `ramify:resume` skill before editing. Read Git status, staged and unstaged diffs, and prior step outputs. Preserve unfinished edits and pending human approvals.\n\nThis branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate goes to the user with `ramify step ask <step>` (the approvals window opens), then `ramify step wait <step>` with the runtime wait tools described in `ramify:workflow` until they decide. It takes `--approved` only after the user has explicitly said OK in the chat. `gh pr create` is refused until every step before the PR step is recorded. Run all prose you write (work order, spec, QA plan and results, findings, comments, commit messages, PR body) through the `ocre-jelly` skill before you save or send it. The `ramify:workflow` skill has the full contract.' "$out"
 }
 
 is_push() { grep -qE '(^|[;&|[:space:]])git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)' <<<"$1"; }
@@ -98,7 +100,12 @@ is_push() { grep -qE '(^|[;&|[:space:]])git([[:space:]]+-[^[:space:]]+)*[[:space
 # The worktree a Bash command just created: `ramify new` prints it, a raw `git worktree add`
 # names it as its first positional argument.
 new_worktree() {
-  local out; out="$(field tool_response.stdout)"
+  local out; out="$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+response = json.load(sys.stdin).get("tool_response", "")
+if isinstance(response, dict):
+    response = response.get("stdout") or response.get("output") or ""
+print(response if isinstance(response, str) else "")' 2>/dev/null)"
   if grep -q '^ramify: worktree ' <<<"$out"; then
     sed -n 's/^ramify: worktree //p' <<<"$out" | tail -1; echo new; return
   fi
@@ -139,8 +146,9 @@ on_worktree_add() {
   { read -r wt; read -r how; } < <(new_worktree) || return 0
   [ -n "${wt:-}" ] && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   local note; note="$(flow_note "$wt")"
-  serviced "$wt" || { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
+  configured "$wt" || [ -n "$note" ] || return 0
   mkdir -p "$PINS" && printf '%s\n' "$wt" >"$PINS/$(field session_id).root"
+  serviced "$wt" || { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
   [ "$(conf "$wt" RAMIFY_AUTOSTART)" = 0 ] && { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
 
   # Under the project's state dir, like the CLI's own logs: two repos may both have a `feat` tree.
@@ -265,6 +273,7 @@ for c in cmds:
 # A session in a linked worktree takes its slug as its name, the `/rename` that `ramify label`
 # prints. Claude Code applies it on startup, resume and fork, and a name the human set wins.
 session_title() { # root
+  [ "${RAMIFY_AGENT:-claude}" = codex ] && return 0
   case "$(field source)" in startup|resume|fork) ;; *) return 0 ;; esac
   [ -z "$(field session_title)" ] && configured "$1" || return 0
   [ "$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" != \
@@ -301,8 +310,9 @@ on_stop() {
 on_session_end() {
   [ "$(field reason)" = prompt_input_exit ] && return 0
   local root; root="$(session_root)"
-  serviced "$root" || return 0
-  RAMIFY_ROOT="$root" "$RAMIFY" down >/dev/null 2>&1
+  if serviced "$root"; then
+    RAMIFY_ROOT="$root" "$RAMIFY" down >/dev/null 2>&1
+  fi
   rm -f "$PINS/$(field session_id).root"
 }
 

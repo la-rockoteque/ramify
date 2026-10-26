@@ -12,8 +12,9 @@ Databases and emulators run once and all worktrees share them. A slow service th
 does not change (a backend under a frontend-only branch) also runs once, from the primary
 checkout. When the branch is ready, ramify gives the human reviewer the URLs and the checklist.
 
-It ships as one CLI and a Claude Code plugin. The plugin has hooks that start and stop stacks
-with the session, and skills that tell the agent how to use them.
+It ships as one CLI with plugins for Claude Code and Codex. Both agents share the same
+work orders, configuration, approvals, and QA stack state. The plugins supply lifecycle hooks
+and skills that tell the agent how to use the CLI.
 
 ## Install
 
@@ -36,6 +37,57 @@ A teammate installs from the remote instead:
 ```
 
 The plugin is installed once per machine. Each repo needs only its config, see [Usage](#usage).
+
+### Codex
+
+Ramify includes a Codex manifest in `.codex-plugin/plugin.json` and a local marketplace in
+`.agents/plugins/marketplace.json`. Add the GitHub marketplace:
+
+```bash
+codex plugin marketplace add la-rockoteque/ramify
+```
+
+For a local checkout, add that directory instead:
+
+```bash
+codex plugin marketplace add .
+```
+
+Restart the desktop app, open the Plugins Directory, choose **Ramify**, and install the plugin.
+Review and trust its hook definitions when prompted. Installing a plugin alone does not trust its hooks.
+See the official [plugin packaging guide](https://developers.openai.com/plugins/build/plugins) and
+[hook documentation](https://learn.chatgpt.com/docs/hooks) for supported clients and trust controls.
+
+The CLI installation above serves both agents. No separate configuration or state migration is needed.
+The existing `.claude/ramify.conf` and `~/.claude/ramify/` paths remain shared for compatibility.
+
+### Continue Claude work in Codex
+
+1. Stop Claude's edits and open Codex in the same worktree. `git worktree list` lists the paths.
+2. Ask: “Use Ramify to resume the work Claude left in this worktree.” The `ramify:resume` skill reads the existing state.
+3. Codex reads the work order, earlier step outputs, pending decisions, and unfinished Git changes.
+4. It continues the next incomplete step. A pending human approval still waits for your decision.
+
+Uncommitted and untracked edits stay in place. A handoff does not need a new branch, work order,
+or chat transcript. Use one active editor in that worktree at a time. A partly completed step
+resumes from its files; only completed steps belong in the workflow record.
+
+If hooks are disabled, untrusted, or unavailable in your client, invoke `ramify:resume` explicitly.
+From that worktree, these commands inspect the shared state:
+
+```bash
+ramify step
+ramify step asked --json
+ramify card
+```
+
+Use `ramify up` when you need a stopped QA stack. Use `ramify down` when you finish with it.
+After Claude closes its session, its SessionEnd hook may have stopped the stack. Codex can restart it
+in the same worktree. The workflow record and pending decisions survive that shutdown.
+
+Wait commands work with Claude's background Bash or Codex's process session tools.
+See the [runtime instructions](skills/workflow/SKILL.md#cli-and-runtime-tools).
+
 
 Requirements: bash, git ≥ 2.38 (`merge-tree --write-tree`), curl, lsof, python3, rsync.
 Docker only if the repo has shared containers. Node.js ≥ 22.12 only to install the app.
@@ -242,8 +294,8 @@ ramify reject spec --note "add the error state"   # human, or the Reject button
 - The request is `ask:` in the work order's frontmatter: `step`, `asked`, `files`. A rejection
   adds `decision`, `decided` and `note`. An approval records the step and removes `ask:`.
 - `step wait` prints `approved[: note]` or `rejected: note` and exits 0. With `--timeout S` it
-  exits 1 when nobody decided. In Claude Code the agent runs it with `run_in_background`, and its
-  exit wakes the session.
+  exits 1 when nobody decided. Claude Code uses `run_in_background`; Codex keeps the returned
+  process session and reads its completion output. A timeout leaves the decision pending.
 - An OK in the chat still works: `ramify step done <step> --approved` also closes the request.
 - The plugin refuses `ramify approve` and `ramify reject` from the agent.
 
@@ -343,20 +395,26 @@ In Claude Code, ask for `/ramify:app`. In a terminal, run `ramify app`. The firs
 Electron into `~/.cache/ramify/electron` (Node.js ≥ 22.12 and npm needed, once per Electron
 version). Plugin updates reuse it. The window runs detached from the shell that opened it.
 
-### The plugin
+### The plugins
+
+Claude loads hooks from `.claude-plugin/plugin.json`. Codex loads `hooks/codex.json` through
+its Codex manifest. Codex shell hooks match `Bash`, including `exec_command`; the supported
+`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd` events share the dispatcher.
+Codex SessionEnd can occur after an idle delay; switching away from a conversation does not
+immediately stop its stack. Use `ramify down` when you need to stop it explicitly.
 
 The hooks do nothing in a repo without a config. The workflow hooks need only a `.ramify` folder.
 
 - **PreToolUse `git push`**: refuses the push while the branch is behind main.
 - **PreToolUse `gh pr create` / `gh pr ready`**: refuses while the work order has steps missing before its PR step. Drafts pass.
-- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step. On startup, resume and fork in a linked worktree, it also names the session after the slug, unless the session already has a name.
+- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step. In Claude Code, startup, resume and fork in a linked worktree also set the session name to the slug, unless it already has a name. Codex receives the work order without a session title.
 - **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
 - **PreToolUse `ramify approve` / `ramify reject` / `ramify run go` / `ramify run block`**: refuses them. The decision on a gate or a run belongs to the human.
 - **SessionEnd**: stops this worktree's stack.
 
-Skills: `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`, `ramify:run`.
+Skills: `ramify:resume`, `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`, `ramify:run`.
 Workflow skills: `ramify:workflow` (the contract every step follows), then one per step of the
 feature lanes: `ramify:spec`, `ramify:qa-plan`, `ramify:build`, `ramify:audit`, `ramify:qa`,
 `ramify:review`, `ramify:pr`, `ramify:finale`. Every step runs the prose it writes through the
@@ -365,7 +423,7 @@ the same rules by hand and says so.
 
 State lives in `/tmp/ramify/<project>/`, machine-wide, so every session sees the same slot registry.
 The list of configured repos lives in `~/.claude/ramify/projects` (`$CLAUDE_CONFIG_DIR` if set),
-one primary checkout per line. Any `ramify` command in a configured repo adds it. A reboot keeps
+one primary checkout per line. Commands in a configured repo add it, except workflow inspection and waits. A reboot keeps
 it, so the app lists a repo whose stacks are all down. A moved repo, or one without its config
 any more, drops out of the list; delete its line to forget it for good.
 

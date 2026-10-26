@@ -7,8 +7,10 @@ description: Hand the user a text to copy to the clipboard — a message to past
 
 Write the text to a file in your scratchpad, then hand it over:
 
+Resolve the CLI with the [workflow contract](../workflow/SKILL.md#cli-and-runtime-tools).
+
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/ramify" scratch --title "<what it is, for where>" <file>
+ramify scratch --title "<what it is, for where>" <file>
 ```
 
 - Pipe the text in instead of a file when it is short: `printf '%s' "$text" | ramify scratch --title …`.

@@ -1,0 +1,76 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" behind",
+            "timeout": 25
+          },
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" pr-gate",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" decide-guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" push",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=codex \"${PLUGIN_ROOT}/hooks/ramify-hook\" session-end",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

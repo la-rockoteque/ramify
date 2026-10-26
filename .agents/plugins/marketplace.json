@@ -1,0 +1,20 @@
+{
+  "name": "ramify",
+  "interface": {
+    "displayName": "Ramify"
+  },
+  "plugins": [
+    {
+      "name": "ramify",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
