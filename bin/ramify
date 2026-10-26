@@ -51,6 +51,7 @@ prune;prune [--all] [--apply];remove merged branches and their worktrees; dry ru
 delete;delete <worktree> [--yes];force-delete a worktree and its branch, merged or not
 complete;complete <worktree> [--yes];close its ticket, stop its stack, remove the worktree and branch
 jira;jira login | check;store a Jira token in the Keychain, or test it
+ticket;ticket start | sync | watch;assign the story, synchronize its Jira status, or resume automatic synchronization
 statusline;statusline [--json];status line for Claude Code, from its JSON on stdin
 app;app;open the desktop dashboard
 write-set;write-set <file> | --self-test;check a branch's diff against the write set its QA plan declared
@@ -130,6 +131,10 @@ done
 : "${RAMIFY_QA_NOTES:=}"
 : "${RAMIFY_JIRA_URL:=}"
 : "${RAMIFY_JIRA_DONE:=}"
+: "${RAMIFY_JIRA_PROGRESS:=In Progress}"
+: "${RAMIFY_JIRA_REVIEW:=}"
+: "${RAMIFY_JIRA_SYNC:=1}"
+: "${RAMIFY_TICKET_INTERVAL:=60}"
 : "${RAMIFY_GATE_WORKFLOW:=1}"
 : "${RAMIFY_TICKET_PATTERN:=[A-Za-z][A-Za-z0-9]*-[0-9]+}"
 
@@ -145,7 +150,7 @@ ERRORS="$STATE_DIR/$WORKTREE.errors"
 # Each configured project records its primary checkout, so `dash` and the app find every project.
 # An appended line is one write: two sessions registering at once leave a duplicate, not a mix.
 # Recovery must work in a read-only agent session without refreshing the machine registry.
-RAMIFY_REPORT_ONLY=0
+RAMIFY_REPORT_ONLY="${RAMIFY_READ_ONLY:-0}"
 case "${1:-} ${2:-}" in
   'step '|'step asked'|'step gate'|'step wait'|'workflow '|'workflow list'|'workflow show') RAMIFY_REPORT_ONLY=1 ;;
 esac
@@ -797,6 +802,37 @@ ticket_of() { # branch
 
 jira() { RAMIFY_JIRA_DONE="$RAMIFY_JIRA_DONE" python3 "$RAMIFY_HOME/libexec/jira.py" "$1" "$RAMIFY_JIRA_URL" "${@:2}"; }
 
+ticket() {
+  local action="${1:-sync}" key state rc=0 setting
+  case "$action" in start|sync|watch) ;; *) die 'usage: ramify ticket start | sync | watch' ;; esac
+  [ -n "$RAMIFY_JIRA_URL" ] && [ "$RAMIFY_JIRA_SYNC" != 0 ] || return 3
+  key="$(ticket_of "$(branch_of "$REPO_ROOT")")"; [ -n "$key" ] || return 0
+  state="$STATE_DIR/tickets/$(printf '%s' "$REPO_ROOT" | cksum | awk '{print $1}').json"
+  mkdir -p "$(dirname "$state")"
+  for setting in RAMIFY_JIRA_URL RAMIFY_JIRA_DONE RAMIFY_JIRA_PROGRESS RAMIFY_JIRA_REVIEW \
+      RAMIFY_JIRA_SYNC RAMIFY_TICKET_INTERVAL RAMIFY_TICKET_PATTERN RAMIFY_REMOTE RAMIFY_MAIN \
+      RAMIFY_GIT_HOST RAMIFY_GIT_API_URL RAMIFY_GIT_TOKEN RAMIFY_BITBUCKET_EMAIL RAMIFY_BITBUCKET_TOKEN; do
+    [ -z "${!setting+x}" ] || export "$setting"
+  done
+  if [ "$action" != watch ]; then
+    python3 "$RAMIFY_HOME/libexec/tickets.py" "$action" "$REPO_ROOT" "$state" || rc=$?
+  fi
+  if [ "$action" != sync ]; then
+    nohup python3 "$RAMIFY_HOME/libexec/tickets.py" watch "$REPO_ROOT" "$state" "$SELF" \
+      >>"${state%.json}.log" 2>&1 </dev/null &
+  fi
+  return "$rc"
+}
+
+ticket_auto() { # root, start|watch
+  [ -n "$RAMIFY_JIRA_URL" ] && [ "$RAMIFY_JIRA_SYNC" != 0 ] || return 0
+  [ -n "$(ticket_of "$(branch_of "$1")")" ] || return 0
+  mkdir -p "$STATE_DIR/tickets"
+  RAMIFY_ROOT="$1" nohup "$SELF" ticket "$2" \
+    >>"$STATE_DIR/tickets/$(basename "$1").startup.log" 2>&1 </dev/null &
+  echo "  Jira sync       running — $STATE_DIR/tickets/$(basename "$1").startup.log"
+}
+
 ticket_note() { # key → what closing it would do
   local out cat name
   out="$(jira status "$1" 2>&1)" || { echo "${out#jira: }"; return; }
@@ -989,6 +1025,7 @@ new() { # slug [--workflow W] [--lane L] [--tag T]...
   echo "  branch          $branch (from $RAMIFY_REMOTE/$RAMIFY_MAIN)"
   # The PostToolUse hook reads this exact line to follow the session into the new tree.
   echo "ramify: worktree $dest"
+  ticket_auto "$dest" start
   label "$slug"
 }
 
@@ -1423,6 +1460,7 @@ case "${1:-}" in
   watch) watch_dash "${2:-2}" ;;
   status) status ;;
   cleanup) cleanup ;;
+  ticket) ticket "${2:-sync}" ;;
   prune)
     case " ${*:2} " in *" --all "*) prune_all "$(case " ${*:2} " in *" --apply "*) echo --apply ;; esac)" ;;
       *) prune "${2:-}"; [ -n "${RAMIFY_NO_DOCKER:-}" ] || docker_prune "${2:-}" ;; esac ;;

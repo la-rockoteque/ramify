@@ -148,6 +148,7 @@ on_worktree_add() {
   local note; note="$(flow_note "$wt")"
   configured "$wt" || [ -n "$note" ] || return 0
   mkdir -p "$PINS" && printf '%s\n' "$wt" >"$PINS/$(field session_id).root"
+  [ -z "$(RAMIFY_READ_ONLY=1 conf "$wt" RAMIFY_JIRA_URL)" ] || RAMIFY_ROOT="$wt" "$RAMIFY" ticket watch >/dev/null 2>&1 || :
   serviced "$wt" || { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
   [ "$(conf "$wt" RAMIFY_AUTOSTART)" = 0 ] && { [ -n "$note" ] && context PostToolUse "$note"; return 0; }
 
@@ -283,6 +284,7 @@ session_title() { # root
 # startup, resume, clear and compact: after a compaction the agent has lost the work order too.
 on_session_start() {
   local root note title; root="$(session_root)"
+  [ -z "$(RAMIFY_READ_ONLY=1 conf "$root" RAMIFY_JIRA_URL)" ] || RAMIFY_ROOT="$root" "$RAMIFY" ticket watch >/dev/null 2>&1 || :
   note="$(flow_note "$root")"; title="$(session_title "$root")"
   [ -n "$note$title" ] || return 0
   python3 -c '

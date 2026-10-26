@@ -134,6 +134,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `prune [--all] [--apply]` | Delete merged local branches and their worktrees, detached trees already in main, and close their tickets. `--all` does it in every project on the machine. Then Docker, once: it shows disk use and removes stopped non-compose containers, unused images and build cache. Volumes and compose containers stay |
 | `complete <worktree> [--yes]` | Close its ticket, stop its stack, remove the worktree and its local branch |
 | `jira login` / `jira check` | Store a Jira API token in the Keychain, or test it |
+| `ticket start` / `ticket sync` / `ticket watch` | Assign the story and start work, synchronize once, or resume automatic synchronization |
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |
 | `shared-down` | Stop the shared service instances |
 | `statusline [--json]` | A status line segment: the session's worktree and branch |
@@ -187,6 +188,9 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_QA_PLAN` `_RESULTS` `_NOTES` | none | The QA recipe the `ask-for-qa` skill follows |
 | `RAMIFY_JIRA_URL` | none | `https://<site>.atlassian.net`: turns on ticket closing, see [Tickets](#tickets) |
 | `RAMIFY_TICKET_PATTERN` / `RAMIFY_JIRA_DONE` | `[A-Za-z][A-Za-z0-9]*-[0-9]+` / none | The key in a branch name; the done transition to pick when there are several |
+| `RAMIFY_JIRA_PROGRESS` / `RAMIFY_JIRA_REVIEW` | `In Progress` / none | Exact Jira status, transition name, or transition ID for development and review |
+| `RAMIFY_JIRA_SYNC` / `RAMIFY_TICKET_INTERVAL` | `1` / `60` | Automatic story synchronization; polling interval in seconds (minimum 5) |
+| `RAMIFY_GIT_HOST` / `RAMIFY_GIT_API_URL` | detected / detected | Host adapter (`github`, `gitlab`, `bitbucket`) and API base URL; set the adapter for self-hosted GitHub or GitLab |
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
 | `RAMIFY_GATE_WORKFLOW` | `1` | `0` lets `gh pr create` through before the work order is ready |
 | `RAMIFY_WORKFLOWS` | `1` | `0` turns workflows off for the repo, see [Workflows](#workflows) |
@@ -220,6 +224,9 @@ and the system gives old pids and ports to new programs.
 With `RAMIFY_JIRA_URL` set, ramify reads a Jira key from each branch name as a whole word:
 `story/tm-127-tracker-pagination` is TM-127, and `story/backend-under-3min` has no key. Then:
 
+- `new` assigns the story to your Jira account and moves it to In Progress in the background.
+- A local watcher moves the story to In Review when a PR or MR opens, including drafts.
+- A confirmed merge moves the story to Done, including squash merges. A declined or closed unmerged request does not finish the story.
 - `prune --apply` closes the ticket of each branch it removes. The dry run says what it would close.
 - `cleanup` closes the open tickets of merged branches that are still here. It removes nothing.
 - `complete <worktree>` closes the ticket, then removes the worktree and its local branch. It
@@ -229,6 +236,36 @@ With `RAMIFY_JIRA_URL` set, ramify reads a Jira key from each branch name as a w
 Run `ramify jira login` once per Jira site. It stores your email and an
 [API token](https://id.atlassian.com/manage-profile/security/api-tokens) in the macOS Keychain,
 not in the repo config. On Linux, export `RAMIFY_JIRA_EMAIL` and `RAMIFY_JIRA_TOKEN` instead.
+
+Configure the project's statuses in `.ramify.conf`:
+
+```bash
+RAMIFY_JIRA_URL=https://example.atlassian.net
+RAMIFY_JIRA_PROGRESS='In Progress'
+RAMIFY_JIRA_REVIEW='In Review'
+RAMIFY_JIRA_DONE='Done'
+RAMIFY_TICKET_INTERVAL=60
+```
+
+Review needs an explicit mapping because Jira has no review category. Each mapping accepts an exact status, transition name, or transition ID.
+If a mapping matches no available transition or several transitions, synchronization reports the error and retries.
+Set `RAMIFY_JIRA_DONE` when the workflow offers several done transitions.
+
+The watcher supports GitHub, GitLab, and Bitbucket Cloud. It reads the repository from `RAMIFY_REMOTE` and matches the source branch and `RAMIFY_MAIN` target.
+Sign in with `gh auth login` or `glab auth login`, or export `RAMIFY_GIT_TOKEN` for the selected host.
+GitHub also accepts `GH_TOKEN`; GitLab accepts `GITLAB_TOKEN`. The host token needs permission to read the repository's PRs or MRs.
+For Bitbucket Cloud, export `RAMIFY_BITBUCKET_TOKEN` with repository and pull request read access.
+For a Bitbucket API token, also export `RAMIFY_BITBUCKET_EMAIL`; repository access tokens use Bearer authentication without that email.
+Keep tokens in your environment or credential manager, outside committed configuration.
+
+`ramify ticket start` assigns an existing branch's story and starts the watcher.
+`ramify ticket sync` synchronizes once and retries a failed start.
+`ramify ticket watch` resumes the watcher without assigning an existing story.
+Session startup also resumes it. Only one watcher runs per worktree; it exits when the worktree disappears or changes branch.
+Browser actions appear at the next poll while the machine and watcher run. After downtime, use `ticket sync` or resume a session.
+Errors leave local work intact. Logs live in `<state-dir>/tickets/`; `ramify config get STATE_DIR` shows the state directory.
+Set `RAMIFY_JIRA_SYNC=0` to disable lifecycle synchronization and retain the existing cleanup and completion commands.
+Already done stories stay done, and repeated syncs leave matching assignments and statuses unchanged.
 
 ### Workflows
 
