@@ -30,6 +30,10 @@ Do not require a chat transcript. Ask for missing intent only when the files do 
 
 ## Continue
 
+If `ramify step` reports a repository workflow, follow its listed documents and native work item.
+Use the repository's resume or orchestration instructions and preserve its existing step record.
+Do not create a replacement Ramify work order or infer steps from a default lane.
+
 - If a human gate is pending, use its existing request and wait for the human's decision.
 - If the human already decided, read the recorded outcome and note before proceeding.
 - If no gate is pending, continue the next incomplete step with its named skill.

@@ -15,6 +15,9 @@ mid-edit is how an afternoon is lost.
 ramify new <slug>
 ```
 
+When setup selected a repository workflow, `new` points to its guides and keeps its native work records.
+Follow those guides for the next step; do not create a parallel Ramify work order.
+
 It fetches, then cuts `$RAMIFY_BRANCH_PREFIX<slug>` from `origin/$RAMIFY_MAIN` into
 `$RAMIFY_WORKTREES/<slug>`. It copies `RAMIFY_COPY`, runs `RAMIFY_BOOTSTRAP` in the background,
 and starts the QA stack after. `ramify config` shows the values. With no config, the defaults

@@ -33,6 +33,7 @@ import time
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 
@@ -588,7 +589,17 @@ def main(argv):
         return 2
     cmd, args = argv[0], argv[1:]
     try:
+        if env('RAMIFY_WORKFLOW_SOURCE') not in ('', 'auto', 'ramify', 'repo', 'select'):
+            raise Fail('RAMIFY_WORKFLOW_SOURCE must be auto, ramify, or repo')
         defs = load_definitions()
+        explicit = any(os.path.isfile(os.path.join(base, '.ramify', 'workflows.yml'))
+                       for base in (env('WF_ROOT'), env('WF_PRIMARY')) if base)
+        if env('RAMIFY_WORKFLOW_SOURCE') in ('repo', 'select') and not explicit and not find_order(defs):
+            native = runpy.run_path(os.path.join(os.path.dirname(__file__), 'repo-workflows.py'))
+            try:
+                return native['route'](cmd, args)
+            except native['Fail'] as exc:
+                raise Fail(str(exc))
         table = {
             "list": cmd_list, "show": cmd_show, "branch": cmd_branch, "start": cmd_start,
             "status": cmd_status, "lane": cmd_lane, "gate": cmd_gate,

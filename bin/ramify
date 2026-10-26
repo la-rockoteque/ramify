@@ -130,6 +130,8 @@ done
 : "${RAMIFY_QA_RESULTS:=}"
 : "${RAMIFY_QA_NOTES:=}"
 : "${RAMIFY_JIRA_URL:=}"
+: "${RAMIFY_WORKFLOW_SOURCE:=auto}"
+: "${RAMIFY_WORKFLOW_DOCS:=}"
 : "${RAMIFY_JIRA_DONE:=}"
 : "${RAMIFY_JIRA_PROGRESS:=In Progress}"
 : "${RAMIFY_JIRA_REVIEW:=}"
@@ -154,6 +156,9 @@ RAMIFY_REPORT_ONLY="${RAMIFY_READ_ONLY:-0}"
 case "${1:-} ${2:-}" in
   'step '|'step asked'|'step gate'|'step wait'|'workflow '|'workflow list'|'workflow show') RAMIFY_REPORT_ONLY=1 ;;
 esac
+if [ "${1:-}" = setup ]; then
+  for arg in "$@"; do [ "$arg" != --print ] || RAMIFY_REPORT_ONLY=1; done
+fi
 if [ -n "$CONFIG" ] && [ "$RAMIFY_REPORT_ONLY" = 0 ]; then
   mkdir -p "$SLOTS" "$STATE_DIR/shared"
   printf '%s\n' "$PRIMARY" >"$STATE_DIR/primary"
@@ -923,6 +928,7 @@ wf() { # $WF_AT, else this worktree
   local at="${WF_AT:-$REPO_ROOT}"
   command -v python3 >/dev/null || die "workflows need python3"
   WF_BASE="$RAMIFY_REMOTE/$RAMIFY_MAIN" WF_ROOT="$at" WF_PRIMARY="$PRIMARY" WF_BRANCH="${WF_BRANCH:-$(branch_of "$at")}" WF_HOME="$RAMIFY_HOME" \
+    RAMIFY_WORKFLOW_SOURCE="$RAMIFY_WORKFLOW_SOURCE" RAMIFY_WORKFLOW_DOCS="$RAMIFY_WORKFLOW_DOCS" RAMIFY_BRANCH_PREFIX="$RAMIFY_BRANCH_PREFIX" \
     RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-}" python3 "$RAMIFY_HOME/libexec/workflow.py" "$@"
 }
 
@@ -992,7 +998,10 @@ new() { # slug [--workflow W] [--lane L] [--tag T]...
   mkdir -p "$parent" && parent="$(cd "$parent" && pwd)"
   dest="$parent/$slug"; branch="$RAMIFY_BRANCH_PREFIX$slug"; wt="$slug"
   # The workflow names the branch, and refuses a bad lane before anything is cut.
-  if [ -n "$flow" ]; then branch="$(wf branch "$flow" "$slug" ${wfopts[@]+"${wfopts[@]}"})" || exit 1; fi
+  if [ -n "$flow" ]; then branch="$(WF_BRANCH="$RAMIFY_BRANCH_PREFIX$slug" wf branch "$flow" "$slug" ${wfopts[@]+"${wfopts[@]}"})" || exit 1; fi
+  if [ -z "$flow" ] && { [ "$RAMIFY_WORKFLOW_SOURCE" = repo ] || [ "$RAMIFY_WORKFLOW_SOURCE" = select ]; }; then
+    WF_BRANCH="$branch" wf status >/dev/null || return 1
+  fi
   git -C "$PRIMARY" fetch -q "$RAMIFY_REMOTE" "$RAMIFY_MAIN" || echo "  (fetch failed — cutting from the last known $RAMIFY_REMOTE/$RAMIFY_MAIN)"
   # --no-track: a branch tracking main would pull main and never show its own remote as gone.
   git -C "$PRIMARY" worktree add -q --no-track -b "$branch" "$dest" "$RAMIFY_REMOTE/$RAMIFY_MAIN" || exit 1
@@ -1010,6 +1019,8 @@ new() { # slug [--workflow W] [--lane L] [--tag T]...
   if [ -n "$flow" ]; then
     WF_AT="$dest" WF_BRANCH="$branch" wf start "$flow" "$slug" ${wfopts[@]+"${wfopts[@]}"} \
       || echo "  (no work order written — 'ramify step' will say why)"
+  elif [ "$RAMIFY_WORKFLOW_SOURCE" = repo ] || [ "$RAMIFY_WORKFLOW_SOURCE" = select ]; then
+    WF_AT="$dest" WF_BRANCH="$branch" wf status || return 1
   fi
 
   [ -n "$CONFIG" ] && [ -n "$RAMIFY_SERVICES" ] && [ "${RAMIFY_AUTOSTART:-1}" = 1 ] && autostart=1
@@ -1436,12 +1447,13 @@ show_config() { # [-q | get VAR]
   echo "services    ${RAMIFY_SERVICES:-(none)}"
   echo "qa plan     ${RAMIFY_QA_PLAN:-(none)}"
   echo "jira        ${RAMIFY_JIRA_URL:-(none)}${RAMIFY_JIRA_URL:+   tickets matching $RAMIFY_TICKET_PATTERN}"
+  echo "workflow    $RAMIFY_WORKFLOW_SOURCE${RAMIFY_WORKFLOW_DOCS:+   $RAMIFY_WORKFLOW_DOCS}"
   echo "state       $STATE_DIR"
   [ -n "$CONFIG" ]
 }
 
 case "${1:-}" in
-  setup) exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
+  setup) RAMIFY_SETUP_ROOT="$REPO_ROOT" RAMIFY_WORKFLOW_SOURCE="$RAMIFY_WORKFLOW_SOURCE" RAMIFY_WORKFLOW_DOCS="$RAMIFY_WORKFLOW_DOCS" exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
   new) new "${@:2}" ;;
   workflow) case "${2:-list}" in list|show) wf "${2:-list}" "${@:3}" ;; *) usage workflow >&2; exit 2 ;; esac ;;
   step) case "${2:-}" in done|na|gate|wait|asked) wf "${@:2}" ;; ask) ask "${@:3}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr | ask <step> | wait <step>]" ;; esac ;;

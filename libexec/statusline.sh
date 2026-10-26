@@ -66,9 +66,11 @@ if grep -q '^RAMIFY_SERVICES=.' "$conf"; then
 fi
 # The work order's progress, when the branch has one: "feature/light 3/6 → review".
 flow=""; flow_json=null
-if [ -d "$root/.ramify" ] || [ -d "$primary/.ramify" ]; then
+source_mode="$(sed -n "s/^RAMIFY_WORKFLOW_SOURCE=['\"]*\([^'\" #]*\).*/\1/p" "$conf" | tail -1)"
+if [ -d "$root/.ramify" ] || [ -d "$primary/.ramify" ] || [ "$source_mode" = repo ] || [ "$source_mode" = select ]; then
   off="$(sed -n "s/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}RAMIFY_WORKFLOWS=['\"]*\([^'\" #]*\).*/\2/p" "$conf" | tail -1)"
-  wfenv=(WF_ROOT="$root" WF_PRIMARY="$primary" WF_BRANCH="$branch" RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-$off}")
+  source_docs="$(sed -n 's/^RAMIFY_WORKFLOW_DOCS=//p' "$conf" | tail -1 | python3 -c 'import shlex,sys; s=shlex.split(sys.stdin.read()); print(s[0] if s else "")' 2>/dev/null)"
+  wfenv=(WF_ROOT="$root" WF_PRIMARY="$primary" WF_BRANCH="$branch" RAMIFY_WORKFLOWS="${RAMIFY_WORKFLOWS:-$off}" RAMIFY_WORKFLOW_SOURCE="$source_mode" RAMIFY_WORKFLOW_DOCS="$source_docs")
   if [ "${1:-}" = --json ]; then flow_json="$(env "${wfenv[@]}" python3 "$(dirname "$0")/workflow.py" status --json 2>/dev/null)"
   else flow="$(env "${wfenv[@]}" python3 "$(dirname "$0")/workflow.py" status --line 2>/dev/null)"; fi
 fi

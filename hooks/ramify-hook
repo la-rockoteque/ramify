@@ -84,7 +84,9 @@ sys.exit(1)' 2>/dev/null
 has_workflows() {
   [ -d "$1/.ramify" ] && return 0
   local primary; primary="$(git -C "$1" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
-  [ -n "$primary" ] && [ -d "$primary/.ramify" ]
+  [ -n "$primary" ] && [ -d "$primary/.ramify" ] && return 0
+  case "$(RAMIFY_READ_ONLY=1 conf "$1" RAMIFY_WORKFLOW_SOURCE)" in repo|select) return 0 ;; esac
+  return 1
 }
 
 # What the agent is told about the branch's work order, or nothing without one.
@@ -92,6 +94,7 @@ flow_note() { # root
   has_workflows "$1" || return 0
   local out; out="$(RAMIFY_ROOT="$1" "$RAMIFY" step 2>/dev/null)" || return 0
   case "$out" in ''|"workflows are off"*) return 0 ;; esac
+  case "$out" in 'Repository workflow'*) printf '%s\n' "$out"; return 0 ;; esac
   printf 'Resume with the `ramify:resume` skill before editing. Read Git status, staged and unstaged diffs, and prior step outputs. Preserve unfinished edits and pending human approvals.\n\nThis branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate goes to the user with `ramify step ask <step>` (the approvals window opens), then `ramify step wait <step>` with the runtime wait tools described in `ramify:workflow` until they decide. It takes `--approved` only after the user has explicitly said OK in the chat. `gh pr create` is refused until every step before the PR step is recorded. Run all prose you write (work order, spec, QA plan and results, findings, comments, commit messages, PR body) through the `ocre-jelly` skill before you save or send it. The `ramify:workflow` skill has the full contract.' "$out"
 }
 
