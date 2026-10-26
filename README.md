@@ -194,6 +194,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_GATE_BEHIND` | `1` | Refuse a push while the branch is behind main |
 | `RAMIFY_GATE_WORKFLOW` | `1` | `0` lets `gh pr create` through before the work order is ready |
 | `RAMIFY_WORKFLOWS` | `1` | `0` turns workflows off for the repo, see [Workflows](#workflows) |
+| `RAMIFY_WORKFLOW_SOURCE` / `RAMIFY_WORKFLOW_DOCS` | `auto` / none | Setup selects repository guides or Ramify definitions; guide paths are a JSON array relative to the checkout |
 | `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `5` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
 
 ### Processes
@@ -268,6 +269,28 @@ Set `RAMIFY_JIRA_SYNC=0` to disable lifecycle synchronization and retain the exi
 Already done stories stay done, and repeated syncs leave matching assignments and statuses unchanged.
 
 ### Workflows
+
+`ramify setup` detects an existing development workflow before choosing the defaults.
+It recognizes named delivery pipelines such as Moship's `docs/{feature,bug-fix,tweak,spike,release}-pipeline.md`, conventional workflow guides, and guides linked from repository instructions.
+Product workflows such as equipment fulfillment do not select a development workflow.
+The draft shows the source paths and selection reason; `setup --print` writes nothing.
+
+For a documented repository workflow, the configuration looks like:
+
+```bash
+RAMIFY_WORKFLOW_SOURCE=repo
+RAMIFY_WORKFLOW_DOCS='["docs/feature-pipeline.md", "docs/bug-fix-pipeline.md"]'
+```
+
+`ramify workflow`, `ramify step`, and session startup point to those guides and native work records.
+Use the project's skills, steps, gates, and artifact locations. Ramify creates no duplicate work order and adds no default PR checklist.
+The repository's existing hooks enforce its own workflow. Worktrees, Git safety, QA stacks, and Jira integration remain available.
+Guide paths resolve in the current checkout; setup from a worktree inspects that checkout's workflow documents.
+
+An explicit `.ramify/workflows.yml` takes precedence. An existing Ramify work order continues with its original record.
+Set `RAMIFY_WORKFLOW_SOURCE=ramify` to choose Ramify's definitions explicitly.
+If no development workflow is detected, setup keeps the defaults below.
+If several standalone guides compete, select the authoritative paths explicitly; a missing selected guide reports an error instead of reverting silently.
 
 A workflow is the path a piece of work takes, from the spec to the merge. ramify ships four in
 [workflows.yml](workflows.yml): `feature`, `bug`, `tweak` and `spike`. Each workflow has one or

@@ -6,6 +6,11 @@ argument-hint: "[start <workflow> <slug> | next]"
 
 # Run a work order
 
+First run `ramify step` and `ramify workflow` from the target checkout.
+If they report a repository workflow, read the listed guides and the native work item, then follow that workflow's skills and gates.
+Do not start a Ramify work order or apply the default steps below to that item.
+An existing Ramify work order continues with its original record even after setup selects repository guides.
+
 A **work order** is `.ramify/work/<slug>/order.md`: YAML frontmatter (`workflow`, `lane`,
 `branch`, `tags`, `created`, `steps`), then the prose that says what the work is and why. The
 step outputs (`spec.md`, `qa-plan.md`, `qa-results.md`, `review.md`) sit next to it. It is

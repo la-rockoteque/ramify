@@ -20,6 +20,11 @@ branches share, where linked worktrees already live, gitignored paths that exist
 `.env*`), compose containers, Node dev servers and Storybook, and ASP.NET Core Web projects. It
 is a guess from the file tree. Nothing in it is verified yet.
 
+Setup also detects existing development workflow guides, including Moship's `docs/*-pipeline.md` family.
+When the draft selects `RAMIFY_WORKFLOW_SOURCE=repo`, read those guides and keep their steps, skills, gates, and native work records.
+Do not replace them with Ramify's default workflow or create duplicate work orders.
+An explicit `.ramify/workflows.yml` remains authoritative. An ambiguous selection needs the user's choice of guide paths.
+
 A repo with nothing to serve (a library, a Claude plugin) is set up for branching only: leave
 `RAMIFY_SERVICES` empty. `new`, `prune`, `delete` and the `behind` gate work; the QA hooks and
 the dashboard skip it.
@@ -32,6 +37,8 @@ pipeline doc that says how branches and QA work. For each value, confirm or corr
 
 - **Branching** — `RAMIFY_MAIN`, `RAMIFY_BRANCH_PREFIX`, `RAMIFY_WORKTREES`. A documented
   convention wins over what the branch list suggests.
+- **Workflow** — confirm `RAMIFY_WORKFLOW_SOURCE` and the JSON array in `RAMIFY_WORKFLOW_DOCS` against the development guides.
+  Missing guides are errors. Keep an existing source selection unless the user requests a change.
 - **Bootstrap** — `RAMIFY_COPY` (gitignored paths a fresh tree needs), `RAMIFY_BOOTSTRAP` (the
   install), `RAMIFY_READY` (a file that exists once the install finished).
 - **Services** — for each: `<svc>_port` (the base; slot N adds N), `<svc>_dir`, `<svc>_health`

@@ -121,6 +121,8 @@ for d in docs/stories docs/specs docs/qa qa; do
   [ -d "$P/$d" ] && { qa_plan="$d/*/<slug>/qa-plan.md"; break; }
 done
 
+workflow_config="$(python3 "$(dirname "$0")/repo-workflows.py" config "${RAMIFY_SETUP_ROOT:-$P}")" || exit 1
+
 out="# ramify — $name. Sourced as bash: single-quote commands so \$PORT and \$<SERVICE>_PORT
 # expand when the service starts, not now. Drafted by 'ramify setup'; review every line.
 
@@ -134,6 +136,7 @@ RAMIFY_COPY=\"$copy\"
 RAMIFY_BOOTSTRAP='$bootstrap'
 # Exists once the bootstrap is done; the worktree hook waits for it before 'up'.
 RAMIFY_READY=$ready
+$workflow_config
 # Uncomment to let a branch that is behind main be pushed.
 # RAMIFY_GATE_BEHIND=0
 

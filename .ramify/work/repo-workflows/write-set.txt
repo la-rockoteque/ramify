@@ -1,0 +1,13 @@
+bin/ramify
+libexec/setup.sh
+libexec/workflow.py
+libexec/repo-workflow*.py
+libexec/statusline.sh
+hooks/*
+skills/*/SKILL.md
+test/*
+README.md
+examples/moship.conf
+.ramify/work/repo-workflows/*
+!.ramify/work/codex-handoff/*
+!.ramify/work/jira-lifecycle/*
