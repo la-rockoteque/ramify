@@ -937,7 +937,7 @@ wf() { # $WF_AT, else this worktree
 ask() {
   wf ask "$@" || return 1
   [ "${RAMIFY_POPUP:-1}" = 0 ] && return 0
-  "$RAMIFY_HOME/libexec/app.sh" approvals >/dev/null 2>&1 \
+  "$RAMIFY_HOME/libexec/app.sh" approvals \
     || echo "  the approvals window did not open — run 'ramify approvals', or decide with 'ramify approve|reject'"
 }
 

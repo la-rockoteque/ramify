@@ -3,6 +3,7 @@
 // writes the text to the clipboard, Done deletes the item. One window per machine: a second
 // launch (the next `ramify scratch`) brings the open one to the front and makes it reload.
 const { app, BrowserWindow, clipboard, ipcMain } = require('electron');
+const launch = require('../launch');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -65,13 +66,14 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'index.html'));
 }
 
-if (!app.requestSingleInstanceLock()) {
+if (!app.requestSingleInstanceLock(launch.data)) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, _argv, _cwd, data) => {
     if (!win) return createWindow();
     win.webContents.send('refresh');
     front();
+    launch.handoff(win, data);
   });
   app.whenReady().then(() => {
     if (process.platform === 'darwin') app.dock?.setIcon(ICON);

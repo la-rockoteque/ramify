@@ -94,7 +94,7 @@ with open(os.path.join(e["D"], "meta.json"), "w") as f:
   echo "run $id waits on the human — the run window shows $src (frozen at $d/script)"
   echo "  wait for the decision: ramify run wait $id"
   [ "${RAMIFY_POPUP:-1}" = 0 ] && return 0
-  RAMIFY_RUNS_DIR="$DIR" "$RAMIFY_HOME/libexec/app.sh" run >/dev/null 2>&1 \
+  RAMIFY_RUNS_DIR="$DIR" "$RAMIFY_HOME/libexec/app.sh" run \
     || echo "  the run window did not open — run 'ramify run', or decide with 'ramify run go|block $id'"
 }
 

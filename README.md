@@ -220,6 +220,12 @@ and the system gives old pids and ports to new programs.
   Roslyn after 10 minutes and MSBuild nodes after 15. `dash` and the app show their count and
   memory. `dotnet build-server shutdown` stops them.
 
+On macOS, each desktop window has a named app bundle: Ramify, Ramify Approvals, Ramify Scratch, or Ramify Run.
+Reopening one of these bundles opens Ramify without a command-line argument.
+The launcher waits for the actual window to acknowledge readiness before reporting success.
+Startup errors remain visible and logs live under `~/.cache/ramify/electron/launch/` (or `RAMIFY_APP_CACHE/launch/`).
+Opening or refreshing Run displays scripts without executing them. Execution requires a deliberate click on Run.
+
 ### Tickets
 
 With `RAMIFY_JIRA_URL` set, ramify reads a Jira key from each branch name as a whole word:

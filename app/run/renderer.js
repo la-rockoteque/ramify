@@ -151,7 +151,7 @@ async function act(verb) {
 }
 
 // No keyboard shortcut for Run: it takes a deliberate click.
-$go.addEventListener('click', () => act('go'));
+$go.addEventListener('click', (event) => { if (event.isTrusted && event.detail > 0) act('go'); });
 $block.addEventListener('click', () => act('block'));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && document.activeElement === $note) $note.blur();
