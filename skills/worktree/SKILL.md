@@ -31,10 +31,13 @@ are `main`, no prefix and `../<repo>-wt`.
 
 ## Label the session
 
-`new` prints two lines: `/rename <slug>` and `/color <name>`. Give them to the human to paste —
+In Claude Code, `new` prints two lines: `/rename <slug>` and `/color <name>`. Give them to the human to paste —
 both are built-ins an agent cannot run. The colour is hashed from the slug, so a tree keeps it
 across sessions and `/clear`. A session that starts or resumes in the worktree gets the name from
 the SessionStart hook, so it only needs the `/color` line.
+
+Codex receives the work order through its hook. Do not ask the user to run Claude’s `/rename`
+or `/color` commands in Codex. Continue from the worktree path printed by `new`.
 
 ## Every command starts in the worktree
 

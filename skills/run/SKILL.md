@@ -7,14 +7,16 @@ description: Hand the user a script to run or block — a command you may not ru
 
 Write the commands to a script in your scratchpad, then hand it over:
 
+Resolve the CLI with the [workflow contract](../workflow/SKILL.md#cli-and-runtime-tools).
+
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/ramify" run ask <script> [--cwd <dir>] --note "<what it does, in one line>"
-"${CLAUDE_PLUGIN_ROOT}/bin/ramify" run wait <id>     # with run_in_background
+ramify run ask <script> [--cwd <dir>] --note "<what it does, in one line>"
+ramify run wait <id>     # use the workflow contract’s runtime wait tools
 ```
 
 - Start the script with `set -euo pipefail`. Its input is `/dev/null`: it cannot ask a question.
 - The script runs as the user, in `--cwd` (your directory by default), with the user's environment.
-- Tell the user in one line that the script waits on them. Do not poll `run wait`: its exit wakes you.
+- Tell the user in one line that the script waits on them. Read the wait process’s completion output with the runtime tools in the workflow contract.
 - `run wait` prints `ran: exit <n>` and the last 40 lines of output, or `blocked: <reason>`.
 - Never edit the frozen copy in the runs folder. To change the script, ask again with a new one.
 - `ramify run go` and `ramify run block` belong to the user. The plugin refuses them from you.

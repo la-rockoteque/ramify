@@ -11,6 +11,24 @@ A **work order** is `.ramify/work/<slug>/order.md`: YAML frontmatter (`workflow`
 step outputs (`spec.md`, `qa-plan.md`, `qa-results.md`, `review.md`) sit next to it. It is
 committed with the branch.
 
+## CLI and runtime tools
+
+These skills work in Claude Code and Codex. Use the CLI bundled with the installed plugin.
+Resolve its absolute path from this skill's location: `../../bin/ramify` relative to its directory.
+Use that path wherever a command below says `ramify`, even when another CLI is on `PATH`.
+A CLI on `PATH` can belong to an older installation for the other agent.
+Do not assume a hook's environment variables exist in a skill's shell.
+
+For a wait command, use the runtime's background process tools:
+
+- Claude Code: use Bash with `run_in_background` and read the completion output.
+- Codex: start `exec_command` with a short `yield_time_ms`. Keep its returned `session_id` and collect completion with `write_stdin`.
+- In Codex code mode, await the tool call inside `functions.exec`. If that cell yields, resume it with `functions.wait`.
+- If the runtime cannot keep a process, use `--timeout 45` and report that the decision remains pending after a timeout.
+
+Keep one wait process per request. Do not start repeated wait commands or query the approval state in a loop.
+A timeout is not approval. Resume from the work order when the human answers.
+
 ## Start one
 
 ```bash
@@ -46,8 +64,7 @@ user's explicit OK. Put the gate up in the approvals window, then wait for the d
 2. `ramify step ask <step>`. The approvals window opens on the user's screen with the file and
    the work order. Add `--file <path>` for each other file the user must read.
 3. Tell the user in one line that the step waits on them, and name the file.
-4. Run `ramify step wait <step>` with `run_in_background`. It exits when the user decides, and
-   that wakes you. Do not poll it.
+4. Run `ramify step wait <step>` with the runtime tools above. Read its completion output when the human decides.
 5. Read what it printed:
    - `approved` (maybe with a note): the step is already recorded. Take the note into account,
      then go on with the next step.
@@ -68,7 +85,7 @@ account. When a permission rule or the user blocks such a command, do not route 
 2. `ramify run ask <script> --note "<what it does, in one line>"`. The run window opens on the
    user's screen with the script.
 3. Tell the user in one line that the script waits on them.
-4. Run `ramify run wait <id>` with `run_in_background`. Do not poll it.
+4. Run `ramify run wait <id>` with the runtime tools above.
 5. Read what it printed: `ran: exit <n>` with the output, or `blocked: <reason>`.
 
 Never edit the frozen copy in the runs folder. To change the script, ask again with a new one.
@@ -103,5 +120,5 @@ findings, code comments, commit messages and the PR body.
 
 ## After a resume or a compaction
 
-Run `ramify step` and `git status --short --branch` from the worktree before you edit. The
-work order on disk is the state. Your memory of the session is not.
+Use the [resume skill](../resume/SKILL.md) from the existing worktree before you edit.
+The work order and files on disk hold the shared state across agents and sessions.

@@ -144,7 +144,12 @@ STATE="$STATE_DIR/$WORKTREE.env"
 ERRORS="$STATE_DIR/$WORKTREE.errors"
 # Each configured project records its primary checkout, so `dash` and the app find every project.
 # An appended line is one write: two sessions registering at once leave a duplicate, not a mix.
-if [ -n "$CONFIG" ]; then
+# Recovery must work in a read-only agent session without refreshing the machine registry.
+RAMIFY_REPORT_ONLY=0
+case "${1:-} ${2:-}" in
+  'step '|'step asked'|'step gate'|'step wait'|'workflow '|'workflow list'|'workflow show') RAMIFY_REPORT_ONLY=1 ;;
+esac
+if [ -n "$CONFIG" ] && [ "$RAMIFY_REPORT_ONLY" = 0 ]; then
   mkdir -p "$SLOTS" "$STATE_DIR/shared"
   printf '%s\n' "$PRIMARY" >"$STATE_DIR/primary"
   grep -qxF "$PRIMARY" "$REGISTRY" 2>/dev/null \
@@ -306,8 +311,11 @@ TAG_NS="$RAMIFY_PROJECT@$(printf '%s' "$STATE_DIR" | shasum | cut -c1-8)"
 tag_of() { printf '%s/%s/%s' "$TAG_NS" "$1" "$2"; } # worktree or @shared, service
 
 # The pids and groups of this process and of every ancestor: the shell, the terminal, the session.
-PROTECTED="$(p=$$; while [ -n "$p" ] && [ "$p" -gt 1 ]; do
-  echo "$p"; ps -o pgid= -p "$p" | tr -d ' '; p="$(ps -o ppid= -p "$p" | tr -d ' ')"; done | sort -u | tr '\n' ' ')"
+PROTECTED=''
+if [ "$RAMIFY_REPORT_ONLY" = 0 ]; then
+  PROTECTED="$(p=$$; while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    echo "$p"; ps -o pgid= -p "$p" | tr -d ' '; p="$(ps -o ppid= -p "$p" | tr -d ' ')"; done | sort -u | tr '\n' ' ')"
+fi
 protected() { case " $PROTECTED " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # A group ramify may signal: one that carries this project's tag. Nothing else, ever. A pid file

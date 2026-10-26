@@ -5,15 +5,16 @@ description: Open the ramify desktop dashboard, a window with every project's wo
 
 # ramify app
 
-Run it and report the one line it prints:
+Resolve the CLI with the [workflow contract](../workflow/SKILL.md#cli-and-runtime-tools).
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/bin/ramify" app
+ramify app
 ```
 
 - The first run installs Electron into `~/.cache/ramify/electron`. It needs Node.js ≥ 22.12 and
   npm, takes up to a minute, and happens once per Electron version.
-- The window runs detached. Do not wait on it and do not poll it.
+- The window runs detached. Verify that it appears before reporting success.
+- If the launcher reports success without a window, capture the app’s startup output before retrying.
 - On an install failure, show the error and the last lines of the install log it names.
 
 The window reads the same state as `ramify dash`. Each button runs a `ramify` command, and its

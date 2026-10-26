@@ -40,7 +40,7 @@ Put the findings and the fixes up for the user, then wait for the decision. The
 
 ```bash
 ramify step ask review
-ramify step wait review      # with run_in_background: it wakes you on the decision
+ramify step wait review      # use the workflow contract’s runtime wait tools
 ```
 
 On a rejection, apply the note and ask again. An explicit OK in the chat counts too: then

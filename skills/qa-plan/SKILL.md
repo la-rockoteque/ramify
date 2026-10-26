@@ -43,7 +43,7 @@ Put the plan up for the user, then wait for the decision. The
 
 ```bash
 ramify step ask qa-plan
-ramify step wait qa-plan     # with run_in_background: it wakes you on the decision
+ramify step wait qa-plan     # use the workflow contract’s runtime wait tools
 ```
 
 On a rejection, apply the note and ask again. An explicit OK in the chat counts too: then

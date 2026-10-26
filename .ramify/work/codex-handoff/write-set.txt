@@ -1,0 +1,12 @@
+.codex-plugin/*
+.agents/plugins/*
+hooks/*
+skills/*
+README.md
+bin/ramify
+libexec/app.sh
+libexec/statusline.sh
+test/*
+.ramify/work/codex-handoff/*
+!.claude-plugin/*
+!workflows.yml
