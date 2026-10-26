@@ -95,6 +95,8 @@ ipcMain.handle('reveal', (_e, dir) => {
   return shell.openPath(dir);
 });
 
+require('./launch');
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1100,

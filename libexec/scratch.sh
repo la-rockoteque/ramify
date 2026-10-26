@@ -49,5 +49,5 @@ printf '%s' "${title:-$(head -1 "$DIR/$id.txt" | cut -c1-60)}" >"$DIR/$id.title"
 echo "scratch item $id added"
 
 [ "${RAMIFY_POPUP:-1}" = 0 ] && exit 0
-RAMIFY_SCRATCH_DIR="$DIR" "$RAMIFY_HOME/libexec/app.sh" scratch >/dev/null 2>&1 \
+RAMIFY_SCRATCH_DIR="$DIR" "$RAMIFY_HOME/libexec/app.sh" scratch \
   || echo "  the scratch window did not open — run 'ramify scratch --list', or read $DIR/$id.txt"

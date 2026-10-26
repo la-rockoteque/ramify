@@ -2,6 +2,7 @@
 // decision is `ramify approve|reject`. One window per machine: a second launch (the next
 // `ramify step ask`) brings the open one to the front and makes it reload.
 const { app, BrowserWindow, ipcMain } = require('electron');
+const launch = require('../launch');
 const { execFile } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
@@ -71,13 +72,14 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'index.html'));
 }
 
-if (!app.requestSingleInstanceLock()) {
+if (!app.requestSingleInstanceLock(launch.data)) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, _argv, _cwd, data) => {
     if (!win) return createWindow();
     win.webContents.send('refresh');
     front();
+    launch.handoff(win, data);
   });
   app.whenReady().then(() => {
     if (process.platform === 'darwin') app.dock?.setIcon(ICON);

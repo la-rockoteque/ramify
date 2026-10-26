@@ -49,5 +49,4 @@ case "${1:-}" in
   '') target="$APP" ;;
   *) die "no window named $1" ;;
 esac
-nohup "$bin" "$target" >/dev/null 2>&1 </dev/null &
-echo "ramify ${1:-app} started"
+exec python3 "$RAMIFY_HOME/libexec/app-launch.py" "$bin" "$target" "$CACHE" "${1:-app}"
