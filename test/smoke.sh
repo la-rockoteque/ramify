@@ -289,7 +289,7 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 python3 "$T/jira.py" 17350 "$T/closed.txt" & JIRA_PID=$!
-printf 'RAMIFY_JIRA_URL=http://127.0.0.1:17350\n' >>.ramify.conf
+printf 'RAMIFY_JIRA_URL=http://127.0.0.1:17350\nRAMIFY_JIRA_SYNC=0\n' >>.ramify.conf
 git commit -qam jira && git push -q origin main 2>/dev/null
 export RAMIFY_JIRA_EMAIL=qa@t RAMIFY_JIRA_TOKEN=tok
 sleep 1

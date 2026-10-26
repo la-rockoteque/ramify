@@ -1,0 +1,15 @@
+bin/ramify
+libexec/jira.py
+libexec/ticket*.py
+libexec/ticket*.sh
+hooks/*
+.claude-plugin/plugin.json
+skills/setup/*
+skills/pr/*
+skills/finale/*
+skills/worktree/*
+examples/*
+test/*
+README.md
+.ramify/work/jira-lifecycle/*
+!.ramify/work/codex-handoff/*

@@ -44,6 +44,9 @@ pipeline doc that says how branches and QA work. For each value, confirm or corr
 - **QA recipe** — `RAMIFY_QA_PLAN` (the checklist glob, `<slug>` = worktree name),
   `RAMIFY_QA_RESULTS`, `RAMIFY_QA_NOTES` (seed data, test accounts, anything a reviewer needs).
 - **Gates** — `RAMIFY_GATE_BEHIND=0` if the team pushes branches behind main on purpose.
+- **Jira** — use the branch key and `RAMIFY_JIRA_URL`. Set `RAMIFY_JIRA_PROGRESS`, `RAMIFY_JIRA_REVIEW`, and `RAMIFY_JIRA_DONE` to the team's transitions.
+  Keep credentials outside the config. Use `ramify jira login` and the Git host's credentials described in README.md.
+  GitHub, GitLab, and Bitbucket Cloud support automatic review and done updates. `RAMIFY_JIRA_SYNC=0` disables the watcher.
 
 ## 3. Ask what only the human knows
 
