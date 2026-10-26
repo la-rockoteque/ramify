@@ -11,6 +11,7 @@ steps:
 - {step: audit, date: 2026-10-26, note: Every acceptance criterion and QA audit case has named evidence in qa-results.md}
 - {step: qa, date: 2026-10-26, note: 'Live local fixture verifies automatic assignment, progress, review, and done; legacy Jira checks pass'}
 - {step: review, date: 2026-10-26}
+- {step: pr, date: 2026-10-26, note: '#21'}
 ---
 
 # jira-lifecycle
