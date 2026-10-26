@@ -10,6 +10,7 @@ steps:
 - {step: build, date: 2026-10-26, note: 21 lifecycle tests and 6 Codex tests pass; smoke passes 187 cases with 2 documented baseline colour failures}
 - {step: audit, date: 2026-10-26, note: Every acceptance criterion and QA audit case has named evidence in qa-results.md}
 - {step: qa, date: 2026-10-26, note: 'Live local fixture verifies automatic assignment, progress, review, and done; legacy Jira checks pass'}
+- {step: review, date: 2026-10-26}
 ---
 
 # jira-lifecycle
