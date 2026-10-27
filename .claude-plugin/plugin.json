@@ -37,6 +37,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" human-gate",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -51,6 +61,16 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" auto-gate",
             "timeout": 10
           }
         ]

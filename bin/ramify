@@ -941,6 +941,17 @@ ask() {
     || echo "  the approvals window did not open — run 'ramify approvals', or decide with 'ramify approve|reject'"
 }
 
+# Native pipelines request their ready human gate once; later hook calls leave it intact.
+ensure_gate() {
+  local out
+  out="$(wf ensure)" || return 1
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out"
+  [ "${RAMIFY_POPUP:-1}" = 0 ] && return 0
+  "$RAMIFY_HOME/libexec/app.sh" approvals >/dev/null 2>&1 \
+    || echo "  the approvals window did not open — run 'ramify approvals'"
+}
+
 # Every open request on the machine. A worktree without a .ramify folder (here or in its primary)
 # has no work order, so python never runs for it.
 gates_json() {
@@ -1456,7 +1467,7 @@ case "${1:-}" in
   setup) RAMIFY_SETUP_ROOT="$REPO_ROOT" RAMIFY_WORKFLOW_SOURCE="$RAMIFY_WORKFLOW_SOURCE" RAMIFY_WORKFLOW_DOCS="$RAMIFY_WORKFLOW_DOCS" exec "$RAMIFY_HOME/libexec/setup.sh" "$PRIMARY" "${@:2}" ;;
   new) new "${@:2}" ;;
   workflow) case "${2:-list}" in list|show) wf "${2:-list}" "${@:3}" ;; *) usage workflow >&2; exit 2 ;; esac ;;
-  step) case "${2:-}" in done|na|gate|wait|asked) wf "${@:2}" ;; ask) ask "${@:3}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr | ask <step> | wait <step>]" ;; esac ;;
+  step) case "${2:-}" in done|na|gate|wait|asked|guard) wf "${@:2}" ;; ensure) ensure_gate ;; ask) ask "${@:3}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr | ask <step> | wait <step>]" ;; esac ;;
   approve|reject) wf "$@" ;;
   gates) gates "${2:-}" ;;
   lane) wf lane "${@:2}" ;;

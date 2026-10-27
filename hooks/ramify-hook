@@ -95,6 +95,10 @@ flow_note() { # root
   local out; out="$(RAMIFY_ROOT="$1" "$RAMIFY" step 2>/dev/null)" || return 0
   case "$out" in ''|"workflows are off"*) return 0 ;; esac
   case "$out" in 'Repository workflow'*) printf '%s\n' "$out"; return 0 ;; esac
+  case "$out" in
+    "repository "*) context_note="Follow the repository pipeline and keep its native story record. Ramify presents its configured human gates automatically. Pending approval blocks implementation edits."
+      printf '%s\n\n%s\n' "$context_note" "$out"; return 0 ;;
+  esac
   printf 'Resume with the `ramify:resume` skill before editing. Read Git status, staged and unstaged diffs, and prior step outputs. Preserve unfinished edits and pending human approvals.\n\nThis branch follows a ramify workflow. Its work order:\n%s\n\nDo the next step (→) with the skill it names, then record it: `ramify step done <step>`, or `ramify step na <step> --note why`. A human gate goes to the user with `ramify step ask <step>` (the approvals window opens), then `ramify step wait <step>` with the runtime wait tools described in `ramify:workflow` until they decide. It takes `--approved` only after the user has explicitly said OK in the chat. `gh pr create` is refused until every step before the PR step is recorded. Run all prose you write (work order, spec, QA plan and results, findings, comments, commit messages, PR body) through the `ocre-jelly` skill before you save or send it. The `ramify:workflow` skill has the full contract.' "$out"
 }
 
@@ -175,6 +179,7 @@ $note}"
 }
 
 on_push() {
+  on_auto_gate
   is_push "$(field tool_input.command)" || return 0
   local root head; root="$(field cwd)"; root="${root:-$PWD}"
   serviced "$root" || return 0
@@ -215,6 +220,8 @@ Merge $main in, make the tests pass on the result, then push:
 
 # The workflow's own gate: the PR opens once every step before it is recorded.
 on_pr_gate() {
+  local guarded; guarded="$(on_human_gate)"
+  if [ -n "$guarded" ]; then printf '%s\n' "$guarded"; return 0; fi
   case "$INPUT" in *gh*pr*) ;; *) return 0 ;; esac   # most Bash calls: no python at all
   is_pr_open "$(field tool_input.command)" || return 0
   local root out rc; root="$(field cwd)"
@@ -274,6 +281,19 @@ for c in cmds:
   esac
 }
 
+# Repository-native gates use their own story record and their own step order.
+on_auto_gate() {
+  local root; root="$(session_root)"
+  has_workflows "$root" || return 0
+  RAMIFY_READ_ONLY=1 RAMIFY_ROOT="$root" "$RAMIFY" step ensure >/dev/null 2>&1 || :
+}
+
+on_human_gate() {
+  local root; root="$(session_root)"
+  has_workflows "$root" || return 0
+  RAMIFY_ROOT="$root" "$RAMIFY" step guard <<<"$INPUT"
+}
+
 # A session in a linked worktree takes its slug as its name, the `/rename` that `ramify label`
 # prints. Claude Code applies it on startup, resume and fork, and a name the human set wins.
 session_title() { # root
@@ -287,6 +307,7 @@ session_title() { # root
 # startup, resume, clear and compact: after a compaction the agent has lost the work order too.
 on_session_start() {
   local root note title; root="$(session_root)"
+  on_auto_gate
   [ -z "$(RAMIFY_READ_ONLY=1 conf "$root" RAMIFY_JIRA_URL)" ] || RAMIFY_ROOT="$root" "$RAMIFY" ticket watch >/dev/null 2>&1 || :
   note="$(flow_note "$root")"; title="$(session_title "$root")"
   [ -n "$note$title" ] || return 0
@@ -300,6 +321,7 @@ print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))' "$note" "$ti
 
 # Fires after every turn, so the fast path — already answering — is one curl per service.
 on_stop() {
+  on_auto_gate
   local root; root="$(session_root)"
   serviced "$root" || return 0
   [ "$(conf "$root" RAMIFY_AUTOSTART)" = 0 ] && return 0
@@ -326,6 +348,8 @@ case "${1:-}" in
   push) on_push ;;
   behind) on_behind ;;
   pr-gate) on_pr_gate ;;
+  auto-gate) on_auto_gate ;;
+  human-gate) on_human_gate ;;
   decide-guard) on_decide_guard ;;
   session-start) on_session_start ;;
   stop) on_stop ;;

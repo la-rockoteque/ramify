@@ -29,6 +29,7 @@ frontmatter is what ties it to a worktree, so a renamed folder still resolves.
 """
 import datetime
 import glob
+import hashlib
 import time
 import json
 import os
@@ -39,13 +40,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"))
 import yaml  # noqa: E402  (vendored PyYAML, pure python)
+from native_records import (Fail, NativeRecordLoader, record_option, order_workflow, step_entry,
+                            record_loader, check_order_keys, check_native_record, check_step_files,
+                            check_native_start, requested_files)
 
 
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-
-
-class Fail(Exception):
-    pass
 
 
 class Off(Exception):
@@ -84,6 +84,7 @@ def check_definitions(defs, path):
     """A typo in a step name would otherwise surface as a lane that can never finish."""
     if not isinstance(defs, dict):
         raise Fail(f"{path}: not a map")
+    check_native_record(defs, path)
     flows, steps = defs.get("workflows"), defs.get("steps") or {}
     if not isinstance(flows, dict) or not flows:
         raise Fail(f"{path}: no `workflows:` map")
@@ -102,9 +103,10 @@ def check_definitions(defs, path):
     for s, d in steps.items():
         if d is not None and not isinstance(d, dict):
             raise Fail(f"{path}: step {s} is not a map")
-        extra = set(d or {}) - {"skill", "gate", "does", "opens_pr"}
+        extra = set(d or {}) - {"skill", "gate", "does", "opens_pr", "files"}
         if extra:
             raise Fail(f"{path}: step {s} has unknown keys {sorted(map(str, extra))} — quote a `does` that holds a comma")
+        check_step_files(d, path, s)
         if (d or {}).get("gate", "auto") not in ("auto", "human"):
             raise Fail(f"{path}: step {s} gate must be auto or human")
     for name, wf in flows.items():
@@ -154,7 +156,16 @@ def work_dir(defs, root):
 
 # ── Work orders ──────────────────────────────────────────────────────────────
 
-def read_order(path):
+def order_branch(defs, meta):
+    if isinstance(meta.get("branch"), str):
+        return meta["branch"]
+    slug = meta.get(record_option(defs, "slug_field", "story"))
+    if not isinstance(slug, str) or not SLUG.fullmatch(slug):
+        raise Fail("native record needs a valid story slug or an explicit branch")
+    return workflow(defs, order_workflow(defs, meta)).get("branch", "{slug}").replace("{slug}", slug)
+
+
+def read_order(path, defs=None):
     with open(path, encoding="utf-8") as f:
         text = f.read().replace("\r\n", "\n")
     if not text.endswith("\n"):
@@ -165,7 +176,7 @@ def read_order(path):
     if end < 0:
         raise Fail(f"{path}: the frontmatter is not closed")
     try:
-        meta = yaml.safe_load(text[4:end]) or {}
+        meta = yaml.load(text[4:end], Loader=record_loader(defs)) or {}
     except yaml.YAMLError as e:
         raise Fail(f"{path}: {e}")
     if not isinstance(meta, dict):
@@ -173,9 +184,7 @@ def read_order(path):
     meta["steps"] = meta.get("steps") or []
     if not isinstance(meta["steps"], list) or not all(isinstance(e, dict) for e in meta["steps"]):
         raise Fail(f"{path}: `steps:` is not a list of {{step, date}} entries")
-    for key in ("workflow", "lane", "branch"):
-        if not isinstance(meta.get(key), str):
-            raise Fail(f"{path}: no `{key}:`")
+    check_order_keys(meta, defs, path)
     return meta, text[end + 5:]
 
 
@@ -187,26 +196,34 @@ def write_order(path, meta, body):
     os.replace(tmp, path)
 
 
+def matching_order(defs, path, branch):
+    slug = os.path.basename(os.path.dirname(path))
+    candidates = [wf.get("branch", "{slug}").replace("{slug}", slug) for wf in defs["workflows"].values()]
+    try:
+        meta, _ = read_order(path, defs)
+        return order_branch(defs, meta) == branch
+    except Fail:
+        if defs.get("record") and branch in candidates:
+            raise
+        return False
+
+
 def find_order(defs):
-    branch = env("WF_BRANCH")
-    for path in sorted(glob.glob(os.path.join(work_dir(defs, env("WF_ROOT")), "*", "order.md"))):
-        try:
-            meta, _ = read_order(path)
-        except Fail:
-            continue
-        if meta.get("branch") == branch:
-            return path
-    return None
+    pattern = os.path.join(work_dir(defs, env("WF_ROOT")), "*", record_option(defs, "filename", "order.md"))
+    matches = [path for path in sorted(glob.glob(pattern)) if matching_order(defs, path, env("WF_BRANCH"))]
+    if len(matches) > 1:
+        raise Fail(f"several records match branch {env('WF_BRANCH')}; keep one authoritative story record")
+    return matches[0] if matches else None
 
 
 def current(defs):
     path = find_order(defs)
     if path is None:
         raise Fail(f"no work order for branch {env('WF_BRANCH')} — start one with `ramify new <slug> --workflow <name>`")
-    meta, body = read_order(path)
-    wf = workflow(defs, meta["workflow"])
+    meta, body = read_order(path, defs)
+    wf = workflow(defs, order_workflow(defs, meta))
     if meta["lane"] not in wf["lanes"]:
-        raise Fail(f"{path}: lane '{meta['lane']}' is not one of {meta['workflow']}'s")
+        raise Fail(f"{path}: lane '{meta['lane']}' is not one of {order_workflow(defs, meta)}'s")
     return path, meta, body, wf
 
 
@@ -291,6 +308,7 @@ def options(args, flags=(), values=()):
 
 
 def cmd_start(defs, args):
+    check_native_start(defs)
     pos, opts = options(args, values=("lane", "tag"))
     if len(pos) != 2:
         raise Fail("usage: workflow.py start <workflow> <slug> [--lane L] [--tag T]...")
@@ -335,7 +353,7 @@ def progress(defs):
     by_step = {s.get("step"): s for s in meta["steps"]}
     step = defs["steps"][nxt] if nxt else {}
     return {
-        "workflow": meta["workflow"], "lane": meta["lane"], "order": os.path.relpath(path, env("WF_ROOT")),
+        "workflow": order_workflow(defs, meta), "lane": meta["lane"], "order": os.path.relpath(path, env("WF_ROOT")),
         "done": len(lane) - len(todo), "total": len(lane),
         "next": {"step": nxt, "skill": step.get("skill"), "gate": step.get("gate", "auto")} if nxt else None,
         "asked": open_ask(meta),
@@ -373,13 +391,15 @@ def cmd_status(defs, args):
     todo = pending(meta, wf)
     nxt = todo[0] if todo else None
     rel = os.path.relpath(path, env("WF_ROOT"))
-    print(f"{meta['workflow']} · {meta['lane']} lane · {rel}")
+    print(f"{'repository ' if defs.get('record') else ''}{order_workflow(defs, meta)} · {meta['lane']} lane · {rel}")
     by_step = {s.get("step"): s for s in meta["steps"]}
     for s in lane:
         d = defs["steps"][s]
         if s in by_step:
             r = by_step[s]
-            print(f"  ✓ {s:<10} {r.get('date', '')}{'  n/a' if r.get('na') else ''}{'  ' + r['note'] if r.get('note') else ''}")
+            date = r.get(record_option(defs, "date_field", "date"), "")
+            note = r.get(record_option(defs, "note_field", "note"), "")
+            print(f"  ✓ {s:<10} {date}{'  n/a' if r.get('na') else ''}{'  ' + note if note else ''}")
         elif s == nxt:
             gate = "  (human gate: record it only after the user's explicit OK)" if d.get("gate") == "human" else ""
             print(f"  → {s:<10} {d.get('skill', '')} — {d.get('does', '')}{gate}")
@@ -403,11 +423,11 @@ def record(defs, step, na, args):
         raise Fail(f"the next step is {todo[0]}, not {step}")
     if not na and defs["steps"][step].get("gate") == "human" and not opts.get("approved"):
         raise Fail(f"{step} is a human gate: record it with --approved, and only after the user's explicit OK")
-    entry = {"step": step, "date": today()}
+    entry = step_entry(defs, step)
     if na:
         entry["na"] = True
     if opts.get("note"):
-        entry["note"] = opts["note"][-1]
+        entry[record_option(defs, "note_field", "note")] = opts["note"][-1]
     meta["steps"].append(entry)
     if (meta.get("ask") or {}).get("step") == step:
         del meta["ask"]  # an OK given in the chat answers the window's request too
@@ -442,6 +462,69 @@ def now():
     return datetime.datetime.now().replace(microsecond=0).isoformat()
 
 
+def approval_digests(defs, order, files):
+    result = {}
+    for rel in files:
+        path = os.path.realpath(os.path.join(env("WF_ROOT"), rel))
+        if os.path.commonpath([path, os.path.realpath(env("WF_ROOT"))]) != os.path.realpath(env("WF_ROOT")):
+            raise Fail("approval file is outside the worktree")
+        if path == os.path.realpath(order):
+            meta, body = read_order(path, defs)
+            meta.pop("ask", None)
+            meta.pop("steps", None)
+            data = (json.dumps(meta, sort_keys=True, default=str) + body).encode()
+        else:
+            with open(path, "rb") as f:
+                data = f.read()
+        result[rel] = hashlib.sha256(data).hexdigest()
+    return result
+
+
+def cmd_guard(defs, _args):
+    if not defs.get("auto_ask") or find_order(defs) is None:
+        return
+    _, meta, _, wf = current(defs)
+    todo = pending(meta, wf)
+    if not todo or defs["steps"][todo[0]].get("gate") != "human":
+        return
+    from native_guard import planning_tool
+    payload = json.load(sys.stdin)
+    patterns = defs.get("planning_paths") or ["docs/**", ".ramify/**", ".claude/**"]
+    if not planning_tool(payload, env("WF_ROOT"), patterns):
+        reason = f"{todo[0]} awaits human approval in Ramify. Only planning edits are allowed until that gate is approved."
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+
+
+def ready_human_step(defs, path, meta, wf):
+    todo = pending(meta, wf)
+    if not todo or defs["steps"][todo[0]].get("gate") != "human":
+        return None
+    names = defs["steps"][todo[0]].get("files", [f"{todo[0]}.md"])
+    return todo[0] if all(os.path.isfile(os.path.join(os.path.dirname(path), f)) for f in names) else None
+
+
+def same_request(defs, path, ask, step):
+    if ask.get("step") != step:
+        return False
+    return ask.get("digests") == approval_digests(defs, path, ask.get("files") or [])
+
+
+def cmd_ensure(defs, _args):
+    if not defs.get("auto_ask") or find_order(defs) is None:
+        return
+    path, meta, _, wf = current(defs)
+    step = ready_human_step(defs, path, meta, wf)
+    if step is None:
+        return
+    if not same_request(defs, path, meta.get("ask") or {}, step):
+        cmd_ask(defs, [step])
+
+
+def bind_approval(defs, path, meta, files):
+    if defs.get("auto_ask"):
+        meta["ask"]["digests"] = approval_digests(defs, path, files)
+
+
 def cmd_ask(defs, args):
     pos, opts = options(args, values=("file",))
     if len(pos) != 1:
@@ -451,7 +534,7 @@ def cmd_ask(defs, args):
     gate_step(defs, meta, wf, step)
     root, folder = env("WF_ROOT"), os.path.dirname(path)
     files = []
-    for f in opts.get("file") or [os.path.join(folder, f"{step}.md")]:
+    for f in requested_files(defs, step, folder, opts):
         full = os.path.realpath(f if os.path.isabs(f) else os.path.join(root, f))
         if not os.path.isfile(full):
             raise Fail(f"{f}: no such file — write it before you ask, or name it with --file")
@@ -462,8 +545,17 @@ def cmd_ask(defs, args):
     if order not in files:
         files.append(order)
     meta["ask"] = {"step": step, "asked": now(), "files": files}
+    bind_approval(defs, path, meta, files)
     write_order(path, meta, body)
     print(f"  {step} waits on the human — the approvals window shows {', '.join(files)}")
+
+
+def check_approval_content(defs, path, meta):
+    digests = meta["ask"].get("digests")
+    if not digests:
+        return
+    if digests != approval_digests(defs, path, meta["ask"].get("files") or []):
+        raise Fail("approval files changed; refresh the request before deciding")
 
 
 def cmd_decide(defs, args, approve):
@@ -479,10 +571,11 @@ def cmd_decide(defs, args, approve):
     if open_ask(meta) != step:
         raise Fail(f"nothing asks for a decision on {step} — the agent puts it up with `ramify step ask {step}`")
     gate_step(defs, meta, wf, step)
+    check_approval_content(defs, path, meta)
     if approve:
-        entry = {"step": step, "date": today()}
+        entry = step_entry(defs, step)
         if note:
-            entry["note"] = note
+            entry[record_option(defs, "note_field", "note")] = note
         meta["steps"].append(entry)
         del meta["ask"]
     else:
@@ -503,7 +596,7 @@ def cmd_wait(defs, args):
         path, meta, _, wf = current(defs)
         by_step = {s.get("step"): s for s in meta["steps"]}
         if step in by_step:
-            note = by_step[step].get("note")
+            note = by_step[step].get(record_option(defs, "note_field", "note"))
             print(f"approved{': ' + note if note else ''}")
             return 0
         ask = meta.get("ask") or {}
@@ -521,7 +614,7 @@ def cmd_wait(defs, args):
 def cmd_asked(defs, args):
     """The approvals window reads this: the open request and the text of its files."""
     path = find_order(defs)
-    meta = read_order(path)[0] if path else {}
+    meta = read_order(path, defs)[0] if path else {}
     step = open_ask(meta)
     if not step:
         print("null")
@@ -539,7 +632,7 @@ def cmd_asked(defs, args):
             text = f"(cannot read {rel}: {e})"
         files.append({"path": rel, "text": text})
     print(json.dumps({"step": step, "does": (defs["steps"].get(step) or {}).get("does"), "asked": meta["ask"].get("asked"),
-                      "workflow": meta["workflow"], "lane": meta["lane"], "branch": meta["branch"], "files": files},
+                      "workflow": order_workflow(defs, meta), "lane": meta["lane"], "branch": order_branch(defs, meta), "files": files},
                      default=str))
 
 
@@ -549,7 +642,7 @@ def cmd_lane(defs, args):
     path, meta, body, wf = current(defs)
     lane = args[0]
     if lane not in wf["lanes"]:
-        raise Fail(f"no lane '{lane}' in {meta['workflow']} — one of: {', '.join(lane_names(wf))}")
+        raise Fail(f"no lane '{lane}' in {order_workflow(defs, meta)} — one of: {', '.join(lane_names(wf))}")
     if heavier(wf, lane, meta["lane"]) != lane:
         raise Fail(f"{lane} is lighter than {meta['lane']}: a lane is raised, never lowered")
     if lane == meta["lane"]:
@@ -558,6 +651,17 @@ def cmd_lane(defs, args):
     meta["lane"] = lane
     write_order(path, meta, body)
     print(f"  lane raised to {lane} — next: {(pending(meta, wf) or ['nothing'])[0]}")
+
+
+def cmd_human_gate(defs):
+    if find_order(defs) is None or not defs.get("auto_ask"):
+        return 0
+    path, meta, _, wf = current(defs)
+    todo = pending(meta, wf)
+    if todo and defs["steps"][todo[0]].get("gate") == "human":
+        print(f"{todo[0]} needs human approval in Ramify before implementation ({os.path.relpath(path, env('WF_ROOT'))})")
+        return 1
+    return 0
 
 
 def cmd_gate(defs, args):
@@ -583,6 +687,58 @@ def cmd_gate(defs, args):
     return 0
 
 
+def off_status(args):
+    if "--json" in args:
+        print("null")
+    elif "--line" not in args:
+        print("workflows are off for this repo")
+    return 0
+
+
+def off_output(cmd, args):
+    if cmd == "status":
+        return off_status(args)
+    if cmd == "asked":
+        print("null")
+        return 0
+    if cmd in {"ensure", "guard", "gate"}:
+        return 0
+    if cmd in {"branch", "start", "done", "na", "lane", "ask", "approve", "reject", "wait"}:
+        print("ramify: workflows are off for this repo", file=sys.stderr)
+        return 1
+    print("workflows are off for this repo")
+    return 0
+
+
+def deny_gate_error(error):
+    reason = f"Cannot verify the configured human gate: {error}"
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+    return 0
+
+
+def status_error(args, error):
+    if "--json" in args:
+        print(json.dumps({"error": str(error)}))
+        return 0
+    if "--line" in args:
+        print("workflow: broken, see `ramify step`")
+        return 0
+    print(f"ramify: {error}", file=sys.stderr)
+    return 1
+
+
+def fail_output(cmd, args, error):
+    if cmd == "guard":
+        return deny_gate_error(error)
+    if cmd == "status":
+        return status_error(args, error)
+    if cmd == "asked":
+        print("null")
+        return 0
+    print(f"ramify: {error}", file=sys.stderr)
+    return 2 if cmd == "gate" else 1
+
+
 def main(argv):
     if not argv:
         print(__doc__.strip())
@@ -602,10 +758,10 @@ def main(argv):
                 raise Fail(str(exc))
         table = {
             "list": cmd_list, "show": cmd_show, "branch": cmd_branch, "start": cmd_start,
-            "status": cmd_status, "lane": cmd_lane, "gate": cmd_gate,
+            "status": cmd_status, "lane": cmd_lane, "gate": lambda d, a: cmd_human_gate(d) if a == ["--human"] else cmd_gate(d, a),
             "done": lambda d, a: record(d, a[0] if a else "", False, a[1:]),
             "na": lambda d, a: record(d, a[0] if a else "", True, a[1:]),
-            "ask": cmd_ask, "wait": cmd_wait, "asked": cmd_asked,
+            "ask": cmd_ask, "guard": cmd_guard, "ensure": cmd_ensure, "wait": cmd_wait, "asked": cmd_asked,
             "approve": lambda d, a: cmd_decide(d, a, True),
             "reject": lambda d, a: cmd_decide(d, a, False),
         }
@@ -613,36 +769,10 @@ def main(argv):
             raise Fail(f"unknown command {cmd}")
         return table[cmd](defs, args) or 0
     except Off:
-        if cmd == "status" and "--json" in args:
-            print("null")
-            return 0
-        if cmd == "status" and "--line" in args:
-            return 0
-        if cmd == "gate":
-            return 0
-        if cmd == "asked":
-            print("null")
-            return 0
-        if cmd in ("branch", "start", "done", "na", "lane", "ask", "approve", "reject", "wait"):
-            print("ramify: workflows are off for this repo", file=sys.stderr)
-            return 1
-        print("workflows are off for this repo")
-        return 0
+        return off_output(cmd, args)
     except Fail as e:
-        if cmd == "gate":
-            print(f"ramify: {e}", file=sys.stderr)
-            return 2  # not "steps missing": the hook lets the PR through on this one
-        if cmd == "status" and "--json" in args:
-            print(json.dumps({"error": str(e)}))
-            return 0
-        if cmd == "status" and "--line" in args:
-            print("workflow: broken, see `ramify step`")
-            return 0
-        if cmd == "asked":
-            print("null")  # a broken order is the dashboard's to report; the window shows what it can
-            return 0
-        print(f"ramify: {e}", file=sys.stderr)
-        return 1
+        return fail_output(cmd, args, e)
+
 
 
 if __name__ == "__main__":
