@@ -552,8 +552,8 @@ The allow hook works in every repo, since a ramify command acts the same anywher
 
 In Claude Code, the allow hook answers `allow` when every part of the Bash command is one of these:
 
-- `ramify` with an allowed subcommand, behind `RAMIFY_*=…` assignments only
-- `cd <dir>`
+- `ramify` with an allowed subcommand, behind `RAMIFY_ROOT=…` only
+- `cd <dir>`, with an absolute path
 - `head`, `tail`, `grep` or `wc` after a pipe, with flags and counts only, and one pattern for `grep`.
   A file argument, `-f`, or a recursive `grep` gets no answer.
 
@@ -565,9 +565,16 @@ In Claude Code, the allow hook answers `allow` when every part of the Bash comma
 | `new`, `up`, `down`, `prune` without `--apply` | `setup`, `jira`, `ticket`, `menu`, `watch` |
 
 The `ramify` must be the one on `PATH` or the plugin's own `bin/ramify`. The agent can edit any
-other copy. A command with `$(…)`, backticks, process substitution or a redirection gets no
-answer. The only redirections accepted are `2>&1`, `>/dev/null` and `2>/dev/null`. A deny from
+other copy. ramify sources the config of the tree it runs in, so the session's directory, each
+`cd` target and a `RAMIFY_ROOT` value must be inside a worktree of the repo. A command with any
+of `$`, backslash, backtick, `*`, `?`, `[`, `]`, `{`, `}`, `~`, `!` or `#` gets no answer, even in
+quotes: bash expands what the hook cannot see. The only redirections accepted are the whole
+tokens `2>&1`, `>/dev/null` and `2>/dev/null`. A deny from
 another hook still wins. `RAMIFY_AUTO_ALLOW=0` in `.ramify.conf` turns the hook off for that repo.
+
+The hook trusts the repo's config. Every `ramify` command sources `.ramify.conf` as bash, so an
+agent that can edit that file can run code through an allowed command. Allowing `npm test` trusts
+`package.json` the same way. Turn the hook off where that trust does not hold.
 
 Skills: `ramify:resume`, `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`, `ramify:run`.
 Workflow skills: `ramify:workflow` (the contract every step follows), then one per step of the

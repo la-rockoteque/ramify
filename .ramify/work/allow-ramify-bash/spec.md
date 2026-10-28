@@ -12,20 +12,22 @@ A new PreToolUse hook, `ramify-hook allow`, reads each Bash command before it ru
 
 1. The hook splits the command into simple commands at `;`, `&&`, `||`, `|`, `&` and newlines.
 2. It answers `permissionDecision: allow` only when every simple command is one of these:
-   - `ramify <subcommand> …`, where the subcommand is on the allow list below. An environment
-     prefix is allowed when every variable name starts with `RAMIFY_`.
-   - `cd <dir>`.
-   - `head`, `tail`, `grep` or `wc` after a pipe.
+   - `ramify <subcommand> …`, where the subcommand is on the allow list below. `RAMIFY_ROOT=` is
+     the one environment prefix allowed. Any other `RAMIFY_*` variable can reach an `eval`.
+   - `cd <dir>`, with an absolute path.
+   - `head`, `tail`, `grep` or `wc` after a pipe, with fixed flags, counts and one `grep` pattern.
 3. The command must be the bare `ramify` from `PATH`, or the plugin's own `bin/ramify`. A path
    to another copy (for example a worktree's `bin/ramify`) is not allowed: the agent can edit
    that file.
-4. The command must hold no command substitution (`$(`, backticks), no process substitution,
-   and no redirection. The only redirections accepted are `2>&1`, `>/dev/null` and
-   `2>/dev/null`.
-5. In every other case the hook prints nothing. Claude Code then applies its normal rules.
-6. A `deny` from another hook (`decide-guard`, `pr-gate`, `behind`, `human-gate`) still wins.
+4. ramify sources the config of the tree it runs in. The hook's `cwd`, each `cd` target and a
+   `RAMIFY_ROOT` value must be inside a worktree of the session's repo.
+5. The command must hold none of `$`, backslash, backtick, `*`, `?`, `[`, `]`, `{`, `}`, `~`, `!`
+   or `#`, not even inside quotes: bash expands what a token check cannot see. The only
+   redirections accepted are the whole tokens `2>&1`, `>/dev/null` and `2>/dev/null`.
+6. In every other case the hook prints nothing. Claude Code then applies its normal rules.
+7. A `deny` from another hook (`decide-guard`, `pr-gate`, `behind`, `human-gate`) still wins.
    Claude Code applies deny before allow.
-7. `RAMIFY_AUTO_ALLOW=0` in `.ramify.conf` turns the hook off for that repo.
+8. `RAMIFY_AUTO_ALLOW=0` in `.ramify.conf` turns the hook off for that repo.
 
 ### Allow list
 
@@ -48,12 +50,14 @@ A new PreToolUse hook, `ramify-hook allow`, reads each Bash command before it ru
 ## Acceptance criteria
 
 - AC1: `ramify step` gets `allow`.
-- AC2: `cd /x && RAMIFY_ROOT=/y ramify step ask spec` gets `allow`.
+- AC2: `cd <worktree> && RAMIFY_ROOT=<worktree> ramify step ask spec` gets `allow`. A `cd`, a
+  `RAMIFY_ROOT` or a `cwd` outside the repo's worktrees gets no decision.
 - AC3: `ramify gates --json | head -5` and `ramify card 2>&1` get `allow`.
 - AC4: Each command in "Still prompted" gets no decision.
 - AC5: `ramify step && rm -rf x` gets no decision.
 - AC6: `PATH=/tmp ramify step`, `./bin/ramify step` and `/tmp/x/ramify step` get no decision.
-- AC7: `ramify step $(rm x)`, `` ramify step `rm x` `` and `ramify config > f` get no decision.
+- AC7: `ramify step $(rm x)`, `` ramify step `rm x` ``, `ramify config > f`, a `#` comment, a
+  variable, a glob, a brace, a tilde and any `RAMIFY_*` prefix but `RAMIFY_ROOT` get no decision.
 - AC8: `ramify step` with `RAMIFY_AUTO_ALLOW=0` in the repo config gets no decision.
 - AC9: A Bash call that is not about ramify (`ls`, `git status`) gets no decision.
 - AC10: The plugin's own `bin/ramify` path, as the skills print it, gets `allow`.

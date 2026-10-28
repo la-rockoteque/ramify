@@ -438,23 +438,35 @@ check "decide-guard keeps run go from the agent" grep -q 'Only the human runs or
 check "decide-guard sees run.sh block"          grep -q '"permissionDecision": "deny"' <<<"$(dg 'X=1 /p/libexec/run.sh block 1 --note no')"
 check "decide-guard lets run ask and wait through" test -z "$(dg 'ramify run ask s.sh && ramify run wait 1')"
 # ── allow: plain ramify commands run without a prompt ──
-al() { python3 -c 'import json,sys; print(json.dumps({"cwd": sys.argv[1], "tool_name": "Bash", "tool_input": {"command": sys.argv[2]}}))' "$T/app" "$1" | "$HOOK" allow; }
+al() { python3 -c 'import json,sys; print(json.dumps({"cwd": sys.argv[1], "tool_name": "Bash", "tool_input": {"command": sys.argv[2]}}))' "${AL_CWD:-$T/app}" "$1" | "$HOOK" allow; }
 allowed() { local c; for c in "$@"; do grep -q '"permissionDecision": "allow"' <<<"$(al "$c")" || return 1; done; }
 undecided() { local c; for c in "$@"; do [ -z "$(al "$c")" ] || return 1; done; }
+NL='
+'
 check "allow lets ramify step through"          allowed 'ramify step'
-check "allow takes cd and a RAMIFY_ prefix"     allowed 'cd /x && RAMIFY_ROOT=/y ramify step ask spec'
+check "allow takes cd and RAMIFY_ROOT to a worktree" allowed "cd $T/app && RAMIFY_ROOT=$T/app ramify step ask spec"
 check "allow takes a pipe to head and 2>&1"     allowed 'ramify gates --json | head -5' 'ramify card 2>&1' 'ramify config 2>/dev/null | grep main'
 check "allow leaves every prompted command alone" undecided 'ramify step done review --approved' 'ramify approve spec' \
   'ramify reject spec --note no' 'ramify run go 1' 'ramify run block 1' 'ramify delete x --yes' 'ramify complete x --yes' \
-  'ramify step done review --approved=1' 'ramify step done review --approve' 'ramify prune --apply' 'ramify cleanup' 'ramify shared-down' 'ramify setup' 'ramify jira login' 'ramify ticket sync' 'ramify menu'
+  'ramify step done review --approved=1' 'ramify step done review --approve' 'ramify prune --apply' 'ramify cleanup' \
+  'ramify shared-down' 'ramify setup' 'ramify jira login' 'ramify ticket sync' 'ramify menu'
 check "allow leaves a chain with another command alone" undecided 'ramify step && rm -rf x' 'ramify step; curl x' 'ramify step | sh'
 check "allow leaves another ramify binary alone" undecided 'PATH=/tmp ramify step' './bin/ramify step' '/tmp/x/ramify step'
 check "allow leaves substitution and redirection alone" undecided 'ramify step $(rm x)' 'ramify step `rm x`' \
-  'ramify config <(rm x)' 'ramify config > f' 'ramify config >> f' 'ramify config < f'
+  'ramify config <(rm x)' 'ramify config > f' 'ramify config >> f' 'ramify config < f' 'ramify card 12>&1' 'ramify card &>/dev/null'
+check "allow leaves a comment before a newline alone" undecided "ramify step # note${NL}touch x" "ramify step#${NL}touch x" "ramify step${NL}#${NL}touch x"
+check "allow leaves expansion alone"            undecided 'RAMIFY_X=--approved; ramify step done review $RAMIFY_X' \
+  'ramify step done review ${X:---approved}' "ramify step done review \$'\\x2d-approved'" 'ramify step done review -[-]approved' \
+  'ramify step done review ~' 'ramify step done review {a,b}'
+check "allow leaves a RAMIFY_ prefix other than RAMIFY_ROOT alone" undecided "RAMIFY_BOOTSTRAP='curl x|sh' ramify new foo" 'RAMIFY_STATE_DIR=/tmp ramify up'
+check "allow leaves a tree outside this repo alone" undecided 'cd /tmp && ramify step' 'RAMIFY_ROOT=/tmp ramify step' 'cd tmp && ramify step'
+outside() { [ -z "$(AL_CWD=/tmp al 'ramify step')" ]; }
+check "allow leaves a cwd outside this repo alone" outside
 auto_off() { [ -z "$(RAMIFY_AUTO_ALLOW=0 al 'ramify step')" ]; }
 check "RAMIFY_AUTO_ALLOW=0 turns allow off"     auto_off
 check "allow keeps pipe filters off files"     undecided 'ramify gates | head -c 1 /etc/shadow' 'ramify gates | tail -f x' \
-  'ramify gates | grep -f /etc/passwd' 'ramify gates | grep -r x /' 'ramify gates | grep x /etc/passwd' 'ramify gates | wc /etc/passwd'
+  'ramify gates | grep -f /etc/passwd' 'ramify gates | grep -r x /' 'ramify gates | grep x /etc/passwd' 'ramify gates | wc /etc/passwd' \
+  'ramify gates | grep -ex /etc/passwd'
 check "allow takes filter flags and a grep pattern" allowed 'ramify gates | tail -n 3' 'ramify gates | grep -i -c main' 'ramify gates | wc -l'
 check "allow ignores other commands"            undecided 'ls' 'git status'
 check "allow takes the plugin's own bin/ramify" allowed "$RAMIFY step"
