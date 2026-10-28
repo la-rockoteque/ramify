@@ -8,6 +8,7 @@ steps:
 - {step: spec, date: 2026-10-28}
 - {step: qa-plan, date: '2026-10-28'}
 - {step: build, date: '2026-10-28'}
+- {step: audit, date: '2026-10-28'}
 ---
 
 # session-names
