@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | session-start | stop | session-end
+# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | allow | session-start | stop | session-end
 #
 # Installed as a plugin, these fire in every repo. Each one exits 0 silently unless the checkout
 # has a ramify config, and none of them ever fails a turn.
@@ -243,6 +243,108 @@ deny() {
   python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}, ensure_ascii=False))' "$1"
 }
 
+# Is the Bash command only plain ramify calls? Each simple command must be `ramify <allowed
+# subcommand>`, `cd <worktree>`, or a read-only filter after a pipe. The check is strict on
+# purpose, because bash expands what a token check cannot see: no `$`, backslash, backtick, glob,
+# brace, tilde, `!` or `#`, and no redirection but the three whole tokens that only drop output.
+# The ramify must be the one on PATH or this plugin's own: the agent can edit any other copy.
+# ramify sources the config of the tree it runs in, so the hook's cwd, each `cd` target and a
+# `RAMIFY_ROOT=` value must be a worktree of this repo. RAMIFY_ROOT is the one prefix allowed:
+# any other RAMIFY_* variable reaches an eval.
+is_plain_ramify() { # command, cwd, worktree paths (one per line)
+  python3 -c '
+import os, re, shlex, sys
+cmd, cwd, trees = sys.argv[1], sys.argv[2], sys.argv[3].split("\n")
+own = os.path.realpath(sys.argv[4])
+trees = [os.path.realpath(t) for t in trees if t]
+if re.search(r"[$\\`*?\[\]{}~!#\r]", cmd) or any(ord(ch) > 126 for ch in cmd):
+    sys.exit(1)
+cmd = re.sub(r"(?<!\S)(2>&1|2>/dev/null|>/dev/null)(?!\S)", " ", cmd)
+if re.search(r"[<>]", cmd):
+    sys.exit(1)
+try:
+    lex = shlex.shlex(cmd.replace("\n", ";"), posix=True, punctuation_chars=";&|()")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    toks = list(lex)
+except ValueError:
+    sys.exit(1)
+
+def in_trees(path):
+    path = os.path.realpath(path)
+    return any(path == t or path.startswith(t + os.sep) for t in trees)
+
+READ = {"", "config", "workflow", "gates", "runs", "label", "card", "dash", "status", "ping", "statusline",
+        "write-set", "help", "lane", "approvals", "app", "scratch", "new", "up", "down"}
+
+def ramify_ok(args):
+    sub = args[0] if args else ""
+    if args and args[-1] in ("-h", "--help") or sub in READ:
+        return True
+    if sub == "step":
+        return not any(a.startswith("--appr") for a in args)
+    if sub == "run":
+        return args[1:2] in (["ask"], ["wait"])
+    if sub == "prune":
+        return "--apply" not in args
+    return False
+
+def filter_ok(c):
+    """A filter after a pipe reads its input only: fixed flags, counts, and one grep pattern."""
+    a = c[1:]
+    if c[0] in ("head", "tail"):
+        return all(re.fullmatch(r"-n|-c|-n?\d+|\d+", x) for x in a)
+    if c[0] == "wc":
+        return all(re.fullmatch(r"-[lwcm]+", x) for x in a)
+    if c[0] == "grep":
+        flags = [x for x in a if x.startswith("-")]
+        rest = [x for x in a if not x.startswith("-")]
+        return len(rest) == 1 and all(re.fullmatch(r"-[icvnwxlqhHoE]+", x) for x in flags)
+    return False
+
+def simple_ok(c, piped, here):
+    root = None
+    if c and c[0].startswith("RAMIFY_ROOT="):
+        root, c = c[0].split("=", 1)[1], c[1:]
+    if c and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", c[0]):
+        return False, here
+    if not c:
+        return root is None, here
+    if piped:
+        return root is None and filter_ok(c), here
+    if c[0] == "cd":
+        ok = root is None and len(c) == 2 and os.path.isabs(c[1]) and in_trees(c[1])
+        return ok, c[1]
+    if c[0] == "ramify" or (os.path.isabs(c[0]) and os.path.realpath(c[0]) == own):
+        at = root if root is not None else here
+        return os.path.isabs(at) and in_trees(at) and ramify_ok(c[1:]), here
+    return False, here
+
+cur, piped, here = [], False, cwd
+for t in toks + [";"]:
+    if t and set(t) <= set(";&|()"):
+        if t not in (";", "&&", "||", "|", "&"):
+            sys.exit(1)
+        ok, here = simple_ok(cur, piped, here)
+        if not ok:
+            sys.exit(1)
+        cur, piped = [], t == "|"
+    else:
+        cur.append(t)
+' "$1" "$2" "$3" "$RAMIFY" 2>/dev/null
+}
+
+# Plain ramify commands run without a permission prompt. A deny from another hook still wins:
+# Claude Code applies deny before allow. RAMIFY_AUTO_ALLOW=0 in the config turns this off.
+on_allow() {
+  case "$INPUT" in *ramify*) ;; *) return 0 ;; esac
+  local root cwd trees; root="$(session_root)"; cwd="$(field cwd)"
+  trees="$(git -C "$root" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')"
+  is_plain_ramify "$(field tool_input.command)" "${cwd:-$root}" "$trees" || return 0
+  [ "$(conf "$root" RAMIFY_AUTO_ALLOW)" = 0 ] && return 0
+  python3 -c 'import json; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "a plain ramify command"}}))'
+}
+
 # A human gate's decision belongs to the human: the agent asks (`ramify step ask`) and waits, it
 # never answers. The same goes for a script handed over with `ramify run ask`: only the human runs
 # or blocks it. Catches `ramify approve|reject` and `ramify run go|block` as shell words, like the
@@ -414,6 +516,7 @@ case "${1:-}" in
   auto-gate) on_auto_gate ;;
   human-gate) on_human_gate ;;
   decide-guard) on_decide_guard ;;
+  allow) on_allow ;;
   session-start) on_session_start ;;
   stop) on_stop ;;
   session-end) on_session_end ;;
