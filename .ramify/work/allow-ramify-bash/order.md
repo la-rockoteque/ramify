@@ -7,6 +7,7 @@ created: 2026-10-28
 steps:
 - {step: spec, date: '2026-10-28'}
 - {step: qa-plan, date: '2026-10-28'}
+- {step: build, date: '2026-10-28'}
 ---
 
 # allow-ramify-bash
