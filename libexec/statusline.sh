@@ -6,8 +6,9 @@
 # where it started: without the pin, the status line shows the primary checkout's branch.
 #
 # Plain: "𖣂 tm-127-pagination ⎇ story/tm-127-pagination", or "𖣂 main" in the primary checkout.
+# A named session starts with its name: "𖣂 birch · main".
 # With a work order: "… · feature/light 3/6 → review".
-# --json: {"root","worktree","branch","primary","icon","slot","ticket","stack","answering","services","workflow","ports","run"},
+# --json: {"root","worktree","branch","name","primary","icon","slot","ticket","stack","answering","services","workflow","ports","run"},
 # for a status line that draws its own. ports maps each running service to its port, {"web": 5174}.
 # run is "▶ run <id> waits on you" while a script asked from this worktree waits, else null.
 # slot is set while the worktree's stack runs; ticket once
@@ -24,6 +25,8 @@ except ValueError:
     d = {}
 print(d.get("session_id") or "-", (d.get("workspace") or {}).get("current_dir") or d.get("cwd") or ".")' 2>/dev/null)
 pin="${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/${sid:--}.root"
+# The session name the session-start hook picked, from the file other status lines read too.
+name="$(head -1 "${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/${sid:--}.name" 2>/dev/null)"
 
 root=""
 # A pin to a tree that is gone, or no longer a checkout (its directory left behind), is stale.
@@ -89,7 +92,7 @@ if [ "${1:-}" = --json ]; then
     s="-${branch//\//-}-"
     [[ "$s" =~ -(${pattern:-[A-Za-z][A-Za-z0-9]*-[0-9]+})- ]] && ticket="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
   fi
-  RUNS="$runs" ENVFILE="$env" WORKFLOW="${flow_json:-null}" STACK="$stack" ANSWERING="$answering" TOTAL="$total" SLOT="$slot" TICKET="$ticket" ROOT="$root" WT="$wt" BRANCH="$branch" PRIMARY="$([ "$root" = "$primary" ] && echo 1)" ICON="$icon" python3 -c '
+  NAME="$name" RUNS="$runs" ENVFILE="$env" WORKFLOW="${flow_json:-null}" STACK="$stack" ANSWERING="$answering" TOTAL="$total" SLOT="$slot" TICKET="$ticket" ROOT="$root" WT="$wt" BRANCH="$branch" PRIMARY="$([ "$root" = "$primary" ] && echo 1)" ICON="$icon" python3 -c '
 import json, os
 e = os.environ
 
@@ -105,12 +108,12 @@ def ports():
     except OSError:
         pass
     return out
-print(json.dumps({"root": e["ROOT"], "worktree": e["WT"], "branch": e["BRANCH"], "primary": e["PRIMARY"] == "1", "icon": e["ICON"],
+print(json.dumps({"root": e["ROOT"], "worktree": e["WT"], "branch": e["BRANCH"], "name": e["NAME"] or None, "primary": e["PRIMARY"] == "1", "icon": e["ICON"],
                   "slot": int(e["SLOT"]) if e["SLOT"].isdigit() else None, "ticket": e["TICKET"] or None,
                   "stack": e["STACK"] or None, "answering": int(e["ANSWERING"]), "services": int(e["TOTAL"]),
                   "workflow": json.loads(e["WORKFLOW"]), "ports": ports(), "run": e["RUNS"] or None}))'
 elif [ "$root" = "$primary" ]; then
-  printf '%s %s%s%s%s\n' "$icon" "$branch" "$health" "${flow:+ · $flow}" "${runs:+ · $runs}"
+  printf '%s %s%s%s%s%s\n' "$icon" "${name:+$name · }" "$branch" "$health" "${flow:+ · $flow}" "${runs:+ · $runs}"
 else
-  printf '%s %s ⎇ %s%s%s%s\n' "$icon" "$wt" "$branch" "$health" "${flow:+ · $flow}" "${runs:+ · $runs}"
+  printf '%s %s%s ⎇ %s%s%s%s\n' "$icon" "${name:+$name · }" "$wt" "$branch" "$health" "${flow:+ · $flow}" "${runs:+ · $runs}"
 fi

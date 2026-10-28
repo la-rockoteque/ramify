@@ -294,14 +294,76 @@ on_human_gate() {
   RAMIFY_ROOT="$root" "$RAMIFY" step guard <<<"$INPUT"
 }
 
-# A session in a linked worktree takes its slug as its name, the `/rename` that `ramify label`
-# prints. Claude Code applies it on startup, resume and fork, and a name the human set wins.
-session_title() { # root
+# The words of RAMIFY_SESSION_NAMES: a theme in assets/names, else the value is the list itself.
+# A word becomes a file name in held/, so one with a slash or a leading dot is dropped.
+name_words() { # root
+  local t; t="$(conf "$1" RAMIFY_SESSION_NAMES)"; t="${t:-trees}"
+  case "$t" in
+    *[[:space:]]*) printf '%s\n' "$t" | tr -s ' \t' '\n' ;;
+    *) if [ -f "$HERE/../assets/names/$t.txt" ]; then cat "$HERE/../assets/names/$t.txt"; else printf '%s\n' "$t"; fi ;;
+  esac | grep -v -e / -e '^\.' -e '^$'
+}
+
+# held/<name> is the lock: noclobber makes its creation atomic, so two sessions that start
+# together never share a name. A hold this session left behind is its own. <session_id>.name
+# is what a status line reads. When it cannot be written, the hold goes back at once: a hold
+# with no name file would never be released.
+claim_name() { # name, session id
+  (set -o noclobber; printf '%s\n' "$2" >"$PINS/held/$1") 2>/dev/null \
+    || [ "$(cat "$PINS/held/$1" 2>/dev/null)" = "$2" ] || return 1
+  printf '%s\n' "$1" 2>/dev/null >"$PINS/$2.name" || { rm -f "$PINS/held/$1"; return 2; }
+  printf '%s\n' "$1"
+}
+
+# The name a session's title carries: `<slug> · <name>` or `<name>`. After a resume or a /clear
+# the name file can be gone, and the title is the only link to the name it had. A word outside
+# the theme, such as a slug from before session names, is not a name.
+title_name() { # root
+  local n; n="$(field session_title)"; n="${n##* · }"
+  case "$n" in ''|*/*|.*|*$'\n'*) return 1 ;; esac
+  name_words "$1" | grep -qxF -e "$n" -e "${n%-[2-9]}" && printf '%s\n' "$n"
+}
+
+# The session's name, picked once: a live one is kept, a titled session takes the one in its
+# title. A session id becomes a file name, so one with a slash or a dot gets no name.
+session_name() { # root
+  local sid words n i rc; sid="$(field session_id)"
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+  configured "$1" && [ "$(conf "$1" RAMIFY_SESSION_NAMES)" != off ] || return 0
+  [ -f "$PINS/$sid.name" ] && { cat "$PINS/$sid.name"; return 0; }
+  mkdir -p "$PINS/held" 2>/dev/null || return 0
+  n="$(title_name "$1")" && claim_name "$n" "$sid" && return 0
+  words="$(name_words "$1" | awk -v seed="$$$RANDOM" 'BEGIN { srand(seed) } { print rand() "\t" $0 }' | sort | cut -f2-)"
+  for i in "" -2 -3 -4 -5 -6 -7 -8 -9; do
+    while read -r n; do
+      [ -n "$n" ] || continue
+      claim_name "$n$i" "$sid"; rc=$?
+      [ "$rc" = 1 ] || return 0
+    done <<<"$words"
+  done
+}
+
+release_name() {
+  local sid n; sid="$(field session_id)"
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+  [ -f "$PINS/$sid.name" ] || return 0
+  n="$(cat "$PINS/$sid.name")"
+  [ "$(cat "$PINS/held/$n" 2>/dev/null)" = "$sid" ] && rm -f "$PINS/held/$n"
+  rm -f "$PINS/$sid.name"
+}
+
+# The title: `<slug> · <name>` in a linked worktree, `<name>` in the primary checkout. Claude
+# Code applies it on startup, resume and fork, and a title the human set wins.
+session_title() { # root, name
   [ "${RAMIFY_AGENT:-claude}" = codex ] && return 0
   case "$(field source)" in startup|resume|fork) ;; *) return 0 ;; esac
   [ -z "$(field session_title)" ] && configured "$1" || return 0
-  [ "$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" != \
-    "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ] && basename "$1"
+  if [ "$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" != \
+       "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]; then
+    echo "$(basename "$1")${2:+ · $2}"
+  else
+    echo "$2"
+  fi
 }
 
 # startup, resume, clear and compact: after a compaction the agent has lost the work order too.
@@ -309,7 +371,7 @@ on_session_start() {
   local root note title; root="$(session_root)"
   on_auto_gate
   [ -z "$(RAMIFY_READ_ONLY=1 conf "$root" RAMIFY_JIRA_URL)" ] || RAMIFY_ROOT="$root" "$RAMIFY" ticket watch >/dev/null 2>&1 || :
-  note="$(flow_note "$root")"; title="$(session_title "$root")"
+  note="$(flow_note "$root")"; title="$(session_title "$root" "$(session_name "$root")")"
   [ -n "$note$title" ] || return 0
   python3 -c '
 import json, sys
@@ -333,8 +395,9 @@ on_stop() {
 
 # Synchronous on purpose: backgrounded, the hook exits, the child is orphaned mid-kill, and the
 # stack survives a session that reported itself closed. `prompt_input_exit` is escape at the
-# prompt, not the end of the work.
+# prompt, not the end of the work. The name goes even then: a resume takes it back from its title.
 on_session_end() {
+  release_name
   [ "$(field reason)" = prompt_input_exit ] && return 0
   local root; root="$(session_root)"
   if serviced "$root"; then
