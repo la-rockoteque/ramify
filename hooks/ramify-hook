@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | session-start | stop | session-end
+# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | allow | session-start | stop | session-end
 #
 # Installed as a plugin, these fire in every repo. Each one exits 0 silently unless the checkout
 # has a ramify config, and none of them ever fails a turn.
@@ -243,6 +243,86 @@ deny() {
   python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": sys.argv[1]}}, ensure_ascii=False))' "$1"
 }
 
+# Is the Bash command only plain ramify calls? Each simple command must be `ramify <allowed
+# subcommand>` (behind RAMIFY_* assignments only), `cd <dir>`, or a read-only filter after a
+# pipe. The ramify must be the one on PATH or this plugin's own: the agent can edit any other
+# copy. No substitution and no redirection but the three that only drop output.
+is_plain_ramify() { # command
+  python3 -c '
+import os, re, shlex, sys
+cmd, own = sys.argv[1], os.path.realpath(sys.argv[2])
+cmd = cmd.replace("\\\n", " ")
+for quiet in ("2>&1", "2>/dev/null", ">/dev/null"):
+    cmd = cmd.replace(quiet, " ")
+if re.search(r"[<>`]|\$\(", cmd):
+    sys.exit(1)
+try:
+    lex = shlex.shlex(cmd.replace("\n", ";"), posix=True, punctuation_chars=";&|()")
+    lex.whitespace_split = True
+    toks = list(lex)
+except ValueError:
+    sys.exit(1)
+READ = {"", "config", "workflow", "gates", "runs", "label", "card", "dash", "status", "ping", "statusline",
+        "write-set", "help", "lane", "approvals", "app", "scratch", "new", "up", "down"}
+
+def ramify_ok(args):
+    sub = args[0] if args else ""
+    if "-h" in args or "--help" in args or sub in READ:
+        return True
+    if sub == "step":
+        return not any(a.startswith("--appr") for a in args)
+    if sub == "run":
+        return args[1:2] in (["ask"], ["wait"])
+    if sub == "prune":
+        return "--apply" not in args
+    return False
+
+def filter_ok(c):
+    """A filter after a pipe reads its input only: flags and counts, and one pattern for grep.
+    No file argument, and no flag that names a file, recurses or follows."""
+    flags = [a for a in c[1:] if a.startswith("-")]
+    rest = [a for a in c[1:] if not a.startswith("-")]
+    if c[0] in ("head", "tail"):
+        return all(a.isdigit() for a in rest) and not any("f" in a or "F" in a for a in flags)
+    if c[0] == "wc":
+        return not rest and "--files0-from" not in " ".join(flags)
+    if c[0] == "grep":
+        return len(rest) <= 1 and not any(a.startswith("--") or set(a[1:]) & set("frRdD") for a in flags)
+    return False
+
+def simple_ok(c, piped):
+    while c and re.match(r"RAMIFY_[A-Z0-9_]*=", c[0]):
+        c = c[1:]
+    if not c:
+        return True
+    if piped:
+        return filter_ok(c)
+    if c[0] == "cd":
+        return len(c) <= 2
+    if c[0] == "ramify" or (os.path.isabs(c[0]) and os.path.realpath(c[0]) == own):
+        return ramify_ok(c[1:])
+    return False
+
+cur, piped = [], False
+for t in toks + [";"]:
+    if t and set(t) <= set(";&|()"):
+        if t not in (";", "&&", "||", "|", "&") or not simple_ok(cur, piped):
+            sys.exit(1)
+        cur, piped = [], t == "|"
+    else:
+        cur.append(t)
+' "$1" "$RAMIFY" 2>/dev/null
+}
+
+# Plain ramify commands run without a permission prompt. A deny from another hook still wins:
+# Claude Code applies deny before allow. RAMIFY_AUTO_ALLOW=0 in the config turns this off.
+on_allow() {
+  case "$INPUT" in *ramify*) ;; *) return 0 ;; esac
+  is_plain_ramify "$(field tool_input.command)" || return 0
+  [ "$(conf "$(session_root)" RAMIFY_AUTO_ALLOW)" = 0 ] && return 0
+  python3 -c 'import json; print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "a plain ramify command"}}))'
+}
+
 # A human gate's decision belongs to the human: the agent asks (`ramify step ask`) and waits, it
 # never answers. The same goes for a script handed over with `ramify run ask`: only the human runs
 # or blocks it. Catches `ramify approve|reject` and `ramify run go|block` as shell words, like the
@@ -414,6 +494,7 @@ case "${1:-}" in
   auto-gate) on_auto_gate ;;
   human-gate) on_human_gate ;;
   decide-guard) on_decide_guard ;;
+  allow) on_allow ;;
   session-start) on_session_start ;;
   stop) on_stop ;;
   session-end) on_session_end ;;
