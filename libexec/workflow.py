@@ -401,12 +401,21 @@ def cmd_status(defs, args):
             note = r.get(record_option(defs, "note_field", "note"), "")
             print(f"  ✓ {s:<10} {date}{'  n/a' if r.get('na') else ''}{'  ' + note if note else ''}")
         elif s == nxt:
-            gate = "  (human gate: record it only after the user's explicit OK)" if d.get("gate") == "human" else ""
+            gate = human_gate_note(defs, path, meta, s) if d.get("gate") == "human" else ""
             print(f"  → {s:<10} {d.get('skill', '')} — {d.get('does', '')}{gate}")
         else:
             print(f"  · {s}")
     if nxt is None:
         print("  every step is recorded")
+
+
+def human_gate_note(defs, path, meta, step):
+    if open_ask(meta) == step:
+        return f"  (human gate: asked, waits on `ramify approve {step}` or the approvals window)"
+    missing = missing_gate_files(defs, path, step)
+    if missing:
+        return f"  (human gate: write {', '.join(missing)}, then Ramify asks)"
+    return "  (human gate: record it only after the user's explicit OK)"
 
 
 def record(defs, step, na, args):
@@ -480,19 +489,55 @@ def approval_digests(defs, order, files):
     return result
 
 
+def deny_tool(reason):
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+
+
+def missing_gate_files(defs, path, step):
+    folder = os.path.dirname(path)
+    names = defs["steps"][step].get("files", [f"{step}.md"])
+    return [os.path.relpath(os.path.join(folder, f), env("WF_ROOT")) for f in names if not os.path.isfile(os.path.join(folder, f))]
+
+
+def gate_reason(defs, path, meta, step):
+    """What the agent reads when the gate refuses a tool call: always a next move, never a dead end."""
+    root = env("WF_ROOT")
+    scope = (f"Until then only reads and planning edits run in {root}; other worktrees and repositories are not held. "
+             "The user can also give the OK in the chat: record it with "
+             f"`ramify step done {step} --approved`.")
+    if open_ask(meta) == step:
+        return (f"{step} waits on the human: approve it in the approvals window, or run "
+                f"`ramify approve {step}` in {root}. {scope}")
+    missing = missing_gate_files(defs, path, step)
+    if missing:
+        return (f"{step} is a human gate, and Ramify asks for it once {', '.join(missing)} exist. "
+                f"Write {'it' if len(missing) == 1 else 'them'} now (planning edits are allowed): the request "
+                f"then opens by itself. {scope}")
+    return f"{step} is a human gate that nobody asked for yet: run `ramify step ask {step}`. {scope}"
+
+
 def cmd_guard(defs, _args):
-    if not defs.get("auto_ask") or find_order(defs) is None:
+    """Hold the gated worktree while a human gate is next. Reads, planning edits and anything
+    aimed at another directory pass, so a gate never stops the agent from opening itself."""
+    if not defs.get("auto_ask"):
         return
-    _, meta, _, wf = current(defs)
-    todo = pending(meta, wf)
-    if not todo or defs["steps"][todo[0]].get("gate") != "human":
-        return
-    from native_guard import planning_tool
+    from native_guard import planning_tool, targets_root
     payload = json.load(sys.stdin)
+    root = env("WF_ROOT")
     patterns = defs.get("planning_paths") or ["docs/**", ".ramify/**", ".claude/**"]
-    if not planning_tool(payload, env("WF_ROOT"), patterns):
-        reason = f"{todo[0]} awaits human approval in Ramify. Only planning edits are allowed until that gate is approved."
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+    if not targets_root(payload, root) or planning_tool(payload, root, patterns):
+        return
+    try:
+        if find_order(defs) is None:
+            return
+        path, meta, _, wf = current(defs)
+    except Fail as error:
+        deny_tool(f"Cannot verify the configured human gate: {error}. Fix the story record; "
+                  "reads, planning edits and other worktrees still run.")
+        return
+    todo = pending(meta, wf)
+    if todo and defs["steps"][todo[0]].get("gate") == "human":
+        deny_tool(gate_reason(defs, path, meta, todo[0]))
 
 
 def ready_human_step(defs, path, meta, wf):
@@ -568,10 +613,13 @@ def cmd_decide(defs, args, approve):
         raise Fail("a rejection needs --note: say what to change")
     step = pos[0]
     path, meta, body, wf = current(defs)
-    if open_ask(meta) != step:
-        raise Fail(f"nothing asks for a decision on {step} — the agent puts it up with `ramify step ask {step}`")
     gate_step(defs, meta, wf, step)
-    check_approval_content(defs, path, meta)
+    # The human decides the next gate whether or not the agent asked: a missing request is the
+    # agent's slip, and it must never leave the human unable to answer.
+    if open_ask(meta) == step:
+        check_approval_content(defs, path, meta)
+    else:
+        meta["ask"] = {"step": step, "asked": now(), "files": []}
     if approve:
         entry = step_entry(defs, step)
         if note:
@@ -711,8 +759,9 @@ def off_output(cmd, args):
 
 
 def deny_gate_error(error):
-    reason = f"Cannot verify the configured human gate: {error}"
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+    # The workflow definitions themselves are broken: say so, but hold nothing. A gate that cannot
+    # be read cannot be opened either, and a hold that cannot be lifted is the deadlock to avoid.
+    print(f"ramify: cannot verify the configured human gate: {error}", file=sys.stderr)
     return 0
 
 
