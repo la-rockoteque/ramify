@@ -11,6 +11,7 @@ steps:
 - {step: audit, date: '2026-10-28'}
 - {step: qa, date: '2026-10-28'}
 - {step: review, date: '2026-10-28'}
+- {step: pr, date: '2026-10-28', note: '#25'}
 ---
 
 # session-names
