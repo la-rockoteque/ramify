@@ -499,6 +499,8 @@ check "resume gives the old name back"          bash -c "[ -n '$n1' ] && [ '$(na
 n2="$(named s2)"; se s2 other; echo other >"$SN/held/$n2"
 ns s2 "$T/app" resume >/dev/null
 check "resume takes a new name when the old one is held" bash -c "[ -n '$(named s2)' ] && [ '$(named s2)' != '$n2' ]"
+RAMIFY_SESSION_NAMES="/a ../b" ns e1 "$T/app" >/dev/null
+check "a theme without a usable word names nothing" test ! -e "$SN/e1.name"
 ns n1 / >/dev/null
 check "no config, no name"                      test ! -e "$SN/n1.name"
 sl() { printf '{"session_id":"%s","workspace":{"current_dir":"%s"}}' "$1" "$T/app" | "$RAMIFY" statusline "${2:-}"; }

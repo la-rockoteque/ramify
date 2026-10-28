@@ -303,7 +303,7 @@ session_name() { # root
   fi
   words="$(name_words "$1" | awk 'BEGIN { srand() } { print rand() "\t" $0 }' | sort | cut -f2-)"
   for i in "" -2 -3 -4 -5 -6 -7 -8 -9; do
-    while read -r n; do claim_name "$n$i" "$sid" && return 0; done <<<"$words"
+    while read -r n; do [ -n "$n" ] && claim_name "$n$i" "$sid" && return 0; done <<<"$words"
   done
 }
 
