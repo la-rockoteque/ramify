@@ -280,43 +280,53 @@ name_words() { # root
   local t; t="$(conf "$1" RAMIFY_SESSION_NAMES)"; t="${t:-trees}"
   case "$t" in
     *[[:space:]]*) printf '%s\n' "$t" | tr -s ' \t' '\n' ;;
-    *) if [ -f "$HERE/../assets/names/$t.txt" ]; then cat "$HERE/../assets/names/$t.txt"; else echo "$t"; fi ;;
+    *) if [ -f "$HERE/../assets/names/$t.txt" ]; then cat "$HERE/../assets/names/$t.txt"; else printf '%s\n' "$t"; fi ;;
   esac | grep -v -e / -e '^\.' -e '^$'
 }
 
 # held/<name> is the lock: noclobber makes its creation atomic, so two sessions that start
-# together never share a name. <session_id>.name is what a status line reads.
+# together never share a name. A hold this session left behind is its own. <session_id>.name
+# is what a status line reads. When it cannot be written, the hold goes back at once: a hold
+# with no name file would never be released.
 claim_name() { # name, session id
   (set -o noclobber; printf '%s\n' "$2" >"$PINS/held/$1") 2>/dev/null \
-    && printf '%s\n' "$1" >"$PINS/$2.name" && echo "$1"
+    || [ "$(cat "$PINS/held/$1" 2>/dev/null)" = "$2" ] || return 1
+  printf '%s\n' "$1" 2>/dev/null >"$PINS/$2.name" || { rm -f "$PINS/held/$1"; return 2; }
+  printf '%s\n' "$1"
 }
 
-# The name a resumed session's title carries: `<slug> · <name>` or `<name>`. A resume gets a new
-# session_id, so the title is the only link to the name it had. A word outside the theme, such
-# as a slug from before session names, is not a name.
+# The name a session's title carries: `<slug> · <name>` or `<name>`. After a resume or a /clear
+# the name file can be gone, and the title is the only link to the name it had. A word outside
+# the theme, such as a slug from before session names, is not a name.
 title_name() { # root
   local n; n="$(field session_title)"; n="${n##* · }"
-  [ -n "$n" ] && name_words "$1" | grep -qxF -e "$n" -e "${n%-[2-9]}" && echo "$n"
+  case "$n" in ''|*/*|.*|*$'\n'*) return 1 ;; esac
+  name_words "$1" | grep -qxF -e "$n" -e "${n%-[2-9]}" && printf '%s\n' "$n"
 }
 
-# The session's name, picked once: a live one is kept, a resume takes the one in its title.
+# The session's name, picked once: a live one is kept, a titled session takes the one in its
+# title. A session id becomes a file name, so one with a slash or a dot gets no name.
 session_name() { # root
-  local sid words n i; sid="$(field session_id)"
-  [ -n "$sid" ] && configured "$1" && [ "$(conf "$1" RAMIFY_SESSION_NAMES)" != off ] || return 0
+  local sid words n i rc; sid="$(field session_id)"
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+  configured "$1" && [ "$(conf "$1" RAMIFY_SESSION_NAMES)" != off ] || return 0
   [ -f "$PINS/$sid.name" ] && { cat "$PINS/$sid.name"; return 0; }
   mkdir -p "$PINS/held" 2>/dev/null || return 0
-  if [ "$(field source)" = resume ]; then
-    n="$(title_name "$1")" && claim_name "$n" "$sid" && return 0
-  fi
-  words="$(name_words "$1" | awk 'BEGIN { srand() } { print rand() "\t" $0 }' | sort | cut -f2-)"
+  n="$(title_name "$1")" && claim_name "$n" "$sid" && return 0
+  words="$(name_words "$1" | awk -v seed="$$$RANDOM" 'BEGIN { srand(seed) } { print rand() "\t" $0 }' | sort | cut -f2-)"
   for i in "" -2 -3 -4 -5 -6 -7 -8 -9; do
-    while read -r n; do [ -n "$n" ] && claim_name "$n$i" "$sid" && return 0; done <<<"$words"
+    while read -r n; do
+      [ -n "$n" ] || continue
+      claim_name "$n$i" "$sid"; rc=$?
+      [ "$rc" = 1 ] || return 0
+    done <<<"$words"
   done
 }
 
 release_name() {
   local sid n; sid="$(field session_id)"
-  [ -n "$sid" ] && [ -f "$PINS/$sid.name" ] || return 0
+  case "$sid" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+  [ -f "$PINS/$sid.name" ] || return 0
   n="$(cat "$PINS/$sid.name")"
   [ "$(cat "$PINS/held/$n" 2>/dev/null)" = "$sid" ] && rm -f "$PINS/held/$n"
   rm -f "$PINS/$sid.name"

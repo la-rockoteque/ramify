@@ -23,7 +23,7 @@ ramify gives each session a short **session name**, such as `birch`. The name co
    - In the primary checkout: `<name>`.
 6. The `session-end` hook releases the name on every end, `prompt_input_exit` included. It
    removes the name file and the hold, so another session can take the name.
-7. A resumed session may not find its name file. When its title is `<slug> · <name>` or `<name>`,
+7. A resumed or cleared session may not find its name file. When its title is `<slug> · <name>` or `<name>`,
    and `<name>` is a word of the theme (with or without a `-N` suffix) that no live session
    holds, the hook gives it that name again. The name file follows the title the user sees.
    Any other title, such as one the user set, gets a new name.

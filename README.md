@@ -430,17 +430,19 @@ worktree waits.
 
 Each agent session gets a short name, such as `birch`, so you can tell sessions apart. The
 `session-start` hook picks a word from the theme at random. It skips the names that live
-sessions on the machine hold. When every word is held, it adds a number: `birch-2`.
+sessions on the machine hold. When every word is held, it adds a number: `birch-2`, up to
+`-9`. Past that, the session gets no name.
 
 - `RAMIFY_SESSION_NAMES` sets the theme. `trees` is the default. `birds` is the other built-in
   theme. Several words separated by spaces are a theme of their own. `off` turns names off.
+  A single word that names no theme is a theme of one word: `ramify config` warns about it.
 - A built-in theme is `assets/names/<theme>.txt`, one word per line. To add a theme, add a file.
 - The session title is `<slug> · <name>` in a linked worktree and `<name>` in the primary
   checkout. A title you set wins.
 - The name is in `${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/<session_id>.name`, one line. A
   status line reads it with the `session_id` of its JSON input.
-- When the session ends, by `/exit` or any other way, the name is released. A resumed session
-  takes the name back from its title, unless another session holds it.
+- When the session ends, by `/exit` or any other way, the name is released. A resumed or
+  cleared session takes the name back from its title, unless another session holds it.
 
 ### The status line
 

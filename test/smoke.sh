@@ -494,23 +494,36 @@ n1="$(named s1)"; se s1 other
 check "session-end releases the name"           bash -c "[ ! -e '$SN/s1.name' ] && [ ! -e '$SN/held/$n1' ]"
 n2="$(named s2)"; se s2 prompt_input_exit
 check "prompt_input_exit releases the name too" bash -c "[ -n '$n2' ] && [ ! -e '$SN/s2.name' ] && [ ! -e '$SN/held/$n2' ]"
+# A suffixed title: a random pick takes a bare word first, so only the reclaim gives these.
 nt="$(named t1)"; se t1 prompt_input_exit
-ns r1 "$WFA" resume ",\"session_title\":\"$(basename "$WFA") · $nt\"" >/dev/null
-check "resume takes the name from a worktree title" bash -c "[ -n '$nt' ] && [ '$(named r1)' = '$nt' ]"
-ns r2 "$T/app" resume ",\"session_title\":\"$n1\"" >/dev/null
-check "resume takes the name from a primary title" test "$(named r2)" = "$n1"
-ns r3 "$T/app" resume ",\"session_title\":\"$n1\"" >/dev/null
-check "resume takes a new name when the title's name is held" bash -c "[ -n '$(named r3)' ] && [ '$(named r3)' != '$n1' ]"
+ns r1 "$WFA" resume ",\"session_title\":\"$(basename "$WFA") · $nt-3\"" >/dev/null
+check "resume takes the name from a worktree title" bash -c "[ -n '$nt' ] && [ '$(named r1)' = '$nt-3' ]"
+ns r2 "$T/app" resume ",\"session_title\":\"$n1-2\"" >/dev/null
+check "resume takes the name from a primary title" test "$(named r2)" = "$n1-2"
+ns r3 "$T/app" resume ",\"session_title\":\"$n1-2\"" >/dev/null
+check "resume takes a new name when the title's name is held" bash -c "[ -n '$(named r3)' ] && [ '$(named r3)' != '$n1-2' ]"
 ns r4 "$WFA" resume ",\"session_title\":\"$(basename "$WFA")\"" >/dev/null
 check "resume does not take a slug title as a name" grep -qxF "$(named r4)" "$NAMES/trees.txt"
+ns cl1 "$T/app" clear ",\"session_title\":\"$n1-4\"" >/dev/null
+check "/clear takes the name from the title"    test "$(named cl1)" = "$n1-4"
+echo st1 >"$SN/held/$n1-5"
+ns st1 "$T/app" resume ",\"session_title\":\"$n1-5\"" >/dev/null
+check "a resume takes back its own stale hold"  test "$(named st1)" = "$n1-5"
+held="$(ls "$SN/held" | wc -l)"
+ns "../../bad" "$T/app" >/dev/null
+check "a session id with a slash gets no name"  bash -c "[ ! -e '$RAMIFY_STATE_DIR/bad.name' ] && [ \"\$(ls '$SN/held' | wc -l)\" = '$held' ]"
+ns ml1 "$T/app" resume ",\"session_title\":\"../../x\\n$n1-6\"" >/dev/null
+check "a multi-line title is not a name"        bash -c "[ ! -e '$RAMIFY_STATE_DIR/x' ] && [ \"\$(wc -l <'$SN/ml1.name' | tr -d ' ')\" = 1 ] && [ '$(named ml1)' != '$n1-6' ]"
+RAMIFY_SESSION_NAMES=-n ns dn1 "$T/app" >/dev/null
+check "a word that looks like a flag is a name" test "$(named dn1)" = "-n"
 RAMIFY_SESSION_NAMES="/a ../b" ns e1 "$T/app" >/dev/null
 check "a theme without a usable word names nothing" test ! -e "$SN/e1.name"
 ns n1 / >/dev/null
 check "no config, no name"                      test ! -e "$SN/n1.name"
 sl() { printf '{"session_id":"%s","workspace":{"current_dir":"%s"}}' "$1" "$T/app" | "$RAMIFY" statusline "${2:-}"; }
-check "statusline --json has the name"          grep -q "\"name\": \"$n1\"" <<<"$(sl r2 --json)"
+check "statusline --json has the name"          grep -q "\"name\": \"$n1-2\"" <<<"$(sl r2 --json)"
 check "statusline --json name is null without one" grep -q '"name": null' <<<"$(sl nobody --json)"
-check "the plain status line starts with the name" grep -q "^𖣂 $n1 · $(git -C "$T/app" branch --show-current)" <<<"$(sl r2)"
+check "the plain status line starts with the name" grep -q "^𖣂 $n1-2 · $(git -C "$T/app" branch --show-current)" <<<"$(sl r2)"
 touch "$T/notadir"
 out="$(RAMIFY_STATE_DIR="$T/notadir/x" ns u1 "$T/app")"; rc=$?
 check "an unwritable state dir names nothing and exits 0" bash -c "[ $rc = 0 ] && ! grep -q sessionTitle <<<'$out'"
