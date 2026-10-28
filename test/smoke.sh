@@ -455,6 +455,8 @@ check "RAMIFY_GATE_WORKFLOW=0 turns it off"     test -z "$(prg "$WFA" 'gh pr cre
 git -C "$WFA" checkout -q .ramify.conf
 (cd "$WFA" && "$RAMIFY" step done build && "$RAMIFY" step done audit && "$RAMIFY" step done qa && "$RAMIFY" step done review --approved) >/dev/null
 check "pr-gate opens once the steps are in"     test -z "$(prg "$WFA" 'gh pr ready')"
+# The title checks from before session names: with names off, nothing changes.
+export RAMIFY_SESSION_NAMES=off
 out="$(printf '{"session_id":"none","source":"startup"}' | CLAUDE_PROJECT_DIR="$WFA" "$HOOK" session-start)"
 check "session-start names the next step"       bash -c "grep -q '\"hookEventName\": \"SessionStart\"' <<<'$out' && grep -q '→ pr' <<<'$out'"
 check "session-start is silent without workflows" test -z "$(printf '{"session_id":"none"}' | CLAUDE_PROJECT_DIR=/ "$HOOK" session-start)"
@@ -463,6 +465,52 @@ ss() { printf '{"session_id":"none",%s}' "$2" | CLAUDE_PROJECT_DIR="$1" "$HOOK" 
 check "session-start keeps a custom name"       bash -c "! grep -q sessionTitle <<<'$(ss "$WFA" '"source":"resume","session_title":"mine"')'"
 check "session-start leaves /clear alone"       bash -c "! grep -q sessionTitle <<<'$(ss "$WFA" '"source":"clear"')'"
 check "session-start leaves the primary unnamed" bash -c "! grep -q sessionTitle <<<'$(ss "$T/app" '"source":"startup"')'"
+unset RAMIFY_SESSION_NAMES
+
+# ── session names ──
+NAMES="$(dirname "$RAMIFY")/../assets/names"
+SN="$RAMIFY_STATE_DIR/sessions"
+ns() { printf '{"session_id":"%s","source":"%s"%s}' "$1" "${3:-startup}" "${4:-}" | CLAUDE_PROJECT_DIR="$2" "$HOOK" session-start; }
+se() { printf '{"session_id":"%s","reason":"%s"}' "$1" "$2" | CLAUDE_PROJECT_DIR=/ "$HOOK" session-end; }
+named() { cat "$SN/$1.name" 2>/dev/null; }
+out="$(ns s1 "$T/app")"
+check "session-start writes a name from trees"  grep -qxF "$(named s1)" "$NAMES/trees.txt"
+check "the name file holds one line"            test "$(wc -l <"$SN/s1.name" | tr -d ' ')" = 1
+check "session-start titles the primary with the name" grep -q "\"sessionTitle\": \"$(named s1)\"" <<<"$out"
+ns s2 "$T/app" >/dev/null
+check "two sessions get two names"              bash -c "[ -n '$(named s2)' ] && [ '$(named s1)' != '$(named s2)' ]"
+out="$(ns t1 "$WFA")"
+check "session-start titles a worktree slug · name" grep -q "\"sessionTitle\": \"$(basename "$WFA") · $(named t1)\"" <<<"$out"
+RAMIFY_SESSION_NAMES=birds ns b1 "$T/app" >/dev/null
+check "RAMIFY_SESSION_NAMES picks a built-in theme" grep -qxF "$(named b1)" "$NAMES/birds.txt"
+for s in w1 w2 w3; do RAMIFY_SESSION_NAMES="ash elm" ns "$s" "$T/app" >/dev/null; done
+check "RAMIFY_SESSION_NAMES takes a word list"  grep -qxE 'ash|elm' <<<"$(named w1)"
+check "a full theme adds -2"                    grep -qxE '(ash|elm)-2' <<<"$(named w3)"
+out="$(RAMIFY_SESSION_NAMES=off ns o1 "$T/app")"
+check "RAMIFY_SESSION_NAMES=off writes no name" bash -c "[ ! -e '$SN/o1.name' ] && ! grep -q sessionTitle <<<'$out'"
+out="$(ns c1 "$WFA" resume ',"session_title":"mine"')"
+check "a custom title keeps the name file"      bash -c "[ -s '$SN/c1.name' ] && ! grep -q sessionTitle <<<'$out'"
+n1="$(named s1)"; se s1 other
+check "session-end releases the name"           bash -c "[ ! -e '$SN/s1.name' ] && [ ! -e '$SN/held/$n1' ]"
+se s2 prompt_input_exit
+check "prompt_input_exit keeps the name"        test -s "$SN/s2.name"
+ns s1 "$T/app" resume >/dev/null
+check "resume gives the old name back"          bash -c "[ -n '$n1' ] && [ '$(named s1)' = '$n1' ]"
+n2="$(named s2)"; se s2 other; echo other >"$SN/held/$n2"
+ns s2 "$T/app" resume >/dev/null
+check "resume takes a new name when the old one is held" bash -c "[ -n '$(named s2)' ] && [ '$(named s2)' != '$n2' ]"
+ns n1 / >/dev/null
+check "no config, no name"                      test ! -e "$SN/n1.name"
+sl() { printf '{"session_id":"%s","workspace":{"current_dir":"%s"}}' "$1" "$T/app" | "$RAMIFY" statusline "${2:-}"; }
+check "statusline --json has the name"          grep -q "\"name\": \"$n1\"" <<<"$(sl s1 --json)"
+check "statusline --json name is null without one" grep -q '"name": null' <<<"$(sl nobody --json)"
+check "the plain status line starts with the name" grep -q "^𖣂 $n1 · $(git -C "$T/app" branch --show-current)" <<<"$(sl s1)"
+touch "$T/notadir"
+out="$(RAMIFY_STATE_DIR="$T/notadir/x" ns u1 "$T/app")"; rc=$?
+check "an unwritable state dir names nothing and exits 0" bash -c "[ $rc = 0 ] && ! grep -q sessionTitle <<<'$out'"
+themes_ok() { local f; for f in "$NAMES"/*.txt; do
+  [ -s "$f" ] && ! grep -qvE '^[a-z][a-z-]*$' "$f" && [ -z "$(sort "$f" | uniq -d)" ] || return 1; done; }
+check "every built-in theme has one word per line, no duplicates" themes_ok
 
 # ── setup drafts a config from what the repo shows ──
 S="$T/drafted"; git init -q -b trunk "$S"; mkdir -p "$S/ui"

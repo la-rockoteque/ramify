@@ -1448,6 +1448,11 @@ show_config() { # [-q | get VAR]
   echo "qa plan     ${RAMIFY_QA_PLAN:-(none)}"
   echo "jira        ${RAMIFY_JIRA_URL:-(none)}${RAMIFY_JIRA_URL:+   tickets matching $RAMIFY_TICKET_PATTERN}"
   echo "workflow    $RAMIFY_WORKFLOW_SOURCE${RAMIFY_WORKFLOW_DOCS:+   $RAMIFY_WORKFLOW_DOCS}"
+  echo "names       ${RAMIFY_SESSION_NAMES:-trees}"
+  # A single word that names no theme is a theme of one word: every session gets the same name.
+  case "${RAMIFY_SESSION_NAMES:-trees}" in off|*[[:space:]]*) ;; *)
+    [ -f "$RAMIFY_HOME/assets/names/${RAMIFY_SESSION_NAMES:-trees}.txt" ] \
+      || echo "  warning: no theme named '$RAMIFY_SESSION_NAMES' in $RAMIFY_HOME/assets/names" ;; esac
   echo "state       $STATE_DIR"
   [ -n "$CONFIG" ]
 }

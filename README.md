@@ -196,6 +196,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_WORKFLOWS` | `1` | `0` turns workflows off for the repo, see [Workflows](#workflows) |
 | `RAMIFY_WORKFLOW_SOURCE` / `RAMIFY_WORKFLOW_DOCS` | `auto` / none | Setup selects repository guides or Ramify definitions; guide paths are a JSON array relative to the checkout |
 | `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `5` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
+| `RAMIFY_SESSION_NAMES` | `trees` | The theme of session names: `trees`, `birds`, a list of words, or `off`. See [Session names](#session-names) |
 
 ### Processes
 
@@ -425,12 +426,28 @@ ramify runs                             # every run, newest first
 `card`, `dash` and the status line show `▶ run <id> waits on you` while a run asked from that
 worktree waits.
 
+### Session names
+
+Each agent session gets a short name, such as `birch`, so you can tell sessions apart. The
+`session-start` hook picks a word from the theme at random. It skips the names that live
+sessions on the machine hold. When every word is held, it adds a number: `birch-2`.
+
+- `RAMIFY_SESSION_NAMES` sets the theme. `trees` is the default. `birds` is the other built-in
+  theme. Several words separated by spaces are a theme of their own. `off` turns names off.
+- A built-in theme is `assets/names/<theme>.txt`, one word per line. To add a theme, add a file.
+- The session title is `<slug> · <name>` in a linked worktree and `<name>` in the primary
+  checkout. A title you set wins.
+- The name is in `${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/<session_id>.name`, one line. A
+  status line reads it with the `session_id` of its JSON input.
+- When the session ends, the file moves to `sessions/ended/`. A resume of the same session takes
+  the name back, unless another session holds it.
+
 ### The status line
 
 A session that `ramify new` moved to a worktree still reports the directory it started in, so a
 status line shows that checkout's branch. `ramify statusline` reads the status line JSON and
 follows the session to its worktree. It prints `𖣂 tm-127-pagination ⎇ story/tm-127-pagination · 2/3 up`,
-or `𖣂 main` in the primary checkout. The count says how many of the worktree's services
+or `𖣂 main` in the primary checkout. A named session starts with its name: `𖣂 birch · main`. The count says how many of the worktree's services
 answer; `stack down` means none do. It prints nothing where ramify is not set up.
 
 ```json
@@ -439,7 +456,7 @@ answer; `stack down` means none do. It prints nothing where ramify is not set up
 
 `ramify` must be on the PATH (see [Install](#install)): the plugin's `bin/` is on the Bash
 tool's PATH only. A status line script of your own can call `ramify statusline --json` for
-`root`, `worktree`, `branch`, `primary`, `icon`, `slot`, `ticket`, `stack` (`up`, `partial`,
+`root`, `worktree`, `branch`, `name` (the [session name](#session-names), or null), `primary`, `icon`, `slot`, `ticket`, `stack` (`up`, `partial`,
 `down` or `stopped`), `workflow` (as in `dash --json`) and `ports` (each running service and its
 port, `{"web": 5174}`), `run` (`▶ run <id> waits on you`, or null), and run its git segment from `root`.
 `RAMIFY_STATUSLINE_ICON` replaces the tree.
@@ -473,7 +490,7 @@ The hooks do nothing in a repo without a config. The workflow hooks need only a 
 
 - **PreToolUse `git push`**: refuses the push while the branch is behind main.
 - **PreToolUse `gh pr create` / `gh pr ready`**: refuses while the work order has steps missing before its PR step. Drafts pass.
-- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step. In Claude Code, startup, resume and fork in a linked worktree also set the session name to the slug, unless it already has a name. Codex receives the work order without a session title.
+- **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step. It also picks the [session name](#session-names). In Claude Code, startup, resume and fork set the session title to `<slug> · <name>` in a linked worktree and `<name>` in the primary checkout, unless the session already has a title. Codex receives the work order without a session title.
 - **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
 - **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
