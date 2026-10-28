@@ -291,15 +291,22 @@ claim_name() { # name, session id
     && printf '%s\n' "$1" >"$PINS/$2.name" && echo "$1"
 }
 
-# The session's name, picked once: a live one is kept, an ended one comes back when it is free.
+# The name a resumed session's title carries: `<slug> · <name>` or `<name>`. A resume gets a new
+# session_id, so the title is the only link to the name it had. A word outside the theme, such
+# as a slug from before session names, is not a name.
+title_name() { # root
+  local n; n="$(field session_title)"; n="${n##* · }"
+  [ -n "$n" ] && name_words "$1" | grep -qxF -e "$n" -e "${n%-[2-9]}" && echo "$n"
+}
+
+# The session's name, picked once: a live one is kept, a resume takes the one in its title.
 session_name() { # root
   local sid words n i; sid="$(field session_id)"
   [ -n "$sid" ] && configured "$1" && [ "$(conf "$1" RAMIFY_SESSION_NAMES)" != off ] || return 0
   [ -f "$PINS/$sid.name" ] && { cat "$PINS/$sid.name"; return 0; }
-  mkdir -p "$PINS/held" "$PINS/ended" 2>/dev/null || return 0
-  if [ -f "$PINS/ended/$sid.name" ]; then
-    n="$(cat "$PINS/ended/$sid.name")"; rm -f "$PINS/ended/$sid.name"
-    claim_name "$n" "$sid" && return 0
+  mkdir -p "$PINS/held" 2>/dev/null || return 0
+  if [ "$(field source)" = resume ]; then
+    n="$(title_name "$1")" && claim_name "$n" "$sid" && return 0
   fi
   words="$(name_words "$1" | awk 'BEGIN { srand() } { print rand() "\t" $0 }' | sort | cut -f2-)"
   for i in "" -2 -3 -4 -5 -6 -7 -8 -9; do
@@ -307,13 +314,12 @@ session_name() { # root
   done
 }
 
-# The name goes to ended/, so a resume of the same session can take it back.
 release_name() {
   local sid n; sid="$(field session_id)"
   [ -n "$sid" ] && [ -f "$PINS/$sid.name" ] || return 0
   n="$(cat "$PINS/$sid.name")"
   [ "$(cat "$PINS/held/$n" 2>/dev/null)" = "$sid" ] && rm -f "$PINS/held/$n"
-  mkdir -p "$PINS/ended" && mv -f "$PINS/$sid.name" "$PINS/ended/$sid.name"
+  rm -f "$PINS/$sid.name"
 }
 
 # The title: `<slug> · <name>` in a linked worktree, `<name>` in the primary checkout. Claude
@@ -357,15 +363,15 @@ on_stop() {
 
 # Synchronous on purpose: backgrounded, the hook exits, the child is orphaned mid-kill, and the
 # stack survives a session that reported itself closed. `prompt_input_exit` is escape at the
-# prompt, not the end of the work.
+# prompt, not the end of the work. The name goes even then: a resume takes it back from its title.
 on_session_end() {
+  release_name
   [ "$(field reason)" = prompt_input_exit ] && return 0
   local root; root="$(session_root)"
   if serviced "$root"; then
     RAMIFY_ROOT="$root" "$RAMIFY" down >/dev/null 2>&1
   fi
   rm -f "$PINS/$(field session_id).root"
-  release_name
 }
 
 case "${1:-}" in

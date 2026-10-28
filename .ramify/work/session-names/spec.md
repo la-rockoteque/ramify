@@ -21,10 +21,12 @@ ramify gives each session a short **session name**, such as `birch`. The name co
    resume and fork only; a title the human set wins):
    - In a linked worktree: `<slug> · <name>`, for example `tm-127-pagination · birch`.
    - In the primary checkout: `<name>`.
-6. The `session-end` hook releases the name. It moves the file to `sessions/ended/`. A
-   `prompt_input_exit` end keeps the name live, as it keeps the stack today.
-7. When a session resumes with the same `session_id`, the hook gives it back its old name from
-   `sessions/ended/`, unless a live session took that name in the meantime.
+6. The `session-end` hook releases the name on every end, `prompt_input_exit` included. It
+   removes the name file and the hold, so another session can take the name.
+7. A resumed session gets a new `session_id`. When its title is `<slug> · <name>` or `<name>`,
+   and `<name>` is a word of the theme (with or without a `-N` suffix) that no live session
+   holds, the hook gives it that name again. The name file follows the title the user sees.
+   Any other title, such as one the user set, gets a new name.
 8. `ramify statusline --json` adds a `"name"` field (a string, or null). The plain line starts
    with the name: `𖣂 birch · tm-127-pagination ⎇ feat/tm-127-pagination`.
 
@@ -65,10 +67,11 @@ adding a file. An unknown single word is a theme of one word, so a typo still gi
 - AC8: Given the primary checkout and `source: startup`, then `sessionTitle` is `<name>`.
 - AC9: Given a `session_title` that is not empty, then the hook sets no `sessionTitle`, and the
   name file is still written.
-- AC10: Given a session that ends with any reason except `prompt_input_exit`, then its name
-  file leaves `sessions/` and another session can take the name.
-- AC11: Given a session that ended and resumes with the same `session_id`, and nobody holds
-  its name, then it gets the same name back.
+- AC10: Given a session that ends with any reason, `prompt_input_exit` included, then its name
+  file and its hold are gone, and another session can take the name.
+- AC11: Given a resumed session whose title is `<slug> · <name>` or `<name>`, and nobody holds
+  `<name>`, then it gets `<name>` back. When a live session holds it, or the title has no theme
+  word (a slug alone, a title the user set), then it gets a new name.
 - AC12: Given a repo without a ramify config, then no name file is written.
 - AC13: `ramify statusline --json` prints `"name": "<name>"` for a named session and
   `"name": null` otherwise. The plain line starts with the name when there is one.
@@ -80,7 +83,7 @@ adding a file. An unknown single word is a theme of one word, so a typo still gi
   after this branch. It needs only the path in step 4.
 - A command to rename a session. `/rename` in Claude Code changes the title; the name file
   keeps the name ramify gave.
-- Clean-up of name files that a crashed session leaves behind. `ramify prune` can take that
+- Clean-up of the hold that a crashed session leaves behind. `ramify prune` can take that
   later.
 - Names in the desktop app.
 

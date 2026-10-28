@@ -439,8 +439,8 @@ sessions on the machine hold. When every word is held, it adds a number: `birch-
   checkout. A title you set wins.
 - The name is in `${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/<session_id>.name`, one line. A
   status line reads it with the `session_id` of its JSON input.
-- When the session ends, the file moves to `sessions/ended/`. A resume of the same session takes
-  the name back, unless another session holds it.
+- When the session ends, by `/exit` or any other way, the name is released. A resumed session
+  takes the name back from its title, unless another session holds it.
 
 ### The status line
 

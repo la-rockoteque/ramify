@@ -492,21 +492,25 @@ out="$(ns c1 "$WFA" resume ',"session_title":"mine"')"
 check "a custom title keeps the name file"      bash -c "[ -s '$SN/c1.name' ] && ! grep -q sessionTitle <<<'$out'"
 n1="$(named s1)"; se s1 other
 check "session-end releases the name"           bash -c "[ ! -e '$SN/s1.name' ] && [ ! -e '$SN/held/$n1' ]"
-se s2 prompt_input_exit
-check "prompt_input_exit keeps the name"        test -s "$SN/s2.name"
-ns s1 "$T/app" resume >/dev/null
-check "resume gives the old name back"          bash -c "[ -n '$n1' ] && [ '$(named s1)' = '$n1' ]"
-n2="$(named s2)"; se s2 other; echo other >"$SN/held/$n2"
-ns s2 "$T/app" resume >/dev/null
-check "resume takes a new name when the old one is held" bash -c "[ -n '$(named s2)' ] && [ '$(named s2)' != '$n2' ]"
+n2="$(named s2)"; se s2 prompt_input_exit
+check "prompt_input_exit releases the name too" bash -c "[ -n '$n2' ] && [ ! -e '$SN/s2.name' ] && [ ! -e '$SN/held/$n2' ]"
+nt="$(named t1)"; se t1 prompt_input_exit
+ns r1 "$WFA" resume ",\"session_title\":\"$(basename "$WFA") · $nt\"" >/dev/null
+check "resume takes the name from a worktree title" bash -c "[ -n '$nt' ] && [ '$(named r1)' = '$nt' ]"
+ns r2 "$T/app" resume ",\"session_title\":\"$n1\"" >/dev/null
+check "resume takes the name from a primary title" test "$(named r2)" = "$n1"
+ns r3 "$T/app" resume ",\"session_title\":\"$n1\"" >/dev/null
+check "resume takes a new name when the title's name is held" bash -c "[ -n '$(named r3)' ] && [ '$(named r3)' != '$n1' ]"
+ns r4 "$WFA" resume ",\"session_title\":\"$(basename "$WFA")\"" >/dev/null
+check "resume does not take a slug title as a name" grep -qxF "$(named r4)" "$NAMES/trees.txt"
 RAMIFY_SESSION_NAMES="/a ../b" ns e1 "$T/app" >/dev/null
 check "a theme without a usable word names nothing" test ! -e "$SN/e1.name"
 ns n1 / >/dev/null
 check "no config, no name"                      test ! -e "$SN/n1.name"
 sl() { printf '{"session_id":"%s","workspace":{"current_dir":"%s"}}' "$1" "$T/app" | "$RAMIFY" statusline "${2:-}"; }
-check "statusline --json has the name"          grep -q "\"name\": \"$n1\"" <<<"$(sl s1 --json)"
+check "statusline --json has the name"          grep -q "\"name\": \"$n1\"" <<<"$(sl r2 --json)"
 check "statusline --json name is null without one" grep -q '"name": null' <<<"$(sl nobody --json)"
-check "the plain status line starts with the name" grep -q "^𖣂 $n1 · $(git -C "$T/app" branch --show-current)" <<<"$(sl s1)"
+check "the plain status line starts with the name" grep -q "^𖣂 $n1 · $(git -C "$T/app" branch --show-current)" <<<"$(sl r2)"
 touch "$T/notadir"
 out="$(RAMIFY_STATE_DIR="$T/notadir/x" ns u1 "$T/app")"; rc=$?
 check "an unwritable state dir names nothing and exits 0" bash -c "[ $rc = 0 ] && ! grep -q sessionTitle <<<'$out'"

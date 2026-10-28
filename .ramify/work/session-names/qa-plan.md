@@ -18,18 +18,19 @@ name is the exact string below. No case touches `/tmp/ramify` on the machine.
 | Q10 | AC8 | high | `session-start titles the primary with the name` | build |
 | Q11 | AC9 | high | `a custom title keeps the name file` | build |
 | Q12 | AC10 | high | `session-end releases the name` | build |
-| Q13 | AC10 | medium | `prompt_input_exit keeps the name` | build |
-| Q14 | AC11 | high | `resume gives the old name back` | build |
-| Q15 | AC11 | medium | `resume takes a new name when the old one is held` | build |
+| Q13 | AC10 | high | `prompt_input_exit releases the name too` | build |
+| Q14 | AC11 | high | `resume takes the name from a worktree title` and `resume takes the name from a primary title` | build |
+| Q15 | AC11 | medium | `resume takes a new name when the title's name is held` | build |
+| Q15b | AC11 | medium | `resume does not take a slug title as a name` | build |
 | Q16 | AC12 | high | `no config, no name` | build |
 | Q17 | AC13 | medium | `statusline --json has the name` and `statusline --json name is null without one` | build |
 | Q18 | AC13 | low | `the plain status line starts with the name` | build |
 | Q19 | — | medium | `an unwritable state dir names nothing and exits 0` | build |
 | Q20 | — | medium | `every built-in theme has one word per line, no duplicates` | build |
-| Q21 | AC14 | low | Read the README against the hook: variable, themes, file path, `ended/`, title format | audit |
+| Q21 | AC14 | low | Read the README against the hook: variable, themes, file path, release on every end, resume from the title, title format | audit |
 | Q22 | AC1–AC13 | medium | Read the diff: the hook never fails a turn, quotes every path, and parses under `/bin/bash` 3.2 | audit |
 | Q23 | AC7, AC8 | high | Start a real Claude Code session in a worktree of this repo and one in the primary checkout. The session list shows `session-names · <name>` and `<name>`, and two names differ | qa |
-| Q24 | AC10, AC11 | medium | End the worktree session, resume it with `claude --resume`. The name file is back in `sessions/` with the same name | qa |
+| Q24 | AC10, AC11 | medium | End the worktree session with `/exit`. Its hold leaves `held/`. Resume it with `claude --resume`. The new session's name file holds the name in its title | qa |
 
 ## Write set
 
