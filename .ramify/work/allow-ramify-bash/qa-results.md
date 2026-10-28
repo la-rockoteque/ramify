@@ -31,3 +31,18 @@ Code is in `hooks/ramify-hook`: `is_plain_ramify` (the parser) and `on_allow`. T
 ## Write set
 
 `ramify write-set` on the plan's set: the diff stays inside it.
+
+## QA
+
+| Case | Result | Evidence |
+|---|---|---|
+| Q1–Q11, Q14b | pass | `bash test/smoke.sh`: every `allow …` check is ok (228 ok in the last full run) |
+| Q12–Q14 | pass | the audit cases above |
+| Q15 | pass | The user ran a live Claude Code session with `--plugin-dir` on this worktree and reported it works |
+
+The last full smoke run also failed `cleanup kills the stray's children` and `down stops the web's
+grandchildren`. These process-tree checks are not plan cases, and the allow hook does not reach
+them. Another session's smoke run used the same ports (17000–17300) at the same time. A run alone
+on the machine has not been done since.
+
+**Yield**: 17 cases ran, 17 passed. The Q14 read found 2 gaps, both fixed with tests.
