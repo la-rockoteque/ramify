@@ -344,6 +344,52 @@ workflows off with a file that holds `workflows: off`. `RAMIFY_WORKFLOWS=0` in t
 the same. A repo with workflows off keeps its own process, and ramify does not touch it. The
 YAML is parsed with a vendored copy of PyYAML 6.0.2 (pure python, MIT, `libexec/vendor/yaml`).
 
+### Repository-native records and automatic gates
+
+A repository can keep its own pipeline and story files while Ramify presents its human gates.
+Configure the adapter in ignored `.ramify/workflows.yml`; do not create a second work order.
+For a story under `docs/stories/{todo,active,audit,completed}/<slug>/story.md`:
+
+```yaml
+work_dir: docs/stories/*
+record:
+  filename: story.md
+  workflow_field: kind
+  slug_field: story
+  date_field: "on"
+  note_field: result
+auto_ask: true
+workflows:
+  feature:
+    branch: story/{slug}
+    lanes:
+      standard: [qa-plan, implement-build, review, create-pr]
+steps:
+  qa-plan: {gate: human, files: [story.md, qa-plan.md]}
+  implement-build: {}
+  review: {gate: human, files: [review.md, qa-results.md]}
+  create-pr: {opens_pr: true}
+```
+
+Match the steps and lanes to the repository's actual pipeline. This example shows only four steps.
+Ramify derives the branch from the configured template and story slug when the record has no explicit branch.
+It preserves native metadata and writes step dates and notes under the configured names.
+Moving the story between stage folders keeps its gate. Two records for one branch are an error.
+
+With `auto_ask: true`, hooks request the next human gate once its configured files exist.
+They open the approvals window after tool use, at session start and before the agent stops.
+`ramify step ensure` runs the same check by hand and leaves an unchanged pending request intact.
+A rejection stays rejected until its documents change or the agent explicitly requests another decision.
+An approval binds to the displayed document contents. Changed documents need a refreshed request.
+
+The edit guard blocks implementation while the next step requires human approval.
+Planning files remain editable. Configure `planning_paths` to replace its default patterns:
+`docs/**`, `.ramify/**` and `.claude/**`.
+The guard covers file edits, patches and shell tools. Unknown shell scripts wait for approval.
+Shell read commands and planning-only Git staging or commits remain available.
+Both Claude Code and Codex register the guard; existing shell hooks also apply it.
+`ramify step gate --human` reports a pending gate for other integrations.
+
 ### Approvals
 
 A human gate (`spec`, `qa-plan`, `review`…) waits on a person. The agent puts it up, the person
