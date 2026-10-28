@@ -182,5 +182,58 @@ class NativeWorkflow(unittest.TestCase):
         self.assertEqual('qa-plan', json.loads(self.wf('asked', '--json').stdout)['step'])
 
 
+    def deny_reason(self, payload):
+        output = self.wf('guard', payload=payload).stdout
+        return json.loads(output)['hookSpecificOutput']['permissionDecisionReason'] if output else ''
+
+    def test_gate_holds_its_own_worktree_only(self):
+        elsewhere = tempfile.mkdtemp()
+        self.addCleanup(lambda: os.rmdir(elsewhere))
+        for payload in [
+            {'cwd': str(self.root), 'tool_name': 'Edit', 'tool_input': {'file_path': os.path.join(elsewhere, 'app.ts')}},
+            {'cwd': str(self.root), 'tool_name': 'Bash', 'tool_input': {'command': f'cd {elsewhere} && npm test'}},
+            {'cwd': elsewhere, 'tool_name': 'Bash', 'tool_input': {'command': 'npm test'}},
+        ]:
+            with self.subTest(payload=payload):
+                self.assertEqual('', self.wf('guard', payload=payload).stdout)
+        held = {'cwd': elsewhere, 'tool_name': 'Bash', 'tool_input': {'command': f'cd {self.root} && npm test'}}
+        self.assertIn('qa-plan', self.deny_reason(held))
+
+    def test_deny_names_the_missing_files_then_the_way_to_approve(self):
+        source = {'tool_name': 'Write', 'tool_input': {'file_path': 'src/app.ts'}}
+        reason = self.deny_reason(source)
+        self.assertIn('docs/stories/todo/example/qa-plan.md', reason)
+        self.assertIn('Write it now', reason)
+        self.ready()
+        self.wf('ensure')
+        self.assertIn('`ramify approve qa-plan`', self.deny_reason(source))
+
+    def test_ramify_and_harmless_redirects_pass_the_gate(self):
+        for command in ['ramify gates 2>&1 | tail -5', 'ramify step >/dev/null 2>&1',
+                        f'cd {self.root} && /opt/homebrew/bin/bash /x/bin/ramify step ask qa-plan --file docs/a.md']:
+            with self.subTest(command=command):
+                self.assertEqual('', self.wf('guard', payload={'tool_name': 'Bash', 'tool_input': {'command': command}}).stdout)
+        self.assertNotEqual('', self.wf('guard', payload={'tool_name': 'Bash', 'tool_input': {'command': 'echo x > src/a.ts'}}).stdout)
+
+    def test_the_human_approves_a_gate_nobody_asked_for(self):
+        self.assertIsNone(json.loads(self.wf('asked', '--json').stdout))
+        self.wf('approve', 'qa-plan', '--note', 'OK')
+        self.assertIn('qa-plan', self.story.read_text())
+        self.assertNotIn('ask:', self.story.read_text())
+        self.assertEqual('', self.wf('guard', payload={'tool_name': 'Write', 'tool_input': {'file_path': 'src/app.ts'}}).stdout)
+
+    def test_broken_definitions_warn_and_hold_nothing(self):
+        (self.root / '.ramify/workflows.yml').write_text('steps: [unclosed\n')
+        result = self.wf('guard', payload={'tool_name': 'Write', 'tool_input': {'file_path': 'src/app.ts'}})
+        self.assertEqual('', result.stdout)
+        self.assertIn('cannot verify', result.stderr)
+
+    def test_status_says_what_opens_the_gate(self):
+        self.assertIn('write docs/stories/todo/example/qa-plan.md, then Ramify asks', self.wf('status').stdout)
+        self.ready()
+        self.wf('ensure')
+        self.assertIn('waits on `ramify approve qa-plan`', self.wf('status').stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

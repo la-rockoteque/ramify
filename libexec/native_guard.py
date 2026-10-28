@@ -9,6 +9,51 @@ EDIT_TOOLS = {"write", "edit", "multiedit", "apply_patch"}
 COMMAND_TOOLS = {"bash", "exec_command", "exec"}
 READ_PROGRAMS = {"cat", "rg", "ls", "pwd", "head", "tail", "wc", "stat"}
 GIT_READS = {"status", "diff", "log", "show", "rev-parse", "ls-files", "check-ignore"}
+RAMIFY_READS = {"step", "workflow", "gates", "approvals", "card", "config", "status", "dash"}
+SHELLS = {"bash", "sh", "zsh"}
+# Output thrown away or merged writes nothing: `2>&1`, `>/dev/null`, `2>/dev/null`.
+HARMLESS_REDIRECTS = re.compile(r"(?<![<>])\d?>(?:&\d|\s*/dev/null)(?![\w/])")
+
+
+def inside(path, root):
+    full, base = os.path.realpath(path), os.path.realpath(root)
+    return os.path.commonpath([full, base]) == base
+
+
+def command_dir(tokens, cwd):
+    """The directory the command runs in: the session's, moved by each leading `cd DIR`."""
+    groups = shell_groups(tokens)
+    for group in groups[:-1]:
+        if group[0] != "cd" or len(group) != 2:
+            break
+        cwd = os.path.join(cwd, os.path.expanduser(group[1]))
+    return cwd
+
+
+def targets_root(payload, root):
+    """Whether the tool call lands in the gated worktree. A gate holds its own worktree only:
+    an edit or a command elsewhere (another worktree, another repository) is not its business."""
+    values = tool_values(payload)
+    base = payload.get("cwd") or root
+    path = first_string(values, ["file_path", "path"])
+    tool = payload.get("tool_name", "").split(".")[-1].lower()
+    if edit_target(tool, path):
+        return inside(os.path.join(base, path), root)
+    command = first_string(values, ["command", "cmd"])
+    if not command:
+        return True
+    if os.path.realpath(root) in command or root in command:
+        return True
+    try:
+        return inside(command_dir(split_shell(command), base), root)
+    except ValueError:
+        return True
+
+
+def split_shell(command):
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    return list(lexer)
 
 
 def planning_path(path, root, patterns):
@@ -54,12 +99,11 @@ def shell_groups(tokens):
 
 
 def shell_planning(command, root, patterns):
+    command = HARMLESS_REDIRECTS.sub(" ", command)
     if any(part in command for part in ("$(", "`", ">", "<<")):
         return False
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        groups = shell_groups(list(lexer))
+        groups = shell_groups(split_shell(command))
     except ValueError:
         return False
     return bool(groups) and all(shell_group(group, root, patterns) for group in groups)
@@ -78,8 +122,12 @@ def git_planning(tokens, root, patterns):
 
 def shell_group(tokens, root, patterns):
     executable = os.path.basename(tokens[0])
+    if executable in SHELLS and len(tokens) > 1 and os.path.basename(tokens[1]) == "ramify":
+        tokens, executable = tokens[1:], "ramify"  # bash /path/to/bin/ramify step ask review
     if executable == "ramify":
-        return len(tokens) > 1 and tokens[1] in {"step", "workflow", "gates", "approvals", "card", "config"}
+        return len(tokens) > 1 and tokens[1] in RAMIFY_READS
+    if executable == "cd":
+        return len(tokens) <= 2
     if executable == "git":
         return git_planning([executable, *tokens[1:]], root, patterns)
     return read_command([executable, *tokens[1:]])

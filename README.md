@@ -387,6 +387,11 @@ Planning files remain editable. Configure `planning_paths` to replace its defaul
 `docs/**`, `.ramify/**` and `.claude/**`.
 The guard covers file edits, patches and shell tools. Unknown shell scripts wait for approval.
 Shell read commands and planning-only Git staging or commits remain available.
+`ramify` read commands, `cd`, and the redirects `2>&1` and `>/dev/null` remain available too.
+The guard holds the gated worktree only. An edit or a command in another directory runs.
+Its refusal always names the next move: the files to write before the request opens, or how
+the human approves.
+A broken story record holds only implementation edits. Broken workflow definitions hold nothing.
 Both Claude Code and Codex register the guard; existing shell hooks also apply it.
 `ramify step gate --human` reports a pending gate for other integrations.
 
@@ -410,12 +415,15 @@ ramify reject spec --note "add the error state"   # human, or the Reject button
   exits 1 when nobody decided. Claude Code uses `run_in_background`; Codex keeps the returned
   process session and reads its completion output. A timeout leaves the decision pending.
 - An OK in the chat still works: `ramify step done <step> --approved` also closes the request.
+- The human can approve or reject the next gate even when no request is open. A missing request
+  never leaves a gate without a way to answer it.
 - The plugin refuses `ramify approve` and `ramify reject` from the agent.
 
 The approvals window lists every open request on the machine, one tab each. It renders the
 markdown, and has a note field, **Reject** (a note is required) and **Approve** (⌘↩). It runs on
 the same Electron as [the app](#the-app). A second `step ask` brings the open window to the front.
-The window closes once the last request is answered. `RAMIFY_POPUP=0` keeps it shut, and
+The window closes once the last request is answered. It starts no listing while one runs, and a
+new build closes a window left open by an older one. `RAMIFY_POPUP=0` keeps it shut, and
 `ramify gates` lists the requests in a terminal.
 
 `card`, `dash` and the status line show `⏳ spec waits on you` while a request is open, and

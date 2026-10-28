@@ -90,5 +90,17 @@ class AppLaunch(unittest.TestCase):
             launch.run(binary, self.target, self.root / 'cache', 'approvals', timeout=2, platform='linux')
 
 
+    def test_a_window_from_another_build_is_retired(self):
+        cache = self.root / 'cache'
+        bundle = cache / 'apps/approvals/new/Ramify Approvals.app'
+        listing = (f' 101 {cache}/apps/approvals/old/Ramify Approvals.app/Contents/MacOS/Electron\n'
+                   f' 102 {bundle}/Contents/MacOS/Electron\n'
+                   f' 103 {cache}/apps/scratch/old/Ramify Scratch.app/Contents/MacOS/Electron\n')
+        with patch.object(launch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, listing)), \
+                patch.object(launch.os, 'kill') as kill:
+            launch.retire_other_builds(cache, 'approvals', bundle)
+        kill.assert_called_once_with(101, launch.signal.SIGTERM)
+
+
 if __name__ == '__main__':
     unittest.main()
