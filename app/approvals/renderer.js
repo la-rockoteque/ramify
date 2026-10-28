@@ -74,8 +74,12 @@ function sync() {
   $reject.disabled = busy || !current || !$note.value.trim();
 }
 
+// One listing at a time: a listing slower than the poll must not start another behind it.
+let polling = false;
+
 async function refresh() {
-  if (busy) return;
+  if (busy || polling) return;
+  polling = true;
   try {
     const next = await window.ramify.gates();
     error = null;
@@ -90,6 +94,8 @@ async function refresh() {
   } catch (e) {
     error = e.message;
     render();
+  } finally {
+    polling = false;
   }
 }
 

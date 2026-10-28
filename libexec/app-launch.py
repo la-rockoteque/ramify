@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,20 @@ def mac_bundle(source, target, cache, kind):
     return bundle
 
 
+def retire_other_builds(cache, kind, bundle):
+    """Quit a window of this kind left running from another build. Each build is its own app with
+    its own ramify snapshot, so an old window would keep listing gates with old code."""
+    prefix = str(cache / 'apps' / kind) + '/'
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        pid, _, command = line.strip().partition(' ')
+        if prefix in command and str(bundle) not in command and pid.isdigit():
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
 def run(binary, target, cache, kind, timeout=30, platform=sys.platform):
     binary, target, cache = Path(binary), Path(target).resolve(), Path(cache)
     if not (target / 'main.js').is_file():
@@ -108,6 +123,7 @@ def run(binary, target, cache, kind, timeout=30, platform=sys.platform):
         with (cache / f'{kind}.bundle.lock').open('a') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             bundle = mac_bundle(source, target, cache, kind)
+        retire_other_builds(cache, kind, bundle)
         command = ['open', '-n', '-a', str(bundle)]
     else:
         command = [str(binary), str(target)]
