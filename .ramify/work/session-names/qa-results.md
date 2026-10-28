@@ -45,14 +45,17 @@ Each acceptance criterion, with the code and the test that meet it. Code is in
 | Q1–Q20 | pass | `bash test/smoke.sh`: smoke: all passed, every check named in the plan included, plus `a theme without a usable word names nothing` |
 | Q21, Q22 | pass | the audit cases above |
 | Q23 | pass | Two live sessions with this branch's hook: `sessions/330faad0-….name` holds `palm`, `sessions/433e2e0c-….name` holds `teak`, and `held/` holds both. The user confirmed the titles. |
-| Q24 | pending | the first live run found two gaps, below. A rerun with the fixed hook is due |
+| Q24 | pass | Rerun with the fixed hook. Session `b2085330…` started as `banyan` at 07:24:13. `/exit` released the hold. `claude --resume` claimed `banyan` again at 07:24:44: `held/banyan` and the name file both carry that time |
 
 ## Found in live QA
 
 - Q24, first run: `/exit` ends a session with `prompt_input_exit`, and the hook kept the name
   held. Almost every session ends this way, so names leaked. Fix: `release_name` runs on every
   end. Test: `prompt_input_exit releases the name too`.
-- Q24, first run: a resumed session got a new `session_id` (`5bd3fe84…`) and a new name (`ash`),
-  while its title kept the old one. The spec assumed the `session_id` stays. Fix: a resume takes
-  the name from its title. The user approved the spec change in the chat. Tests: the four
-  `resume …` checks.
+- Q24, first run: the old names stayed held, so a resume found its name taken and could get a
+  new one while its title kept the old one. The first reading was that a resume gets a new
+  `session_id`. The rerun showed a resume that kept it (`b2085330…`), and `5bd3fe84…` (`ash`) was
+  a fresh `startup`. The fix covers both cases: a resume takes the name from its title. The user
+  approved the spec change in the chat. Tests: the four `resume …` checks.
+
+**Yield**: 25 cases ran, 25 passed. Live QA found 2 gaps, both fixed with tests.
