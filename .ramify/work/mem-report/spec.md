@@ -8,7 +8,7 @@ The waste was hard to see:
 - `ramify dash` showed a QA stack as "6 MB". `ps` RSS leaves out compressed and swapped pages. Its real footprint was 500-850 MB.
 - Two moship `dotnet watch` stacks had their API down for 46h. Their watchers held 680 MB each.
 - One of those stacks belonged to a worktree deleted days before. Only a manual `ramify cleanup` released it.
-- Five stacks belonged to branches at the `finale` step. Nobody QAs those any more.
+- Five stacks belonged to branches at the `finale` step. Their PRs were open or merged.
 - A jest run held about 20 GB in 10 workers. Nothing outside `top` showed it.
 
 A human or an agent needs one command that shows where the memory goes and what ramify can take back.
@@ -21,14 +21,15 @@ A human or an agent needs one command that shows where the memory goes and what 
 2. **Stacks**: one line per running stack of every registered project. It shows the project, the worktree, the footprint in MB, the uptime and a verdict:
    - `ok`: every service answers.
    - `zombie`: a process group of the stack is alive, no service port answers, and the stack has been up for more than 1 hour.
-   - `finale`: the branch's work order names `finale` as its next step.
+   - `merged`: the branch passes the merge test that `prune` uses.
+   - `pr-open`: the branch's work order names `finale` as its next step, and the branch is not merged. Its PR can still be under review.
    - `orphan`: the worktree no longer exists.
 3. **Outside ramify**: dev servers, watchers and test runners that carry no ramify tag. It lists the ones that are orphaned (parent pid 1) and test runners that have been running for more than 30 minutes. Each line shows the pid, the footprint, the age, the working directory and the `kill` command to stop it.
 4. **Build servers**: the existing build-servers line.
 
 Footprint is the `MEM` column of `top -l 1`, summed over the process group. It counts compressed memory. Build servers are left out of a stack's sum, as in `dash`.
 
-`ramify mem --apply` stops every `zombie`, `finale` and `orphan` stack with the same code that `down` and `cleanup` use. It prints one line per stack it stops. It never signals a process without a ramify tag. The "outside ramify" section stays a report.
+`ramify mem --apply` stops every `zombie`, `merged` and `orphan` stack with the same code that `down` and `cleanup` use. It lists `pr-open` stacks and leaves them running. It prints one line per stack it stops. It never signals a process without a ramify tag. The "outside ramify" section stays a report.
 
 States:
 
@@ -41,11 +42,11 @@ States:
 - AC1: `ramify mem` prints the swap used and total, and the memory free percentage.
 - AC2: Given a running stack, its line shows a footprint from `top`, not from RSS.
 - AC3: Given a stack whose process group is alive, whose ports do not answer, and whose uptime is over 1 hour, its verdict is `zombie`.
-- AC4: Given a stack whose work order's next step is `finale`, its verdict is `finale`.
+- AC4: Given a stack on a branch merged into main, its verdict is `merged`. Given a stack whose work order's next step is `finale` on an unmerged branch, its verdict is `pr-open`.
 - AC5: Given a stack whose worktree was deleted, its verdict is `orphan`.
 - AC6: Given an untagged dev server or test runner with parent pid 1, it shows under "Outside ramify" with its pid and a `kill` command.
 - AC7: Given an untagged test runner older than 30 minutes with a live parent, it shows under "Outside ramify".
-- AC8: `ramify mem --apply` stops the `zombie`, `finale` and `orphan` stacks, and leaves `ok` stacks running.
+- AC8: `ramify mem --apply` stops the `zombie`, `merged` and `orphan` stacks, and leaves `ok` and `pr-open` stacks running.
 - AC9: `ramify mem --apply` never signals an untagged process.
 - AC10: `ramify mem --help` prints its usage line. The command list in `ramify --help` includes it.
 

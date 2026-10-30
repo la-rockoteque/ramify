@@ -42,7 +42,7 @@ down;down;stop this worktree's own services
 ping;ping;exit 0 when this worktree's services answer their health check
 card;card;this worktree's URLs and health
 dash;dash [--json];every stack on the machine
-mem;mem [--apply];where the memory goes: each stack's footprint and verdict, and dev servers and test runners left outside ramify; --apply stops the zombie, finale and orphan stacks
+mem;mem [--apply];where the memory goes: each stack's footprint and verdict, and dev servers and test runners left outside ramify; --apply stops the zombie, merged and orphan stacks
 watch;watch [seconds];redraw the dashboard every few seconds (default 2)
 menu;menu;interactive menu for this project
 status;status;this worktree's slot, ports and processes
@@ -1287,10 +1287,12 @@ mem_project() { # [--apply]
     root="$(worktree_root "$wt")"; up="$(age_of "$env")"
     if [ -z "$root" ]; then verdict=orphan
     elif [ "$answers" = 0 ] && [ "$up" -ge "$RAMIFY_ZOMBIE_AFTER" ]; then verdict=zombie
-    elif at_finale "$root"; then verdict=finale
+    elif [ -n "$(merged_reason "$(branch_of "$root")")" ]; then verdict=merged
+    # An open PR is still under review: its stack is listed, never stopped.
+    elif at_finale "$root"; then verdict=pr-open
     else verdict=ok; fi
     note=""
-    if [ "${1:-}" = --apply ] && [ "$verdict" != ok ]; then
+    if [ "${1:-}" = --apply ] && [ "$verdict" != ok ] && [ "$verdict" != pr-open ]; then
       kill_worktree "$wt" >/dev/null 2>&1; note=stopped
       # The guard signals only a group that shows our tag. macOS hides the environment of platform
       # binaries: a group left with only /bin/sleep in it proves nothing, and stays.
@@ -1341,7 +1343,7 @@ mem() { # [--apply]
   while IFS=$'\t' read -r project wt verdict mb up note; do
     [ -n "$project" ] || continue
     printf '  %-16s %-32s %6s MB  up %-7s %s%s\n' "$project" "$wt" "$mb" "$up" "$(paint "$verdict")" "${note:+  → $note}"
-    [ "$verdict" = ok ] || [ -n "$note" ] || reclaim=1
+    case "$verdict" in ok|pr-open) ;; *) [ -n "$note" ] || reclaim=1 ;; esac
   done <<<"$rows"
   echo
 
@@ -1357,7 +1359,7 @@ mem() { # [--apply]
   build_servers_line
   rm -f "$fp"
   if [ "$reclaim" = 0 ]; then echo "nothing to reclaim"
-  elif [ -z "${1:-}" ]; then echo "ramify mem --apply stops the zombie, finale and orphan stacks"; fi
+  elif [ -z "${1:-}" ]; then echo "ramify mem --apply stops the zombie, merged and orphan stacks"; fi
 }
 
 dash() {

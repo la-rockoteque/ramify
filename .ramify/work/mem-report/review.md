@@ -28,3 +28,7 @@ This changes AC4 and AC8 of the spec.
 - Linux: `top -l`, `memory_pressure` and `hw.memsize` are missing. The values show `?` and the footprint falls back to RSS with a note.
 - Runtime on this machine: about 7 s for 4 projects. Most of it is `ps -E` per project.
 - Every script parses under `/bin/bash` 3.2.
+
+## R1 decision
+
+The user chose the split. `merged` uses `merged_reason`, the test of `prune`. `pr-open` is listed and never stopped. AC4, AC8, Q6, Q11 and Q12 changed to match.

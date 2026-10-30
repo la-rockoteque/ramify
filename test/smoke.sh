@@ -569,9 +569,9 @@ themes_ok() { local f; for f in "$NAMES"/*.txt; do
 check "every built-in theme has one word per line, no duplicates" themes_ok
 
 # ── mem reports and reclaims ──
-# Four stacks: one serves, one is a zombie (its server killed, a python sleep left in its group; a
-# /bin/sleep would hide its tag on macOS, as every platform binary does), one sits
-# at finale, one lost its worktree. Two fake jest runners carry no tag: one orphaned, one with a
+# Five stacks: one serves, one is a zombie (its server killed, a python sleep left in its group; a
+# /bin/sleep would hide its tag on macOS, as every platform binary does), one has its PR open (next
+# step finale), one lost its worktree, one is on a branch merged into main. Two fake jest runners carry no tag: one orphaned, one with a
 # live parent. RAMIFY_ZOMBIE_AFTER=0 and RAMIFY_RUNNER_AFTER=0 stand in for the hour and the half hour.
 git init -q --bare -b main "$T/mem.git"; git clone -q "$T/mem.git" "$T/memapp" 2>/dev/null
 cat >"$T/memapp/.ramify.conf" <<'EOF'
@@ -582,14 +582,16 @@ web_health=/
 web_cmd='python3 -c "import time; time.sleep(7$PORT)" & exec python3 -m http.server $PORT'
 EOF
 (cd "$T/memapp" && git config user.email t@t && git config user.name t && git add -A && git commit -qm init && git push -q origin main 2>/dev/null)
-for w in m-ok m-zombie m-finale m-orphan; do
+for w in m-ok m-zombie m-finale m-orphan m-merged; do
   (cd "$T/memapp" && "$RAMIFY" new "$w" $([ "$w" = m-finale ] && echo --workflow tweak) >/dev/null 2>&1)
   RAMIFY_ROOT="$T/memapp-wt/$w" "$RAMIFY" up >/dev/null 2>&1
 done
 (cd "$T/memapp-wt/m-finale" && "$RAMIFY" step done scope --approved && "$RAMIFY" step done apply \
   && "$RAMIFY" step done review --approved && "$RAMIFY" step done pr --note '#1') >/dev/null 2>&1
+(cd "$T/memapp-wt/m-merged" && echo done >merged.txt && git add merged.txt && git commit -qm merged)
+(cd "$T/memapp" && git merge -q --no-ff -m "Merge pull request #2 from o/m-merged" m-merged && git push -q origin main 2>/dev/null && git fetch -q)
 mem_pgid() { cat "$RAMIFY_STATE_DIR/memapp/$1.web.pid"; }
-ZG="$(mem_pgid m-zombie)" FG="$(mem_pgid m-finale)" OG="$(mem_pgid m-orphan)"
+ZG="$(mem_pgid m-zombie)" OG="$(mem_pgid m-orphan)" MG="$(mem_pgid m-merged)"
 lsof -ti tcp:17302 -sTCP:LISTEN | xargs kill 2>/dev/null
 git -C "$T/memapp" worktree remove --force "$T/memapp-wt/m-orphan"
 mkdir -p "$T/fakejest"; printf '#!/bin/sh\nsleep 300\n' >"$T/fakejest/jest"; chmod +x "$T/fakejest/jest"
@@ -602,22 +604,24 @@ check "mem prints swap and pressure"             grep -qE '^machine .* swap .+ u
 check "mem shows a footprint per stack"          grep -qE '^  memapp +m-ok +[0-9]+ MB' <<<"$M"
 check "mem calls a stack that answers ok"        grep -qE '^  memapp +m-ok .* ok$' <<<"$M"
 check "mem calls a stack with a live group and dead ports a zombie" grep -qE '^  memapp +m-zombie .* zombie$' <<<"$M"
-check "mem flags a stack at finale"              grep -qE '^  memapp +m-finale .* finale$' <<<"$M"
+check "mem calls a stack whose PR is open pr-open" grep -qE '^  memapp +m-finale .* pr-open$' <<<"$M"
+check "mem flags a stack on a merged branch"     grep -qE '^  memapp +m-merged .* merged$' <<<"$M"
 check "mem flags a stack whose worktree is gone as orphan" grep -qE '^  memapp +m-orphan .* orphan$' <<<"$M"
 check "mem lists an orphaned untagged runner with its kill command" bash -c "grep -A2 '^  $OJ ' <<<'$M' | grep -q 'kill $OJ\$'"
 check "mem lists a long untagged runner with a live parent" grep -q "^  $LJ .*runner" <<<"$M"
 M="$(AFTER=3600 memrun)"
 check "mem leaves a young runner out"            bash -c "! grep -q '^  $LJ ' <<<'$M' && grep -q '^  $OJ ' <<<'$M'"
 M="$(memrun --apply)"
-check "mem --apply stops zombie, finale and orphan stacks" bash -c "! kill -0 -- -$ZG && ! kill -0 -- -$FG && ! kill -0 -- -$OG && ! curl -sf -o /dev/null --max-time 2 http://localhost:17303/"
+check "mem --apply stops zombie, merged and orphan stacks" bash -c "! kill -0 -- -$ZG && ! kill -0 -- -$OG && ! kill -0 -- -$MG && ! curl -sf -o /dev/null --max-time 2 http://localhost:17305/"
 check "mem --apply keeps an ok stack"            answers 17301
+check "mem --apply keeps a stack whose PR is open" answers 17303
 check "mem --apply never signals an untagged process" bash -c "kill -0 $OJ && kill -0 $LJ"
 kill "$OJ" "$LJ" 2>/dev/null; wait "$LJ" 2>/dev/null
 M="$(memrun)"
-check "mem with nothing to reclaim says so"      bash -c "! grep -qE '(zombie|finale|orphan)\$' <<<'$M' && { grep -q '^outside ramify' <<<'$M' || [ \"\$(tail -1 <<<'$M')\" = 'nothing to reclaim' ]; }"
+check "mem with nothing to reclaim says so"      bash -c "! grep -qE '(zombie|merged|orphan)\$' <<<'$M' && { grep -q '^outside ramify' <<<'$M' || [ \"\$(tail -1 <<<'$M')\" = 'nothing to reclaim' ]; }"
 check "mem --help prints its usage"              bash -c "'$RAMIFY' mem --help | grep -q '^usage: ramify mem \[--apply\]'"
 check "--help lists mem"                         bash -c "'$RAMIFY' --help | grep -q '^  mem \[--apply\]'"
-RAMIFY_ROOT="$T/memapp-wt/m-ok" "$RAMIFY" down >/dev/null 2>&1
+for w in m-ok m-finale; do RAMIFY_ROOT="$T/memapp-wt/$w" "$RAMIFY" down >/dev/null 2>&1; done
 
 # ── two clones with the same directory name keep their own state ──
 # An old clone left in another folder must not share slots and pid files with the live one: its
