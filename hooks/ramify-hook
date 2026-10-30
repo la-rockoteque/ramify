@@ -469,9 +469,22 @@ session_title() { # root, name
 }
 
 # startup, resume, clear and compact: after a compaction the agent has lost the work order too.
+# A worktree removed outside ramify leaves its stack running, and nobody can use it. Reap at most
+# once per 10 minutes on the machine, in the background: a session start must not wait on it.
+reap_in_background() {
+  [ "${RAMIFY_REAP:-1}" = 0 ] && return 0
+  local dir="${RAMIFY_STATE_DIR:-/tmp/ramify}"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  [ -n "$(find "$dir/reap.stamp" -mmin -10 2>/dev/null)" ] && return 0
+  touch "$dir/reap.stamp" 2>/dev/null || return 0
+  nohup "$RAMIFY" reap >>"$dir/reap.log" 2>&1 </dev/null &
+  disown 2>/dev/null
+}
+
 on_session_start() {
   local root note title; root="$(session_root)"
   on_auto_gate
+  reap_in_background
   [ -z "$(RAMIFY_READ_ONLY=1 conf "$root" RAMIFY_JIRA_URL)" ] || RAMIFY_ROOT="$root" "$RAMIFY" ticket watch >/dev/null 2>&1 || :
   note="$(flow_note "$root")"; title="$(session_title "$root" "$(session_name "$root")")"
   [ -n "$note$title" ] || return 0

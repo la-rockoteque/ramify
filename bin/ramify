@@ -42,6 +42,7 @@ down;down;stop this worktree's own services
 ping;ping;exit 0 when this worktree's services answer their health check
 card;card;this worktree's URLs and health
 dash;dash [--json];every stack on the machine
+reap;reap;stop the stacks whose worktree no longer exists, in every project (the SessionStart hook runs it)
 mem;mem [--apply];where the memory goes: each stack's footprint and verdict, and dev servers and test runners left outside ramify; --apply stops the zombie, merged and orphan stacks
 watch;watch [seconds];redraw the dashboard every few seconds (default 2)
 menu;menu;interactive menu for this project
@@ -86,7 +87,7 @@ REPO_ROOT="${RAMIFY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
 REGISTRY="${RAMIFY_REGISTRY:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ramify/projects}"
 # The dashboard and `prune --all` are machine-wide, so they run from anywhere: outside a checkout,
 # borrow any project.
-case "${1:-} ${*:2}" in dash\ *|mem\ *|watch\ *|gates\ *|prune\ *--all*)
+case "${1:-} ${*:2}" in dash\ *|mem\ *|reap\ *|watch\ *|gates\ *|prune\ *--all*)
   [ -n "$REPO_ROOT" ] || REPO_ROOT="$(cat "$REGISTRY" "${RAMIFY_STATE_DIR:-/tmp/ramify}"/*/primary 2>/dev/null \
     | while read -r p; do [ -d "$p" ] && { echo "$p"; break; }; done)"
   [ -n "$REPO_ROOT" ] || { echo "no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'"; exit 0; } ;;
@@ -1304,9 +1305,15 @@ at_finale() { # worktree path
 
 # One `project worktree verdict MB uptime note` line per stack of this project that still has a live
 # process group. A stack whose groups are all gone holds no memory: its state is `cleanup`'s job.
-mem_project() { # [--apply]
+# --apply stops every stack ramify can take back; --reap only the ones whose worktree is gone.
+mem_project() { # [--apply | --reap]
   need_config
   local env wt root s U port alive answers mb g groups verdict up note tagged
+  # Without a worktree list every stack looks orphaned. Refuse rather than stop the project's QA.
+  if [ "$(git -C "$PRIMARY" worktree list --porcelain 2>/dev/null | grep -c '^worktree ')" = 0 ]; then
+    printf '%s\t-\tunreadable\t0\t-\tcannot read the worktree list of %s, its stacks left alone\n' "$RAMIFY_PROJECT" "$PRIMARY"
+    return 0
+  fi
   # `mem` hands its snapshot down; a direct call takes its own and removes it.
   [ -n "${RAMIFY_FOOTPRINTS:-}" ] || { RAMIFY_FOOTPRINTS="$(mktemp)"; footprints >"$RAMIFY_FOOTPRINTS"; trap 'rm -f "$RAMIFY_FOOTPRINTS"' EXIT; }
   tagged="$(tagged_groups)"
@@ -1326,6 +1333,7 @@ mem_project() { # [--apply]
     # A port that answers while none of our groups lives belongs to someone else now.
     [ "$alive" = 1 ] || continue
     root="$(worktree_root "$wt")"; up="$(age_of "$env")"
+    [ "${1:-}" = --reap ] && [ -n "$root" ] && continue
     if [ -z "$root" ]; then verdict=orphan
     elif [ "$answers" = 0 ] && [ "$up" -ge "$RAMIFY_ZOMBIE_AFTER" ]; then verdict=zombie
     elif [ -n "$(merged_reason "$(branch_of "$root")")" ]; then verdict=merged
@@ -1333,7 +1341,7 @@ mem_project() { # [--apply]
     elif at_finale "$root"; then verdict=pr-open
     else verdict=ok; fi
     note=""
-    if [ "${1:-}" = --apply ] && [ "$verdict" != ok ] && [ "$verdict" != pr-open ]; then
+    if { [ "${1:-}" = --apply ] || [ "${1:-}" = --reap ]; } && [ "$verdict" != ok ] && [ "$verdict" != pr-open ]; then
       kill_worktree "$wt" >/dev/null 2>&1; note=stopped
       # The guard signals only a group that shows our tag. macOS hides the environment of platform
       # binaries: a group left with only /bin/sleep in it proves nothing, and stays.
@@ -1368,6 +1376,19 @@ outside_ramify() {
         printf "%s\t%s\t%d\t%d\t%s\n", p, kind[p], gm[pg[p]], age[p], substr(cmd[p], 1, 90) } }'
 }
 
+# The stacks whose worktree no longer exists, in every project: nobody can use them, so the
+# SessionStart hook runs this with no one asking. One line per stack it stops, else nothing.
+reap() {
+  local p project wt verdict mb up note
+  export RAMIFY_FOOTPRINTS=/dev/null   # no `top` snapshot: reap reports no memory
+  projects | while read -r p; do RAMIFY_ROOT="$p" "$SELF" mem-project --reap; done \
+    | while IFS=$'\t' read -r project wt verdict mb up note; do
+        [ "$verdict" = orphan ] || continue
+        printf '%s  %s/%s  %s — its worktree no longer exists\n' "$(date '+%F %T')" "$project" "$wt" "${note:-stopped}"
+      done
+  return 0
+}
+
 mem() { # [--apply]
   case "${1:-}" in ''|--apply) ;; *) usage mem >&2; exit 2 ;; esac
   local p fp rows out swap free ram reclaim=0 project wt verdict mb up note pid kind age cmd cwd
@@ -1384,7 +1405,7 @@ mem() { # [--apply]
   while IFS=$'\t' read -r project wt verdict mb up note; do
     [ -n "$project" ] || continue
     printf '  %-16s %-32s %6s MB  up %-7s %s%s\n' "$project" "$wt" "$mb" "$up" "$(paint "$verdict")" "${note:+  → $note}"
-    case "$verdict" in ok|pr-open) ;; *) [ -n "$note" ] || reclaim=1 ;; esac
+    case "$verdict" in ok|pr-open|unreadable) ;; *) [ -n "$note" ] || reclaim=1 ;; esac
   done <<<"$rows"
   echo
 
@@ -1672,6 +1693,7 @@ case "${1:-}" in
   dash-project) [ "${2:-}" = --json ] && dash_project_json || dash_project "${2:-}" ;;
   menu) need_config any; menu ;;
   mem) mem "${@:2}" ;;
+  reap) reap ;;
   mem-project) mem_project "${@:2}" ;;
   watch) watch_dash "${2:-2}" ;;
   status) status ;;

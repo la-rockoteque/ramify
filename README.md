@@ -132,6 +132,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `card` / `dash [--json]` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
 | `app` | Open the desktop dashboard, see [The app](#the-app) |
 | `mem [--apply]` | Each stack's memory and verdict, and untagged dev servers and test runners. `--apply` stops the zombie, merged and orphan stacks, see [Processes](#processes) |
+| `reap` | Stop the stacks whose worktree no longer exists, in every project. The SessionStart hook runs it in the background, at most once per 10 minutes; `RAMIFY_REAP=0` turns that off |
 | `cleanup` | Release crashed claims, kill orphans and strays, stop stacks of deleted worktrees, close the tickets of merged branches |
 | `prune [--all] [--apply]` | Delete merged local branches and their worktrees, detached trees already in main, and close their tickets. `--all` does it in every project on the machine. Then Docker, once: it shows disk use and removes stopped non-compose containers, unused images and build cache. Volumes and compose containers stay |
 | `complete <worktree> [--yes]` | Close its ticket, stop its stack, remove the worktree and its local branch |
