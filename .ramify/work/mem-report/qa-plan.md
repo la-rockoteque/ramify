@@ -45,6 +45,8 @@ skills/app/SKILL.md
 .ramify/work/clone-state-collision/*
 libexec/statusline.sh
 test/native_workflows.py
+# Deviation: the release bump to 0.10.0 ships #28 and mem to the installed plugin.
+.claude-plugin/plugin.json
 !libexec/workflow.py
 !hooks/*
 !app/*
