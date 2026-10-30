@@ -31,6 +31,7 @@ its findings and what this branch did with each.
 - `python3 test/skills.py`: 7 tests, OK.
 - Each `test/*.py` and `test/*.js`: pass, except `test/codex.py`
   `test_resume_preserves_unfinished_build`, which fails on main too.
-- `test/smoke.sh`: see below.
+- `bash test/smoke.sh`, run alone: 289 checks pass, 0 fail, with the new check "every skill
+  workflows.yml names has its SKILL.md". It printed "smoke: all passed".
 - `ramify write-set .ramify/work/step-skills/qa-plan.md`: clean.
 - ocre-jelly `scan.py`: 0 candidates on each new `SKILL.md` and on this file.

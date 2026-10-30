@@ -8,6 +8,10 @@ steps:
 - {step: spec, date: '2026-10-30'}
 - {step: qa-plan, date: '2026-10-30'}
 - {step: build, date: '2026-10-30'}
+ask:
+  step: review
+  asked: '2026-10-30T08:14:42'
+  files: [.ramify/work/step-skills/review.md, .ramify/work/step-skills/order.md]
 ---
 
 # step-skills
