@@ -49,7 +49,12 @@ wt="$(basename "$root")"
 # ponytail: read, not sourced — the status line runs every few seconds. A config that sets
 # RAMIFY_PROJECT or RAMIFY_TICKET_PATTERN by computation is misread; source it if that happens.
 project="$(sed -n "s/^RAMIFY_PROJECT=['\"]*\([^'\"]*\).*/\1/p" "$conf" | tail -1)"
-env="${RAMIFY_STATE_DIR:-/tmp/ramify}/${project:-$(basename "$primary")}/$wt.env"
+dir="${RAMIFY_STATE_DIR:-/tmp/ramify}/${project:-$(basename "$primary")}"
+# A second clone with the same name keeps its state in a dir of its own, as `ramify` chooses it.
+twin="$dir-$(printf '%s' "$primary" | shasum | cut -c1-8)"
+claim="$(cat "$dir/primary" 2>/dev/null)"
+if [ -f "$twin/primary" ] || { [ -n "$claim" ] && [ "$claim" != "$primary" ] && [ -d "$claim" ]; }; then dir="$twin"; fi
+env="$dir/$wt.env"
 slot="$(sed -n 's/^SLOT=//p' "$env" 2>/dev/null | tail -1)"
 
 # Any HTTP answer counts, even an error page: the question is whether the process serves, not
