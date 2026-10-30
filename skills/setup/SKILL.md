@@ -15,10 +15,19 @@ A config is one sourced bash file: `.ramify.conf` (committed, for the team) or
 RAMIFY_ROOT=<primary checkout> ramify setup --print
 ```
 
-The draft reads what the repo already shows: the remote's default branch, the branch prefix most
-branches share, where linked worktrees already live, gitignored paths that exist (`.claude`,
-`.env*`), compose containers, Node dev servers and Storybook, and ASP.NET Core Web projects. It
-is a guess from the file tree. Nothing in it is verified yet.
+The draft reads what the repo already shows:
+
+- the remote's default branch;
+- the branch prefix most branches share (ticket keys such as `IN-3/` do not count);
+- where linked worktrees already live;
+- gitignored env files (an ignored `.env` that a `.env.example` stands for is listed even when absent);
+- the compose file, up to two levels down;
+- the install, from `packageManager` or the lockfile, once per workspace root;
+- Node dev servers and Storybook, and ASP.NET Core Web projects.
+
+Base ports skip every range the other configs in the registry hold. A React Native or Expo app
+gets branching and a `RAMIFY_QA_NOTES` stub, no service. The draft is a guess from the file tree.
+Nothing in it is verified yet.
 
 Setup also detects existing development workflow guides, including Moship's `docs/*-pipeline.md` family.
 When the draft selects `RAMIFY_WORKFLOW_SOURCE=repo`, read those guides and keep their steps, skills, gates, and native work records.

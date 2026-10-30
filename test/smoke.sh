@@ -581,6 +581,65 @@ check "setup finds the compose containers"      grep -qx 'RAMIFY_CONTAINERS="dra
 check "setup refuses to overwrite"              bash -c "! RAMIFY_ROOT='$S' '$RAMIFY' setup"
 check "the draft loads"                         env RAMIFY_ROOT="$S" "$RAMIFY" config
 
+# Each fixture is a throwaway repo; nothing is installed. `has` matches one whole line of a draft.
+fx() { FX="$T/fx/$1"; rm -rf "$FX"; mkdir -p "$FX"; git init -q -b main "$FX"; git -C "$FX" commit -q --allow-empty -m init; }
+draft() { RAMIFY_ROOT="$FX" "$RAMIFY" setup --print 2>/dev/null; }
+has() { grep -qxF -- "$2" <<<"$1"; }
+both() { has "$1" "$2" && has "$1" "$3"; }
+lacks() { ! grep -q -- "$2" <<<"$1"; }
+pj() { mkdir -p "$FX/${2:-.}"; printf '%s\n' "$1" >"$FX/${2:-.}/package.json"; }
+
+fx bun; pj '{"scripts":{"dev":"vite"},"dependencies":{"react":"1"}}'; touch "$FX/bun.lock"; D="$(draft)"
+check "setup installs a bun repo with bun and waits for a file bun writes" \
+  both "$D" "RAMIFY_BOOTSTRAP='bun install'" 'RAMIFY_READY=node_modules/.bin/vite'
+check "setup runs a bun dev server with bun"     has "$D" "web_cmd='bun run dev --port \$PORT'"
+fx yarn; pj '{"scripts":{"dev":"vite"}}'; touch "$FX/yarn.lock"; D="$(draft)"
+check "setup installs a yarn repo with a frozen lockfile" \
+  both "$D" "RAMIFY_BOOTSTRAP='yarn install --frozen-lockfile'" 'RAMIFY_READY=node_modules/.yarn-integrity'
+fx npm; pj '{"scripts":{"dev":"vite"}}'; touch "$FX/package-lock.json"; D="$(draft)"
+check "setup installs an npm lockfile with npm ci" \
+  both "$D" "RAMIFY_BOOTSTRAP='npm ci'" 'RAMIFY_READY=node_modules/.package-lock.json'
+fx uv; touch "$FX/uv.lock"; D="$(draft)"
+check "setup syncs a uv repo and waits for its venv" \
+  both "$D" "RAMIFY_BOOTSTRAP='uv sync'" 'RAMIFY_READY=.venv/pyvenv.cfg'
+fx pm; pj '{"packageManager":"bun@1.1.0","scripts":{"dev":"vite"}}'; touch "$FX/package-lock.json"; D="$(draft)"
+check "setup takes packageManager over the lockfile" has "$D" "RAMIFY_BOOTSTRAP='bun install'"
+fx ws; pj '{"workspaces":["packages/*"]}'; touch "$FX/yarn.lock"
+pj '{"scripts":{"dev":"vite"}}' packages/a; pj '{"scripts":{"dev":"vite"}}' packages/b; D="$(draft)"
+check "setup installs a workspace once at its root, without cd" has "$D" "RAMIFY_BOOTSTRAP='yarn install --frozen-lockfile'"
+check "setup never gives two services the same base port" \
+  test "$(grep -E '^[a-z_]+_port=' <<<"$D" | cut -d= -f2 | sort | uniq -d)" = ""
+fx cra; pj '{"scripts":{"start":"react-scripts start"}}'; touch "$FX/yarn.lock"; D="$(draft)"
+check "setup runs react-scripts with BROWSER=none and PORT" has "$D" "web_cmd='BROWSER=none PORT=\$PORT yarn run start'"
+fx hono; pj '{"scripts":{"dev":"bun run src/index.ts"}}'; touch "$FX/bun.lock"; D="$(draft)"
+check "setup passes PORT in the environment to a plain dev script" has "$D" "app_cmd='PORT=\$PORT bun run dev'"
+fx nest; pj '{"scripts":{"dev":"vite"}}' ui; pj '{"scripts":{"start:dev":"nest start"},"dependencies":{"@nestjs/core":"1"}}' api
+mkdir -p "$FX/api/src"; echo 'await app.listen(3000);' >"$FX/api/src/main.ts"; D="$(draft)"
+nest_ok() { has "$D" 'RAMIFY_SERVICES="web"' && grep -q '^# api: .*port not configurable' <<<"$D"; }
+check "setup leaves out a NestJS backend with a fixed port and says why" nest_ok
+fx busy; pj '{"scripts":{"dev":"vite"}}'; mkdir -p "$T/fx/other"; printf 'web_port=5173\n' >"$T/fx/other/.ramify.conf"
+echo "$T/fx/other" >"$T/fx/registry"; D="$(RAMIFY_REGISTRY="$T/fx/registry" draft)"; port="$(sed -n 's/^web_port=//p' <<<"$D")"
+check "setup moves a base port off a range the registry holds" bash -c "[ -n '$port' ] && { [ '$port' -lt 5173 ] || [ '$port' -gt 5178 ]; }"
+fx env; printf '.env\n.env.*\n!.env.example\n' >"$FX/.gitignore"; touch "$FX/.env.example" "$FX/.env.development" "$FX/.env.test"
+git -C "$FX" add .gitignore .env.example; git -C "$FX" commit -qm env; D="$(draft)"; copy="$(sed -n 's/^RAMIFY_COPY=//p' <<<"$D")"
+check "setup copies an ignored .env that .env.example implies" grep -qx '\.env' <<<"$(tr -d '"' <<<"$copy" | tr ' ' '\n')"
+check "setup copies ignored .env.* files that exist" bash -c 'grep -q "\.env\.development" <<<"$1" && grep -q "\.env\.test" <<<"$1"' _ "$copy"
+check "setup does not copy .env.example"         lacks "$copy" example
+fx compose; mkdir -p "$FX/packages/db"; printf 'services:\n  db:\n    container_name: fx-db\n' >"$FX/packages/db/docker-compose.yml"; D="$(draft)"
+check "setup finds a compose file two levels down" \
+  both "$D" 'RAMIFY_COMPOSE_FILE=packages/db/docker-compose.yml' 'RAMIFY_CONTAINERS="fx-db"'
+fx bare; printf 'services:\n  db:\n    image: x\n' >"$FX/compose.yaml"; D="$(draft)"
+check "setup writes no compose file without containers" lacks "$D" '^RAMIFY_COMPOSE_FILE='
+fx ticket; for b in IN-1/a IN-2/b IN-3/c feat/x; do git -C "$FX" branch "$b"; done; D="$(draft)"
+check "setup skips ticket-key branch prefixes"   has "$D" "RAMIFY_BRANCH_PREFIX=feat/"
+fx mobile; pj '{"scripts":{"ios":"expo run:ios","test":"jest","start":"expo start"},"dependencies":{"expo":"1"}}'; touch "$FX/bun.lock"; D="$(draft)"
+mobile_ok() { has "$D" 'RAMIFY_SERVICES=""' && grep '^RAMIFY_QA_NOTES=' <<<"$D" | grep 'bun run ios' | grep -q 'bun run test'; }
+check "setup drafts a mobile app as branching only with QA notes" mobile_ok
+fx empty; D="$(draft)"
+check "setup says it found no dev server, not a library" \
+  bash -c 'grep -q "^# No dev server detected" <<<"$1" && ! grep -q library <<<"$1"' _ "$D"
+check "setup marks the QA examples as examples"  bash -c 'grep -B1 "^# RAMIFY_QA_RESULTS=" <<<"$1" | grep -q "^# Examples"' _ "$D"
+
 echo
 [ "$fails" = 0 ] && echo "smoke: all passed" || echo "smoke: $fails failed"
 exit "$fails"
