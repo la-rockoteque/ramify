@@ -144,6 +144,15 @@ done
 # registry only works if every session on the machine reads the same one.
 STATE_ROOT="${RAMIFY_STATE_DIR:-/tmp/ramify}"
 STATE_DIR="$STATE_ROOT/$RAMIFY_PROJECT"
+# Two clones with the same directory name (an old clone left in another folder) must not share
+# slots and pid files: the old one's `cleanup` sees none of the live worktrees and stops them all.
+# The first clone keeps the plain name. Another one gets the name and a hash of its path, and
+# keeps that dir after it has one. A claim whose checkout is gone is free again.
+twin="$STATE_DIR-$(printf '%s' "$PRIMARY" | shasum | cut -c1-8)"
+claim="$(cat "$STATE_DIR/primary" 2>/dev/null)"
+if [ -f "$twin/primary" ] || { [ -n "$claim" ] && [ "$claim" != "$PRIMARY" ] && [ -d "$claim" ]; }; then
+  STATE_DIR="$twin"
+fi
 SLOTS="$STATE_DIR/slots"
 STATE="$STATE_DIR/$WORKTREE.env"
 # Why the last `up` failed, one `service<TAB>log<TAB>message` per line. `up` starts it afresh,

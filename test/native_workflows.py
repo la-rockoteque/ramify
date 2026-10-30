@@ -43,7 +43,9 @@ class NativeWorkflow(unittest.TestCase):
         (self.root / '.ramify.conf').write_text("RAMIFY_SERVICES=''\n")
         self.env = {**os.environ, 'WF_ROOT': str(self.root), 'WF_PRIMARY': str(self.root),
                     'WF_BRANCH': 'story/example', 'WF_HOME': str(HOME), 'RAMIFY_ROOT': str(self.root),
-                    'RAMIFY_POPUP': '0', 'RAMIFY_AGENT': 'codex'}
+                    'RAMIFY_POPUP': '0', 'RAMIFY_AGENT': 'codex',
+                    # The hook calls ramify: keep this throwaway repo out of the machine's registry.
+                    'RAMIFY_STATE_DIR': str(self.root / 'state'), 'RAMIFY_REGISTRY': str(self.root / 'registry')}
         self.run_git('init', '-q', '-b', 'story/example')
 
     def run_git(self, *args):

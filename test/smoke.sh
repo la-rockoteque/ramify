@@ -565,6 +565,24 @@ themes_ok() { local f; for f in "$NAMES"/*.txt; do
   [ -s "$f" ] && ! grep -qvE '^[a-z][a-z-]*$' "$f" && [ -z "$(sort "$f" | uniq -d)" ] || return 1; done; }
 check "every built-in theme has one word per line, no duplicates" themes_ok
 
+# ── two clones with the same directory name keep their own state ──
+# An old clone left in another folder must not share slots and pid files with the live one: its
+# `cleanup` sees none of the live worktrees and would stop every stack.
+for c in one two; do
+  git clone -q "$T/origin.git" "$T/$c/twin" 2>/dev/null
+  printf "RAMIFY_SERVICES=''\n" >"$T/$c/twin/.ramify.conf"
+done
+d1="$(RAMIFY_ROOT="$T/one/twin" "$RAMIFY" config get STATE_DIR)"
+d2="$(RAMIFY_ROOT="$T/two/twin" "$RAMIFY" config get STATE_DIR)"
+check "same-named clones get separate state"    test "$d1" != "$d2"
+check "the first clone keeps the plain name"    test "$d1" = "$RAMIFY_STATE_DIR/twin"
+check "the first clone stays the dir's primary" grep -qxF "$T/one/twin" "$d1/primary"
+check "the second clone's state dir is stable"  test "$d2" = "$(RAMIFY_ROOT="$T/two/twin" "$RAMIFY" config get STATE_DIR)"
+check "the status line reads the same dir"      bash -c "mkdir -p '$d2' && echo SLOT=4 >'$d2/twin.env' && echo '{\"workspace\":{\"current_dir\":\"$T/two/twin\"}}' | '$(dirname "$RAMIFY")/../libexec/statusline.sh' --json | grep -q '\"slot\": *\"*4'"
+rm -rf "$T/one"
+git clone -q "$T/origin.git" "$T/three/twin" 2>/dev/null; printf "RAMIFY_SERVICES=''\n" >"$T/three/twin/.ramify.conf"
+check "a dir whose clone is gone is taken over" test "$(RAMIFY_ROOT="$T/three/twin" "$RAMIFY" config get STATE_DIR)" = "$d1"
+
 # ── setup drafts a config from what the repo shows ──
 S="$T/drafted"; git init -q -b trunk "$S"; mkdir -p "$S/ui"
 echo '{"scripts":{"dev":"vite","storybook":"storybook dev"}}' >"$S/ui/package.json"
