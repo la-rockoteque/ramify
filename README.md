@@ -431,6 +431,12 @@ ramify approve spec           # human, or the Approve button: records the step -
 ramify reject spec --note "add the error state"   # human, or the Reject button
 ```
 
+- `ramify gates` lists every open request on the machine. It reads an index in
+  `/tmp/ramify/gates`, one entry per worktree with an open request, which each work-order write
+  keeps up to date. After a reboot, the first `gates` scans every worktree once. A scan in the
+  background repeats every 30 minutes, for requests from an older ramify.
+- When sessions run different ramify versions, a launch from the older build hands over to the
+  window of the newer build. It never quits it.
 - `step ask` shows `.ramify/work/<slug>/<step>.md` and the work order. `--file` names other
   files instead. A file must be inside the worktree.
 - The request is `ask:` in the work order's frontmatter: `step`, `asked`, `files`. A rejection

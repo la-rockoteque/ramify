@@ -194,6 +194,29 @@ def write_order(path, meta, body):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(f"---\n{head}---\n{body}")
     os.replace(tmp, path)
+    index_gate(meta)
+
+
+def index_gate(meta):
+    """`ramify gates` reads this index, not every worktree of every project: one file per worktree
+    with an open request, named by a hash of its real path. A missing entry is found by the next
+    full scan; `gates` drops an entry whose request is gone."""
+    root = os.environ.get("WF_ROOT")
+    if not root:
+        return
+    real = os.path.realpath(root)
+    folder = os.path.join(os.environ.get("RAMIFY_STATE_DIR") or "/tmp/ramify", "gates")
+    entry = os.path.join(folder, hashlib.sha256(real.encode()).hexdigest()[:16])
+    try:
+        if open_ask(meta):
+            os.makedirs(folder, exist_ok=True)
+            with open(entry + ".tmp", "w", encoding="utf-8") as f:
+                f.write(real + "\n")
+            os.replace(entry + ".tmp", entry)
+        elif os.path.exists(entry):
+            os.remove(entry)
+    except OSError:
+        pass   # the index only speeds `gates` up; the work order is the record
 
 
 def matching_order(defs, path, branch):
