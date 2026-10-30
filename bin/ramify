@@ -1266,7 +1266,8 @@ at_finale() { # worktree path
 mem_project() { # [--apply]
   need_config
   local env wt root s U port alive answers mb g groups verdict up note tagged
-  [ -n "${RAMIFY_FOOTPRINTS:-}" ] || { RAMIFY_FOOTPRINTS="$(mktemp)"; footprints >"$RAMIFY_FOOTPRINTS"; }
+  # `mem` hands its snapshot down; a direct call takes its own and removes it.
+  [ -n "${RAMIFY_FOOTPRINTS:-}" ] || { RAMIFY_FOOTPRINTS="$(mktemp)"; footprints >"$RAMIFY_FOOTPRINTS"; trap 'rm -f "$RAMIFY_FOOTPRINTS"' EXIT; }
   tagged="$(tagged_groups)"
   for env in "$STATE_DIR"/*.env; do
     [ -f "$env" ] || continue
