@@ -101,6 +101,30 @@ class AppLaunch(unittest.TestCase):
             launch.retire_other_builds(cache, 'approvals', bundle)
         kill.assert_called_once_with(101, launch.signal.SIGTERM)
 
+    def test_newer_window_survives_an_older_launch(self):
+        # A session still on the older plugin must not quit the newer window: it hands over to it.
+        cache = self.root / 'cache'
+        old = cache / 'apps/approvals/old/Ramify Approvals.app'
+        new = cache / 'apps/approvals/new/Ramify Approvals.app'
+        for bundle, mtime in ((old, 100), (new, 200)):
+            bundle.mkdir(parents=True)
+            os.utime(bundle.parent, (mtime, mtime))
+        listing = f' 102 {new}/Contents/MacOS/Electron\n'
+        with patch.object(launch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, listing)), \
+                patch.object(launch.os, 'kill') as kill:
+            newer = launch.retire_other_builds(cache, 'approvals', old)
+        kill.assert_not_called()
+        self.assertEqual(newer, new)
+
+    def test_ready_file_is_under_the_cache(self):
+        # A sandboxed caller has its own $TMPDIR, and the app cannot write there.
+        seen = self.root / 'seen'
+        binary = self.fake('import os,json\nfrom pathlib import Path\nready = os.environ["RAMIFY_LAUNCH_READY"]\n'
+                           f'Path({str(seen)!r}).write_text(ready)\n'
+                           'Path(ready).write_text(json.dumps({"title":"ramify — approvals","visible":True}))\n')
+        launch.run(binary, self.target, self.root / 'cache', 'approvals', timeout=2, platform='linux')
+        self.assertTrue(Path(seen.read_text()).is_relative_to(self.root / 'cache'), seen.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
