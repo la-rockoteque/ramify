@@ -971,8 +971,10 @@ GATES="$STATE_ROOT/gates"
 # Write or drop the index entry of one worktree, by what its work order says now.
 gate_check() { # worktree path
   local real; real="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
-  local entry="$GATES/$(printf '%s' "$real" | shasum -a 256 | cut -c1-16)"
-  case "$(RAMIFY_ROOT="$real" "$SELF" step asked --json 2>/dev/null)" in
+  local entry="$GATES/$(printf '%s' "$real" | shasum -a 256 | cut -c1-16)" out
+  # A failed check (a timeout under load) proves nothing: the entry stays until a check succeeds.
+  out="$(RAMIFY_ROOT="$real" "$SELF" step asked --json 2>/dev/null)" || return 0
+  case "$out" in
     '{'*) mkdir -p "$GATES" && printf '%s\n' "$real" >"$entry.$$" && mv "$entry.$$" "$entry" ;;
     *) rm -f "$entry" ;;
   esac
@@ -1003,8 +1005,10 @@ gates_json() {
   for f in "$GATES"/*; do
     case "$f" in *.tmp|*.[0-9]*) continue ;; esac
     [ -f "$f" ] || continue
-    path="$(head -1 "$f")"; out=""
-    [ -d "$path" ] && out="$(RAMIFY_ROOT="$path" "$SELF" step asked --json 2>/dev/null)"
+    path="$(head -1 "$f")"
+    [ -d "$path" ] || { rm -f "$f"; continue; }
+    # Drop the entry only when the check succeeds and finds no request: a failed check keeps it.
+    out="$(RAMIFY_ROOT="$path" "$SELF" step asked --json 2>/dev/null)" || continue
     case "$out" in '{'*) ;; *) rm -f "$f"; continue ;; esac
     primary="$(git -C "$path" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
     jsep "$i"; i=1
