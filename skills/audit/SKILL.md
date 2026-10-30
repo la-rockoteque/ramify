@@ -15,7 +15,8 @@ check. The light lane skips it, and review carries it there.
 
 A bug has no spec and no QA plan. Its criteria are the symptom and the failing tests in
 `diagnose.md`: the symptom is gone, the tests pass for the right reason, and the diff stays
-inside the fix plan.
+inside the fix plan. Write the verdicts to `audit.md`, with the same evidence. There are no
+plan cases and no write set to check.
 
 ## Do
 

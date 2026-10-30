@@ -24,6 +24,10 @@ product code in this step: a fix before the cause is a guess.
 4. Run the suite on main too. A test that fails there before your change is a known failure.
    Write it down; it is not this bug.
 
+With `auto_ask: true` in the repo's workflows, the guard holds edits outside the planning paths
+while this gate is next. Then name the tests in `diagnose.md` and write them as the first move
+of `fix`. Write `diagnose.md` last: the request opens as soon as it exists.
+
 ## Write `diagnose.md` next to the work order
 
 - **Symptom**: what goes wrong, for whom, and how to reproduce it.

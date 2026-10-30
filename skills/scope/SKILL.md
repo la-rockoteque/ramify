@@ -21,7 +21,8 @@ a dependency pin, a log line, a rename inside one module, a doc fix.
 - New behaviour is a feature: `ramify new <slug> --workflow feature`.
 - Broken behaviour is a bug: `ramify new <slug> --workflow bug`.
 
-Then tell the user, and stop this work order.
+Run `ramify new` from the primary checkout. Then tell the user, and stop this work order. The
+user removes this worktree with `ramify delete <worktree>`.
 
 ## Write `scope.md` next to the work order
 

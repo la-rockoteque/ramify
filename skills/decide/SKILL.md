@@ -24,7 +24,7 @@ Run `ocre-jelly` on `decide.md` before you show it.
 
 ## Gate
 
-Put the decision up for the user, then wait for the decision. The
+Put `decide.md` up for the user, then wait for the answer. The
 [workflow contract](../workflow/SKILL.md#human-gates) has the loop:
 
 ```bash
@@ -48,7 +48,12 @@ ramify new <slug> --workflow feature
 The new branch starts from main, without the spike's code. Copy `frame.md` and `finding.md`
 into its work order folder, and link them from its body. Its `spec` step starts from them.
 
-Then remove the spike. The user runs it, because the branch is not merged:
+Nothing of the spike is pushed, so the delete loses `frame.md`, `finding.md` and `decide.md`.
+Keep the finding first. For a seed, it is in the new work order. For a discard, post it on the
+ticket, or hand it to the user with the [scratch skill](../scratch/SKILL.md).
+
+Then the user removes the spike, from the primary checkout, in a terminal. `ramify delete`
+refuses from inside the worktree, and the branch is not merged:
 
 ```bash
 ramify delete <spike-worktree>

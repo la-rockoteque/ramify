@@ -21,7 +21,8 @@ Follow the [workflow contract](../workflow/SKILL.md).
 
 - The change needs more than `scope.md` says. Update `scope.md` and ask the user again.
 - The tweak turns out to change behaviour or to fix a bug. A tweak has one lane, so it cannot be
-  raised. Tell the user, and start a feature or a bug work order with `ramify new`.
+  raised. Tell the user, and start a feature or a bug work order with `ramify new` from the
+  primary checkout. The user removes this worktree with `ramify delete <worktree>`.
 
 ## Prose
 

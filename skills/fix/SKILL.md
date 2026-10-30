@@ -14,7 +14,8 @@ to change. Grep every caller of a function before you edit it.
 
 ## Do
 
-1. Run the failing tests from `diagnose.md`. See them fail.
+1. Run the failing tests from `diagnose.md`. See them fail. When `diagnose` only named them,
+   write them now, under those names, and see them fail.
 2. Change the code at the root cause, as the plan says. Fix a shared problem in the shared
    function, not in each caller.
 3. Run the failing tests again until they pass. Do not edit a test to make it pass.

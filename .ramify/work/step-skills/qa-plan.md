@@ -33,7 +33,9 @@ skills/prototype/SKILL.md
 skills/decide/SKILL.md
 skills/audit/SKILL.md
 skills/pr/SKILL.md
+skills/review/SKILL.md
 test/skills.py
+test/smoke.sh
 README.md
 .ramify/work/step-skills/*
 !libexec/*

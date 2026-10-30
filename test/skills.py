@@ -15,7 +15,7 @@ def steps(workflows):
 
 
 def frontmatter(path):
-    text = path.read_text()
+    text = path.read_text(encoding='utf-8-sig').replace('\r\n', '\n')
     if not text.startswith('---\n'):
         return {}
     return yaml.safe_load(text.split('---\n', 2)[1]) or {}
@@ -25,7 +25,11 @@ def problems(workflows, skills_dir):
     """One line per step whose skill file is missing or has the wrong frontmatter."""
     found = []
     for step, d in steps(workflows).items():
-        name = d['skill'].split(':', 1)[-1]
+        skill = str((d or {}).get('skill') or '')
+        if not skill.startswith('ramify:'):
+            found.append(f'{step}: skill {skill!r} is not a ramify skill')
+            continue
+        name = skill.split(':', 1)[1]
         path = Path(skills_dir) / name / 'SKILL.md'
         if not path.is_file():
             found.append(f'{step}: no {path}')
@@ -45,13 +49,14 @@ class StepSkills(unittest.TestCase):
     skills = HOME / 'skills'
 
     def skill_text(self, step):
-        return (self.skills / steps(self.workflows)[step]['skill'].split(':', 1)[-1] / 'SKILL.md').read_text()
+        return (self.skills / steps(self.workflows)[step]['skill'].split(':', 1)[1] / 'SKILL.md').read_text()
 
     def test_every_workflow_skill_has_its_skill_file(self):
         self.assertEqual([], [p for p in problems(self.workflows, self.skills) if ': no ' in p])
 
     def test_skill_name_matches_its_folder(self):
-        self.assertEqual([], [p for p in problems(self.workflows, self.skills) if 'has name' in p])
+        self.assertEqual([], [p for p in problems(self.workflows, self.skills)
+                              if 'has name' in p or 'not a ramify skill' in p])
 
     def test_step_skill_description_names_its_step(self):
         self.assertEqual([], [p for p in problems(self.workflows, self.skills) if 'description' in p])
@@ -64,6 +69,21 @@ class StepSkills(unittest.TestCase):
             found = problems(bad, self.skills)
         self.assertEqual(1, len(found))
         self.assertIn('nothing: no ', found[0])
+
+    def test_wrong_name_and_description_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / 'workflows.yml'
+            bad.write_text('steps:\n  fix: { skill: ramify:fix }\n  apply: { skill: ramify:apply }\n'
+                           '  bare: {}\n')
+            for name, meta in (('fix', 'name: mend\ndescription: Workflow step `fix` — x. '
+                                       'Use when `ramify step` names fix as the next step.'),
+                               ('apply', 'name: apply\ndescription: Make the change.')):
+                (Path(tmp) / name).mkdir()
+                (Path(tmp) / name / 'SKILL.md').write_text(f'---\n{meta}\n---\n')
+            found = problems(bad, tmp)
+        self.assertTrue(any(p.startswith("fix: ") and "has name 'mend'" in p for p in found), found)
+        self.assertEqual(2, len([p for p in found if p.startswith('apply: ') and 'description' in p]), found)
+        self.assertTrue(any(p.startswith('bare: ') and 'not a ramify skill' in p for p in found), found)
 
     def test_gated_skills_ask_and_wait(self):
         for step, d in steps(self.workflows).items():
@@ -80,10 +100,13 @@ class StepSkills(unittest.TestCase):
 
     def test_auto_skills_record_done(self):
         for step, d in steps(self.workflows).items():
-            if d.get('gate') == 'human' or step == 'finale':  # finale removes the record it would write to
+            if d.get('gate') == 'human':
                 continue
             with self.subTest(step=step):
-                self.assertIn(f'ramify step done {step}', self.skill_text(step))
+                if step == 'finale':  # it removes the work order it would record in
+                    self.assertNotIn('ramify step done finale', self.skill_text(step))
+                else:
+                    self.assertIn(f'ramify step done {step}', self.skill_text(step))
 
 
 if __name__ == '__main__': unittest.main()

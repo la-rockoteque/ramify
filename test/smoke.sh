@@ -36,6 +36,7 @@ if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]'; then
   parses_on_old_bash() { local f; for f in $(grep -rlE '^#!.*bash' "$(dirname "$RAMIFY")/.." --exclude-dir=.git); do /bin/bash -n "$f" || return 1; done; }
   check "every script parses under /bin/bash $(/bin/bash -c 'echo $BASH_VERSION')" parses_on_old_bash
 fi
+check "every skill workflows.yml names has its SKILL.md" python3 "$(dirname "$RAMIFY")/../test/skills.py"
 
 git init -q --bare -b main "$T/origin.git"
 git clone -q "$T/origin.git" "$T/app" 2>/dev/null
