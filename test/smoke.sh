@@ -40,6 +40,7 @@ if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]'; then
   parses_on_old_bash() { local f; for f in $(grep -rlE '^#!.*bash' "$(dirname "$RAMIFY")/.." --exclude-dir=.git); do /bin/bash -n "$f" || return 1; done; }
   check "every script parses under /bin/bash $(/bin/bash -c 'echo $BASH_VERSION')" parses_on_old_bash
 fi
+check "every skill workflows.yml names has its SKILL.md" python3 "$(dirname "$RAMIFY")/../test/skills.py"
 
 git init -q --bare -b main "$T/origin.git"
 git clone -q "$T/origin.git" "$T/app" 2>/dev/null
@@ -354,11 +355,21 @@ check "approve refuses a step that is not next"     bash -c "! '$RAMIFY' approve
 check "ask puts the gate up"                    bash -c "'$RAMIFY' step ask spec && grep -q 'step: spec' '$ORDER' && grep -q 'asked:' '$ORDER'"
 check "status --line says it waits on you"      test "$(WF_ROOT="$WFA" WF_BRANCH=feat/wfa python3 "$WFPY" status --line)" = "feature/standard 0/8 ⏳ spec waits on you"
 check "gates --json lists it with its text"     bash -c "'$RAMIFY' gates --json | python3 -c 'import json,sys; g=json.load(sys.stdin); assert len(g) == 1 and g[0][\"ask\"][\"step\"] == \"spec\", g; f=g[0][\"ask\"][\"files\"]; assert [x[\"path\"] for x in f] == [\".ramify/work/wfa/spec.md\", \".ramify/work/wfa/order.md\"] and \"AC1\" in f[0][\"text\"], f'"
+# `gates` reads an index of open requests, not every worktree of every project.
+GATES="$RAMIFY_STATE_DIR/gates"; WFA_REAL="$(cd "$WFA" && pwd -P)"
+indexed() { grep -qlx "$WFA_REAL" "$GATES"/* 2>/dev/null; }
+check "step ask records the request in the gate index" indexed
+rm -rf "$GATES"
+check "gates finds a request with no index entry after the index is lost" bash -c "[ \$('$RAMIFY' gates --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') = 1 ] && grep -qlx '$WFA_REAL' '$GATES'/*"
+echo /nowhere >"$GATES/0000000000000000"
+"$RAMIFY" gates --json >/dev/null
+check "gates drops an index entry whose request is gone" test ! -e "$GATES/0000000000000000"
 check "wait times out without a decision"       bash -c "! '$RAMIFY' step wait spec --timeout 0"
 check "a rejection needs a note"                bash -c "! '$RAMIFY' reject spec"
 check "reject answers the request"              bash -c "'$RAMIFY' reject spec --note 'add an error state' && ! grep -q '^- {step: spec' '$ORDER'"
 check "wait reports the rejection and its note" test "$("$RAMIFY" step wait spec --timeout 1)" = "rejected: add an error state"
 check "a rejected request leaves gates"         test "$("$RAMIFY" gates --json)" = "[]"
+check "a decided request leaves the gate index" bash -c "! grep -qlx '$WFA_REAL' '$GATES'/* 2>/dev/null"
 "$RAMIFY" step ask spec >/dev/null
 "$RAMIFY" step wait spec --timeout 10 >"$T/wait.out" & waiter=$!
 "$RAMIFY" approve spec --note 'ship it' >/dev/null

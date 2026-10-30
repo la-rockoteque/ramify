@@ -10,14 +10,15 @@ Follow the [workflow contract](../workflow/SKILL.md). This step is a **human gat
 ## Get a second pair of eyes
 
 Do not review your own work in the context that wrote it. Hand the diff to a separate reviewer:
-a code-review agent or skill when one is installed, else a fresh subagent. Give it `spec.md`,
-`qa-plan.md`, `qa-results.md` and the diff (`git diff $(git merge-base HEAD origin/main)`).
+a code-review agent or skill when one is installed, else a fresh subagent. Give it `spec.md`
+(or `diagnose.md`, `scope.md`), the QA record when there is one (`qa-plan.md`, `qa-results.md`,
+`audit.md`, `verify.md`), and the diff (`git diff $(git merge-base HEAD origin/main)`).
 Ask it to attack the record, not to rebuild it.
 
 ## What it checks
 
 - **Conformance**: every acceptance criterion is met, and the record's evidence holds up. On
-  the light lane there was no audit, so this check carries the full weight.
+  a lane without audit (feature light, bug hotfix, tweak), this check carries the full weight.
 - **Correctness**: edge cases, error paths, concurrency, data loss.
 - **Security**: input at trust boundaries, permissions, secrets.
 - **Simplicity**: code that already exists elsewhere, abstractions with one caller, dead code.

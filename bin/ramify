@@ -30,7 +30,7 @@ workflow;workflow [list | show <workflow>];the workflows this repo offers, or on
 step;step [done <step> [--approved] | na <step> | gate <step>|--pr | ask <step> [--file F]... | wait <step>] [--note TEXT];this branch's work order and next step, record a step, exit 1 while <step> waits on earlier ones, put a human gate up in the approvals window, or wait for the decision
 approve;approve <step> [--note TEXT];the human's OK on a gate the agent asked about: records the step
 reject;reject <step> --note TEXT;the human's no on a gate the agent asked about, with what to change
-gates;gates [--json];every human gate on the machine that waits on a decision
+gates;gates [--json | --scan];every human gate on the machine that waits on a decision
 approvals;approvals;open the approvals window
 scratch;scratch [--title T] [FILE | -] | --list | --clear;hand the human a text to copy: it opens in the scratch window, with a Copy button
 run;run [ask <script> [--cwd DIR] [--note TEXT] | wait <id> [--timeout S] | go <id> | block <id> [--note TEXT]];hand the human a script to run: it opens in the run window (bare: open the window), with a Run and a Block button; go and block are the human's
@@ -963,26 +963,67 @@ ensure_gate() {
     || echo "  the approvals window did not open — run 'ramify approvals'"
 }
 
-# Every open request on the machine. A worktree without a .ramify folder (here or in its primary)
-# has no work order, so python never runs for it.
-gates_json() {
-  local p path out i=0
-  printf '['
+# Every open request on the machine. The work orders hold them, and reading every worktree of every
+# project took 98 s on a machine with 35 projects: `gates` reads an index of the worktrees with an
+# open request instead (written by workflow.py), and checks each entry. A full scan fills it after
+# a reboot, and again in the background every 30 minutes, for a request from an older ramify.
+GATES="$STATE_ROOT/gates"
+
+# Write or drop the index entry of one worktree, by what its work order says now.
+gate_check() { # worktree path
+  local real; real="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  local entry="$GATES/$(printf '%s' "$real" | shasum -a 256 | cut -c1-16)" out
+  # A failed check (a timeout under load) proves nothing: the entry stays until a check succeeds.
+  out="$(RAMIFY_ROOT="$real" "$SELF" step asked --json 2>/dev/null)" || return 0
+  case "$out" in
+    '{'*) mkdir -p "$GATES" && printf '%s\n' "$real" >"$entry.$$" && mv "$entry.$$" "$entry" ;;
+    *) rm -f "$entry" ;;
+  esac
+}
+
+# Every worktree of every project, eight at a time. A worktree without a .ramify folder (here or in
+# its primary) has no work order, so python never runs for it.
+gates_scan() {
+  local p path
+  mkdir -p "$GATES"
   while read -r p; do
-    [ -n "$p" ] || continue
     while read -r path; do
-      [ -d "$path/.ramify" ] || [ -d "$p/.ramify" ] || continue
-      out="$(RAMIFY_ROOT="$path" "$SELF" step asked --json 2>/dev/null)"
-      case "$out" in '{'*) ;; *) continue ;; esac
-      jsep "$i"; i=1
-      printf '{"project":%s,"path":%s,"worktree":%s,"ask":%s}' "$(js "$(basename "$p")")" "$(js "$path")" "$(js "$(basename "$path")")" "$out"
+      [ -d "$path/.ramify" ] || [ -d "$p/.ramify" ] && printf '%s\0' "$path"
     done < <(git -C "$p" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
-  done < <(projects all)
+  done < <(projects all) | xargs -0 -n 1 -P 8 "$SELF" gates --check
+  touch "$GATES/.scanned"
+}
+
+gates_json() {
+  local f path out primary i=0
+  if [ ! -f "$GATES/.scanned" ]; then gates_scan
+  elif [ -n "$(find "$GATES/.scanned" -mmin +30 2>/dev/null)" ]; then
+    touch "$GATES/.scanned"
+    nohup "$SELF" gates --scan >/dev/null 2>&1 </dev/null &
+    disown 2>/dev/null
+  fi
+  printf '['
+  for f in "$GATES"/*; do
+    case "$f" in *.tmp|*.[0-9]*) continue ;; esac
+    [ -f "$f" ] || continue
+    path="$(head -1 "$f")"
+    [ -d "$path" ] || { rm -f "$f"; continue; }
+    # Drop the entry only when the check succeeds and finds no request: a failed check keeps it.
+    out="$(RAMIFY_ROOT="$path" "$SELF" step asked --json 2>/dev/null)" || continue
+    case "$out" in '{'*) ;; *) rm -f "$f"; continue ;; esac
+    primary="$(git -C "$path" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+    jsep "$i"; i=1
+    printf '{"project":%s,"path":%s,"worktree":%s,"ask":%s}' "$(js "$(basename "${primary:-$path}")")" "$(js "$path")" "$(js "$(basename "$path")")" "$out"
+  done
   printf ']\n'
 }
 
 gates() {
-  [ "${1:-}" = --json ] && { gates_json; return; }
+  case "${1:-}" in
+    --json) gates_json; return ;;
+    --scan) gates_scan; return ;;
+    --check) gate_check "${2:-}"; return ;;
+  esac
   gates_json | python3 -c '
 import json, sys
 gates = json.load(sys.stdin)
@@ -1640,7 +1681,7 @@ case "${1:-}" in
   workflow) case "${2:-list}" in list|show) wf "${2:-list}" "${@:3}" ;; *) usage workflow >&2; exit 2 ;; esac ;;
   step) case "${2:-}" in done|na|gate|wait|asked|guard) wf "${@:2}" ;; ensure) ensure_gate ;; ask) ask "${@:3}" ;; '') wf status ;; *) die "usage: ramify step [done <step> | na <step> | gate <step>|--pr | ask <step> | wait <step>]" ;; esac ;;
   approve|reject) wf "$@" ;;
-  gates) gates "${2:-}" ;;
+  gates) gates "${@:2}" ;;
   lane) wf lane "${@:2}" ;;
   label) label "${2:-}" ;;
   config) show_config "${2:-}" "${3:-}" ;;
