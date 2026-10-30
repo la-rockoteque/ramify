@@ -608,9 +608,19 @@ agent that can edit that file can run code through an allowed command. Allowing 
 `package.json` the same way. Turn the hook off where that trust does not hold.
 
 Skills: `ramify:resume`, `ramify:setup`, `ramify:worktree`, `ramify:ask-for-qa`, `ramify:qa-dash`, `ramify:app`, `ramify:scratch`, `ramify:run`.
-Workflow skills: `ramify:workflow` (the contract every step follows), then one per step of the
-feature lanes: `ramify:spec`, `ramify:qa-plan`, `ramify:build`, `ramify:audit`, `ramify:qa`,
-`ramify:review`, `ramify:pr`, `ramify:finale`. Every step runs the prose it writes through the
+Workflow skills: `ramify:workflow` (the contract every step follows), then one per step:
+
+- feature: `ramify:spec`, `ramify:qa-plan`, `ramify:build`, `ramify:audit`, `ramify:qa`,
+  `ramify:review`, `ramify:pr`, `ramify:finale`.
+- bug: `ramify:diagnose`, `ramify:fix`, then `ramify:audit` and `ramify:verify` on the
+  standard lane, then `ramify:review`, `ramify:pr`, `ramify:finale`.
+- tweak: `ramify:scope`, `ramify:apply`, then `ramify:review`, `ramify:pr`, `ramify:finale`.
+- spike: `ramify:frame`, `ramify:prototype`, `ramify:decide`. A spike opens no PR, and
+  `decide` removes its worktree.
+
+`test/skills.py` checks that each skill `workflows.yml` names has its `SKILL.md`.
+
+Every step runs the prose it writes through the
 [ocre-jelly](https://git.nexapptech.com/vbernier/ocre-jelly) skill. Without it, the step follows
 the same rules by hand and says so.
 
@@ -623,6 +633,7 @@ any more, drops out of the list; delete its line to forget it for good.
 ## Test
 
 ```bash
+python3 test/skills.py        # every skill workflows.yml names exists
 test/smoke.sh                 # new, up, shared/private, dash --json, memory, strays, up lock, down, cleanup, prune, write-set, workflows, hooks, setup
 ramify write-set --self-test
 ```

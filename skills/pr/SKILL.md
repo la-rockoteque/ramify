@@ -20,7 +20,7 @@ the gate.
 
 Build it from the work order, not from memory:
 
-- **Summary**: what changed and why, from `spec.md` (or `report.md`), a few bullets.
+- **Summary**: what changed and why, from `spec.md` (or `diagnose.md`, `scope.md`), a few bullets.
 - **Acceptance**: each criterion and where it is met.
 - **QA**: the Yield line from `qa-results.md`, and what a human still has to check.
 - **Review**: the findings that were fixed or waived, from `review.md`.
