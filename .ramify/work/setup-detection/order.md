@@ -7,6 +7,7 @@ created: 2026-10-30
 steps:
 - {step: spec, date: '2026-10-30'}
 - {step: qa-plan, date: '2026-10-30'}
+- {step: build, date: '2026-10-30'}
 ---
 
 # setup-detection
