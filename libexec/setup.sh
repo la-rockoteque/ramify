@@ -42,17 +42,19 @@ fi
 # Ports other projects on this machine already hold, as lo:hi ranges. A service base P holds
 # P..P+RAMIFY_MAX_SLOT; a shared port holds itself. The repo being drafted does not count.
 REGISTRY="${RAMIFY_REGISTRY:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ramify/projects}"
-span="${RAMIFY_MAX_SLOT:-5}"; held=""
+span="${RAMIFY_MAX_SLOT:-5}"; held=""; self="$(cd "$P" && pwd -P)"
 if [ -f "$REGISTRY" ]; then
   while read -r proj; do
-    [ -n "$proj" ] && [ "$proj" != "$P" ] || continue
+    [ -n "$proj" ] && [ "$(cd "$proj" 2>/dev/null && pwd -P)" != "$self" ] || continue
     for f in "$proj/.ramify.conf" "$proj/.claude/ramify.conf"; do
       [ -f "$f" ] || continue
-      max="$(sed -n 's/^RAMIFY_MAX_SLOT=["'\'']\{0,1\}\([0-9][0-9]*\).*/\1/p' "$f" | tail -1)"
-      for p in $(sed -n 's/^[A-Za-z0-9_]*_shared_port=["'\'']\{0,1\}\([0-9][0-9]*\).*/\1/p' "$f"); do
+      # Assignments as bash reads them: drop the indent and any `export`.
+      conf="$(sed -e 's/^[[:space:]]*//' -e 's/^export[[:space:]][[:space:]]*//' "$f")"
+      max="$(sed -n 's/^RAMIFY_MAX_SLOT=["'\'']\{0,1\}\([0-9][0-9]*\).*/\1/p' <<<"$conf" | tail -1)"
+      for p in $(sed -n 's/^[A-Za-z0-9_]*_shared_port=["'\'']\{0,1\}\([0-9][0-9]*\).*/\1/p' <<<"$conf"); do
         held="$held $p:$p"
       done
-      for p in $(grep -v '_shared_port=' "$f" | sed -n 's/^[A-Za-z0-9_]*_port=["'\'']\{0,1\}\([0-9][0-9]*\).*/\1/p'); do
+      for p in $(grep -v '_shared_port=' <<<"$conf" | sed -n 's/^[A-Za-z0-9_]*_port=["'\'']\{0,1\}\([0-9][0-9]*\).*/\1/p'); do
         held="$held $p:$((p + ${max:-5}))"
       done
       break
@@ -82,27 +84,41 @@ pick_port() {
 #   sb <name> <dir> <cmd>                  its Storybook
 #   fixed <dir>                            a NestJS app that listens on a literal port
 #   mobile <dir> <notes>                   a React Native or Expo app
+#   orchestrator <dir> <script>            a script that runs other packages (turbo, nx, …)
+#   pkg <dir>                              every package, for the env file scan
 read -r -d '' detect_py <<'PY'
 import json, os, re, sys
 P = sys.argv[1]
 LOCKS = [("bun.lock", "bun"), ("bun.lockb", "bun"), ("pnpm-lock.yaml", "pnpm"),
          ("yarn.lock", "yarn"), ("package-lock.json", "npm")]
+# A script that runs other packages' scripts. Those packages are listed on their own.
+ORCHESTRATOR = re.compile(r"\b(turbo|nx|lerna|concurrently)\b|--workspaces?\b|--filter\b|(^|\s)-r(\s|$)")
 
 def load(d):
     try:
         with open(os.path.join(d, "package.json")) as f:
-            return json.load(f)
+            pj = json.load(f)
+        return pj if isinstance(pj, dict) else None
     except Exception:
         return None
+
+def table(pj, key):
+    v = pj.get(key)
+    return v if isinstance(v, dict) else {}
+
+def deps(pj):
+    return {**table(pj, "dependencies"), **table(pj, "devDependencies")}
 
 def rel(d):
     r = os.path.relpath(d, P)
     return "" if r == "." else r
 
+def has(d, *files):
+    return any(os.path.isfile(os.path.join(d, f)) for f in files)
+
 def is_root(d):
     pj = load(d) or {}
-    return (any(os.path.isfile(os.path.join(d, l)) for l, _ in LOCKS)
-            or os.path.isfile(os.path.join(d, "pnpm-workspace.yaml"))
+    return (has(d, *(l for l, _ in LOCKS), "pnpm-workspace.yaml")
             or "packageManager" in pj or "workspaces" in pj)
 
 def install_root(d):
@@ -119,40 +135,43 @@ def manager(root):
     if pm in ("bun", "pnpm", "yarn", "npm"):
         return pm
     for l, m in LOCKS:
-        if os.path.isfile(os.path.join(root, l)):
+        if has(root, l):
             return m
-    return "npm"
-
-def deps(pj):
-    return {**pj.get("dependencies", {}), **pj.get("devDependencies", {})}
+    return "pnpm" if has(root, "pnpm-workspace.yaml") else "npm"
 
 def run(pm, script, args=""):
     if not args:
         return f"{pm} run {script}"
     return f"npm run {script} -- {args}" if pm == "npm" else f"{pm} run {script} {args}"
 
-dirs = [P] + sorted(os.path.join(P, e) for e in os.listdir(P)
-                    if not e.startswith(".") and e != "node_modules" and os.path.isdir(os.path.join(P, e)))
-found = []
-for d in list(dirs):
-    if d != P:
-        found += sorted(os.path.join(d, e) for e in os.listdir(d)
-                        if not e.startswith(".") and e != "node_modules" and os.path.isdir(os.path.join(d, e)))
-pkgs = [d for d in dirs + found if load(d) is not None]
-pkgs = sorted(set(pkgs), key=lambda d: (rel(d).count("/") + (rel(d) != ""), rel(d)))
+def word(name, text):
+    # The command word itself: vite, not vite-node or scripts/next-step.js.
+    return re.search(r"(^|[\s;&|(])" + name + r"(\s|$)", text) is not None
 
-roots, bins, out, names, installs = [], {}, [], set(), []
-if load(P) is not None:
-    roots.append(P)
+def subdirs(d):
+    try:
+        return sorted(os.path.join(d, e) for e in os.listdir(d)
+                      if not e.startswith(".") and e != "node_modules" and os.path.isdir(os.path.join(d, e)))
+    except OSError:
+        return []
+
+top = subdirs(P)
+pkgs = [d for d in [P] + top + [s for d in top for s in subdirs(d)] if load(d) is not None]
+pkgs.sort(key=lambda d: (rel(d).count("/") + (rel(d) != ""), rel(d)))
+
+roots, bins, members, out, names, installs = [], {}, {}, [], set(), []
 ui_named = False
 for d in pkgs:
-    pj = load(d)
-    scripts, dd, r = pj.get("scripts", {}) or {}, deps(pj), rel(d)
+    pj, r = load(d), rel(d)
+    scripts = {k: v for k, v in table(pj, "scripts").items() if isinstance(v, str)}
+    dd = deps(pj)
     root = install_root(d)
     pm = manager(root)
+    members.setdefault(root, []).append(dd)
+    out.append(f"pkg\x1f{r}")
+    if root not in roots:
+        roots.append(root)
     if "react-native" in dd or "expo" in dd or (os.path.isdir(os.path.join(d, "ios")) and os.path.isdir(os.path.join(d, "android"))):
-        if root not in roots:
-            roots.append(root)
         runs = [run(pm, s) for s in ("ios", "android") if s in scripts]
         checks = [run(pm, s) for s in ("test", "lint") if s in scripts]
         notes = f"Mobile app in {r or 'the repo root'}, no QA stack."
@@ -174,20 +193,21 @@ for d in pkgs:
     if script is None:
         continue
     t = scripts[script]
-    if re.search(r"\bnext\b", t):
+    if ORCHESTRATOR.search(t):
+        out.append(f"orchestrator\x1f{r}\x1f{script}")
+        continue
+    if word("next", t):
         kind, cmd, port, b = "ui", run(pm, script, "-p $PORT"), 3000, "next"
-    elif re.search(r"\b(vite|astro)\b", t):
-        b = re.search(r"\b(vite|astro)\b", t).group(1)
+    elif word("vite", t) or word("astro", t):
+        b = "vite" if word("vite", t) else "astro"
         kind, cmd, port = "ui", run(pm, script, "--port $PORT"), 5173
-    elif re.search(r"webpack serve|webpack-dev-server", t):
-        b = "webpack-dev-server" if "webpack-dev-server" in t else "webpack"
+    elif word("webpack serve", t) or word("webpack-dev-server", t):
+        b = "webpack-dev-server" if word("webpack-dev-server", t) else "webpack"
         kind, cmd, port = "ui", run(pm, script, "--port $PORT"), 8080
-    elif "react-scripts start" in t:
+    elif word("react-scripts start", t):
         kind, cmd, port, b = "ui", "BROWSER=none PORT=$PORT " + run(pm, script), 3000, "react-scripts"
     else:
         kind, cmd, port, b = "other", "PORT=$PORT " + run(pm, script), 3000, None
-    if root not in roots:
-        roots.append(root)
     if b and root not in bins:
         bins[root] = b
     if kind == "ui" and not ui_named:
@@ -204,36 +224,44 @@ for d in pkgs:
         out.append(f"sb\x1f{sb}\x1f{r}\x1f{run(pm, 'storybook', '-p $PORT --no-open')}")
 
 for root in roots:
+    # A root with no lockfile, no workspace and no dependency has nothing to install, and npm
+    # would write no marker for the hook to wait on.
+    if not is_root(root) and not any(members.get(root, [])):
+        continue
     pm, r = manager(root), rel(root)
     if pm == "bun":
         cmd = "bun install"
+        first = sorted(k for dd in members.get(root, []) for k in dd)
         if root in bins:
             ready = "node_modules/.bin/" + bins[root]
         else:
-            first = sorted(deps(load(root) or {}))
             ready = f"node_modules/{first[0]}/package.json" if first else ""
     elif pm == "pnpm":
         cmd, ready = "pnpm install", "node_modules/.modules.yaml"
     elif pm == "yarn":
         cmd, ready = "yarn install --frozen-lockfile", "node_modules/.yarn-integrity"
     else:
-        cmd = "npm ci" if os.path.isfile(os.path.join(root, "package-lock.json")) else "npm install"
+        cmd = "npm ci" if has(root, "package-lock.json") else "npm install"
         ready = "node_modules/.package-lock.json"
     installs.append(f"install\x1f{r}\x1f{cmd}\x1f{ready}")
-for d in dirs:
-    if os.path.isfile(os.path.join(d, "uv.lock")):
+for d in [P] + top:
+    if has(d, "uv.lock"):
         installs.append(f"install\x1f{rel(d)}\x1fuv sync\x1f.venv/pyvenv.cfg")
 print("\n".join(installs + out))
 PY
-detected="$(python3 -c "$detect_py" "$P" 2>/dev/null)"
+detected="$(python3 -c "$detect_py" "$P")" \
+  || echo "ramify: package detection failed; the draft lists no install and no Node service" >&2
 
-services=""; body=""; bootstrap=""; ready=""; webdirs=""; notes=""; svcdirs=""
+services=""; body=""; bootstrap=""; ready=""; webdirs=""; notes=""; pkgdirs=""
+# sq <text>: the text, safe inside a single-quoted config value.
+sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
 add() { services="$services $1"; body="$body"$'\n'"$2"$'\n'; }
 sep=$'\037'   # not whitespace, so read keeps an empty field (the repo root's dir)
 while IFS="$sep" read -r dir cmd rd; do
   if [ -n "$dir" ]; then bootstrap="${bootstrap:+$bootstrap && }(cd \"$dir\" && $cmd)"
   else bootstrap="${bootstrap:+$bootstrap && }$cmd"; fi
-  [ -n "$ready" ] || [ -z "$rd" ] || ready="${dir:+$dir/}$rd"
+  # The installs run in turn, so the last marker shows that all of them are done.
+  [ -z "$rd" ] || ready="${dir:+$dir/}$rd"
 done <<EOF
 $(printf '%s\n' "$detected" | grep '^install' | cut -d"$sep" -f2-)
 EOF
@@ -241,23 +269,27 @@ while IFS="$sep" read -r kind a b c d e; do
   case "$kind" in
     svc)
       pick_port "$d" "$span"
-      webdirs="$webdirs ${b:+$b/}"; svcdirs="$svcdirs ${b:-.}"
+      webdirs="$webdirs ${b:+$b/}"
       add "$a" "${a}_port=$picked
-${a}_dir=$b
+${a}_dir='$(sq "$b")'
 ${a}_health=/
-${a}_cmd='$e'" ;;
+${a}_cmd='$(sq "$e")'" ;;
     sb)
       pick_port 6006 "$span"
       add "$a" "${a}_port=$picked
-${a}_dir=$b
+${a}_dir='$(sq "$b")'
 ${a}_health=/index.json
-${a}_cmd='$c'
+${a}_cmd='$(sq "$c")'
 # Boots last and nothing waits on it; RAMIFY_SKIP=$a leaves it out.
 ${a}_optional=1" ;;
     fixed)
       body="$body"$'\n'"# ${a:-.}: NestJS listens on a fixed port in src/main.ts (port not configurable), so it is not a service."$'\n' ;;
+    orchestrator)
+      body="$body"$'\n'"# ${a:-.}: the $b script runs other packages, so it is not a service. They are listed on their own."$'\n' ;;
     mobile)
-      [ -n "$notes" ] || notes="$b" ;;
+      notes="${notes:+$notes }$b" ;;
+    pkg)
+      pkgdirs="$pkgdirs ${a:-.}" ;;
   esac
 done <<EOF
 $(printf '%s\n' "$detected" | grep -v '^install')
@@ -268,7 +300,7 @@ EOF
 copy=""
 keep() { case " $copy " in *" $1 "*) ;; *) g check-ignore -q "$1" && copy="$copy $1" ;; esac; }
 for c in .claude .envrc .vscode/settings.json; do [ -e "$P/$c" ] && keep "$c"; done
-for d in . $svcdirs; do
+for d in . $pkgdirs; do
   pre="${d#.}"; pre="${pre:+$pre/}"
   for f in "$P/$pre".env "$P/$pre".env.*; do
     [ -f "$f" ] || continue
@@ -290,10 +322,10 @@ done
 [ -n "$compose" ] && containers="$(sed -n 's/^[[:space:]]*container_name:[[:space:]]*["'\'']\{0,1\}\([^"'\'' ]*\).*/\1/p' "$P/$compose" | tr '\n' ' ' | sed 's/ $//')"
 if [ -n "$compose" ] && [ -z "$containers" ]; then
   compose_block="# $compose names no container_name. Give each service one and list them here:
-# RAMIFY_COMPOSE_FILE=$compose
+# RAMIFY_COMPOSE_FILE='$(sq "$compose")'
 # RAMIFY_CONTAINERS=\"\""
 else
-  compose_block="RAMIFY_COMPOSE_FILE=$compose
+  compose_block="RAMIFY_COMPOSE_FILE='$(sq "$compose")'
 RAMIFY_CONTAINERS=\"$containers\""
 fi
 
@@ -319,7 +351,7 @@ api_shared_cmd='dotnet run --project $proj --urls http://localhost:\$PORT'
 api_shared_when='$shared_when'
 # api_prepare='dotnet ef database update --project <Infrastructure> --startup-project $proj'"
   # The web servers proxy to it; say where, so the draft is one edit from working.
-  body="$(printf '%s' "$body" | sed -E "s#^([a-z_]+)_cmd='(npm|pnpm|yarn|bun) run dev#\1_cmd='VITE_API_TARGET=http://localhost:\$API_PORT \2 run dev#")"
+  body="$(printf '%s' "$body" | sed -E "/storybook_cmd=/!s#^([a-z_]+)_cmd='#\1_cmd='VITE_API_TARGET=http://localhost:\$API_PORT #")"
   # Proves the web server reaches the API through its proxy; set the path to a real endpoint.
   body="$body"$'\n'"# web_smoke='/api/health 200|401'"$'\n'
   services="api$services"   # first, so later services can read $API_PORT
@@ -334,7 +366,7 @@ done
 if [ -n "$notes" ]; then
   qa_notes="# Examples. Replace them with the repo's own.
 # RAMIFY_QA_RESULTS='docs/stories/*/<slug>/qa-results.md'
-RAMIFY_QA_NOTES='$notes'"
+RAMIFY_QA_NOTES='$(sq "$notes")'"
 else
   qa_notes="# Examples. Replace them with the repo's own.
 # RAMIFY_QA_RESULTS='docs/stories/*/<slug>/qa-results.md'

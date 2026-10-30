@@ -620,14 +620,14 @@ check "setup leaves out a NestJS backend with a fixed port and says why" nest_ok
 fx busy; pj '{"scripts":{"dev":"vite"}}'; mkdir -p "$T/fx/other"; printf 'web_port=5173\n' >"$T/fx/other/.ramify.conf"
 echo "$T/fx/other" >"$T/fx/registry"; D="$(RAMIFY_REGISTRY="$T/fx/registry" draft)"; port="$(sed -n 's/^web_port=//p' <<<"$D")"
 check "setup moves a base port off a range the registry holds" bash -c "[ -n '$port' ] && { [ '$port' -lt 5173 ] || [ '$port' -gt 5178 ]; }"
-fx env; printf '.env\n.env.*\n!.env.example\n' >"$FX/.gitignore"; touch "$FX/.env.example" "$FX/.env.development" "$FX/.env.test"
+fx env; printf '.env\n.env.*\n!.env.example\n' >"$FX/.gitignore"; touch "$FX/.env.example" "$FX/.env.development" "$FX/.env.test" "$FX/.env.sample"
 git -C "$FX" add .gitignore .env.example; git -C "$FX" commit -qm env; D="$(draft)"; copy="$(sed -n 's/^RAMIFY_COPY=//p' <<<"$D")"
 check "setup copies an ignored .env that .env.example implies" grep -qx '\.env' <<<"$(tr -d '"' <<<"$copy" | tr ' ' '\n')"
 check "setup copies ignored .env.* files that exist" bash -c 'grep -q "\.env\.development" <<<"$1" && grep -q "\.env\.test" <<<"$1"' _ "$copy"
-check "setup does not copy .env.example"         lacks "$copy" example
+check "setup does not copy an ignored .env.sample" lacks "$copy" sample
 fx compose; mkdir -p "$FX/packages/db"; printf 'services:\n  db:\n    container_name: fx-db\n' >"$FX/packages/db/docker-compose.yml"; D="$(draft)"
 check "setup finds a compose file two levels down" \
-  both "$D" 'RAMIFY_COMPOSE_FILE=packages/db/docker-compose.yml' 'RAMIFY_CONTAINERS="fx-db"'
+  both "$D" "RAMIFY_COMPOSE_FILE='packages/db/docker-compose.yml'" 'RAMIFY_CONTAINERS="fx-db"'
 fx bare; printf 'services:\n  db:\n    image: x\n' >"$FX/compose.yaml"; D="$(draft)"
 check "setup writes no compose file without containers" lacks "$D" '^RAMIFY_COMPOSE_FILE='
 fx ticket; for b in IN-1/a IN-2/b IN-3/c feat/x; do git -C "$FX" branch "$b"; done; D="$(draft)"
@@ -635,6 +635,32 @@ check "setup skips ticket-key branch prefixes"   has "$D" "RAMIFY_BRANCH_PREFIX=
 fx mobile; pj '{"scripts":{"ios":"expo run:ios","test":"jest","start":"expo start"},"dependencies":{"expo":"1"}}'; touch "$FX/bun.lock"; D="$(draft)"
 mobile_ok() { has "$D" 'RAMIFY_SERVICES=""' && grep '^RAMIFY_QA_NOTES=' <<<"$D" | grep 'bun run ios' | grep -q 'bun run test'; }
 check "setup drafts a mobile app as branching only with QA notes" mobile_ok
+fx pnpm; pj '{"scripts":{"dev":"vite"}}'; touch "$FX/pnpm-workspace.yaml"; D="$(draft)"
+check "setup installs a pnpm workspace with pnpm" has "$D" "RAMIFY_BOOTSTRAP='pnpm install'"
+fx nolock; pj '{"scripts":{"dev":"vite"},"dependencies":{"vite":"1"}}'; D="$(draft)"
+check "setup installs a repo without a lockfile with npm install" has "$D" "RAMIFY_BOOTSTRAP='npm install'"
+fx thin; pj '{"scripts":{"lint":"x"}}'; pj '{"scripts":{"dev":"vite"},"dependencies":{"vite":"1"}}' web; touch "$FX/web/yarn.lock"; D="$(draft)"
+check "setup skips an install with nothing to install and waits for the last one" \
+  both "$D" "RAMIFY_BOOTSTRAP='(cd \"web\" && yarn install --frozen-lockfile)'" 'RAMIFY_READY=web/node_modules/.yarn-integrity'
+fx bunapi; pj '{"workspaces":["apps/*"]}'; touch "$FX/bun.lock"; pj '{"scripts":{"dev":"bun run src/i.ts"},"dependencies":{"hono":"1"}}' apps/api; D="$(draft)"
+check "setup waits for a dependency bun installs when no dev server bin is known" has "$D" 'RAMIFY_READY=node_modules/hono/package.json'
+fx turbo; pj '{"workspaces":["apps/*"],"scripts":{"dev":"turbo run dev"}}'; touch "$FX/yarn.lock"; pj '{"scripts":{"dev":"next dev"}}' apps/web; D="$(draft)"
+check "setup leaves out a root script that runs the other packages" has "$D" 'RAMIFY_SERVICES="web"'
+fx words; pj '{"scripts":{"dev":"vite-node src/server.ts"}}'; D="$(draft)"
+check "setup does not take vite-node for vite"   has "$D" "app_cmd='PORT=\$PORT npm run dev'"
+fx broken; pj '{"scripts":{"dev":"vite"}}'; pj '{"dependencies":null,"scripts":{"dev":7}}' lib; mkdir -p "$FX/locked"; chmod 000 "$FX/locked"; D="$(draft)"; chmod 755 "$FX/locked"
+check "setup survives a malformed package.json and an unreadable directory" has "$D" 'RAMIFY_SERVICES="web"'
+fx "quo'te"; pj '{"scripts":{"ios":"x"},"dependencies":{"expo":"1"}}' "bob's app"
+check "a draft with a quote in a path still loads" bash -c 'RAMIFY_ROOT="$1" "$2" setup >/dev/null 2>&1 && RAMIFY_ROOT="$1" "$2" config >/dev/null' _ "$FX" "$RAMIFY"
+fx dotnet; mkdir -p "$FX/src/Api"; echo '<Project Sdk="Microsoft.NET.Sdk.Web"></Project>' >"$FX/src/Api/Api.csproj"; git -C "$FX" add src
+pj '{"scripts":{"dev":"vite","storybook":"sb"}}' ui; touch "$FX/ui/bun.lock"
+printf 'api_port=5000
+api_shared_port=5100
+sb_port=6006
+' >"$T/fx/other/.ramify.conf"; D="$(RAMIFY_REGISTRY="$T/fx/registry" draft)"
+dotnet_ok() { has "$D" 'api_port=5010' && has "$D" 'api_shared_port=5110' && has "$D" 'storybook_port=6016' \
+  && has "$D" "web_cmd='VITE_API_TARGET=http://localhost:\$API_PORT bun run dev --port \$PORT'"; }
+check "setup moves the API, its shared port and Storybook off held ports" dotnet_ok
 fx empty; D="$(draft)"
 check "setup says it found no dev server, not a library" \
   bash -c 'grep -q "^# No dev server detected" <<<"$1" && ! grep -q library <<<"$1"' _ "$D"
