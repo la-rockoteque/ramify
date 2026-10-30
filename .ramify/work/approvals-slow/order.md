@@ -4,7 +4,8 @@ lane: hotfix
 branch: fix/approvals-slow
 tags: []
 created: 2026-10-30
-steps: []
+steps:
+- {step: diagnose, date: '2026-10-30'}
 ---
 
 # approvals-slow

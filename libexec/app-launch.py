@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -98,18 +99,38 @@ def mac_bundle(source, target, cache, kind):
     return bundle
 
 
+def build_age(folder):
+    try:
+        return folder.stat().st_mtime
+    except OSError:
+        return 0
+
+
 def retire_other_builds(cache, kind, bundle):
-    """Quit a window of this kind left running from another build. Each build is its own app with
-    its own ramify snapshot, so an old window would keep listing gates with old code."""
+    """Quit a window of this kind left running from an older build: each build is its own app with
+    its own ramify snapshot, so an old window would keep listing gates with old code. A window of a
+    newer build stays, and its bundle is returned for the launch to hand over to. Sessions started
+    before a plugin update run the older build: if each quit the other, every request in turn
+    would restart the window."""
     prefix = str(cache / 'apps' / kind) + '/'
+    ours = build_age(bundle.parent)
+    newest = None
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
     for line in listing.splitlines():
         pid, _, command = line.strip().partition(' ')
-        if prefix in command and str(bundle) not in command and pid.isdigit():
-            try:
-                os.kill(int(pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        found = re.search(re.escape(prefix) + r'([^/]+)/([^/]+\.app)', command)
+        if not found or str(bundle) in command or not pid.isdigit():
+            continue
+        other = Path(prefix + found.group(1)) / found.group(2)
+        if build_age(other.parent) > ours:
+            if newest is None or build_age(other.parent) > build_age(newest.parent):
+                newest = other
+            continue
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    return newest
 
 
 def run(binary, target, cache, kind, timeout=30, platform=sys.platform):
@@ -123,14 +144,15 @@ def run(binary, target, cache, kind, timeout=30, platform=sys.platform):
         with (cache / f'{kind}.bundle.lock').open('a') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             bundle = mac_bundle(source, target, cache, kind)
-        retire_other_builds(cache, kind, bundle)
+        bundle = retire_other_builds(cache, kind, bundle) or bundle
         command = ['open', '-n', '-a', str(bundle)]
     else:
         command = [str(binary), str(target)]
     logs = cache / 'launch'
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / (kind + '.log')
-    with tempfile.TemporaryDirectory(prefix='ramify-launch-') as folder:
+    # Under the cache, not in $TMPDIR: a sandboxed caller has a $TMPDIR the app cannot write.
+    with tempfile.TemporaryDirectory(prefix='ready-', dir=logs) as folder:
         ready = Path(folder) / 'ready.json'
         env = {k: v for k, v in os.environ.items() if k not in ('NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE')}
         env['RAMIFY_LAUNCH_READY'] = str(ready)
