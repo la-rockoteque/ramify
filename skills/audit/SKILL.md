@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Workflow step `audit` — check the branch diff against the spec (or the bug report), criterion by criterion, settle the QA plan's audit cases with named evidence, and fill the gaps. Use when `ramify step` names audit as the next step.
+description: Workflow step `audit` — check the branch diff against the spec (or the diagnosis), criterion by criterion, settle the QA plan's audit cases with named evidence, and fill the gaps. Use when `ramify step` names audit as the next step.
 ---
 
 # audit — does the diff do what was asked?
@@ -10,8 +10,13 @@ check. The light lane skips it, and review carries it there.
 
 ## Read first
 
-`spec.md` (or `report.md` for a bug), `qa-plan.md`, and the whole branch diff:
+`spec.md` (or `diagnose.md` for a bug), `qa-plan.md`, and the whole branch diff:
 `git diff $(git merge-base HEAD origin/main)`.
+
+A bug has no spec and no QA plan. Its criteria are the symptom and the failing tests in
+`diagnose.md`: the symptom is gone, the tests pass for the right reason, and the diff stays
+inside the fix plan. Write the verdicts to `audit.md`, with the same evidence. There are no
+plan cases and no write set to check.
 
 ## Do
 
