@@ -34,6 +34,8 @@ hooks/ramify-hook
 test/smoke.sh
 README.md
 .ramify/work/reap-orphans/*
+# Deviation: the release bump to 0.10.2 ships reap to the installed plugin.
+.claude-plugin/plugin.json
 !libexec/workflow.py
 !skills/*
 !app/*
