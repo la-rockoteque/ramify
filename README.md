@@ -108,6 +108,7 @@ Then, per branch:
 ramify new login-form      # worktree + branch from origin/main, copy, bootstrap, stack up
 ramify card                # this worktree's URLs and health
 ramify dash                # every stack on the machine; `ramify watch` redraws it
+ramify mem                 # where the memory goes, and what ramify can take back
 ramify down                # stop this worktree's own services
 ramify prune --apply       # remove merged branches and their worktrees
 ```
@@ -130,6 +131,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `ping` | Exit 0 when every service of this worktree answers |
 | `card` / `dash [--json]` / `watch [s]` / `status` | Report this worktree, every stack of every project (from any directory), the same on a loop, or the slot table |
 | `app` | Open the desktop dashboard, see [The app](#the-app) |
+| `mem [--apply]` | Each stack's memory and verdict, and untagged dev servers and test runners. `--apply` stops the zombie, merged and orphan stacks, see [Processes](#processes) |
 | `cleanup` | Release crashed claims, kill orphans and strays, stop stacks of deleted worktrees, close the tickets of merged branches |
 | `prune [--all] [--apply]` | Delete merged local branches and their worktrees, detached trees already in main, and close their tickets. `--all` does it in every project on the machine. Then Docker, once: it shows disk use and removes stopped non-compose containers, unused images and build cache. Volumes and compose containers stay |
 | `complete <worktree> [--yes]` | Close its ticket, stop its stack, remove the worktree and its local branch |
@@ -221,6 +223,27 @@ and the system gives old pids and ports to new programs.
   stops a group member by member and leaves build servers out. They exit on their own when idle,
   Roslyn after 10 minutes and MSBuild nodes after 15. `dash` and the app show their count and
   memory. `dotnet build-server shutdown` stops them.
+
+`ramify mem` shows where the machine's memory goes. It prints the swap in use, and each running
+stack with its footprint and a verdict. The footprint is the `MEM` column of `top`: it counts
+compressed and swapped pages, which RSS leaves out. Under memory pressure a dev server that holds
+800 MB can show 6 MB of RSS.
+
+| Verdict | Meaning |
+|---|---|
+| `ok` | The stack serves. |
+| `zombie` | A group of the stack lives, no port of it answers, and it has been up longer than `RAMIFY_ZOMBIE_AFTER` (3600 s). |
+| `merged` | The branch passes the merge test of `prune`. |
+| `pr-open` | The work order names `finale` as the next step and the branch is not merged: the PR can still be under review. |
+| `orphan` | The worktree no longer exists. |
+
+`mem` also lists dev servers and test runners that carry no tag: orphans (parent pid 1), and
+test runners older than `RAMIFY_RUNNER_AFTER` (1800 s). Each line shows the `kill` command.
+ramify never signals these.
+
+`ramify mem --apply` stops the `zombie`, `merged` and `orphan` stacks with the same guard as
+`down`. It leaves `pr-open` stacks running. macOS hides the environment of platform binaries: a group left with only `/bin/sleep`
+in it shows no tag, and stays. `mem` says so.
 
 On macOS, each desktop window has a named app bundle: Ramify, Ramify Approvals, Ramify Scratch, or Ramify Run.
 Reopening one of these bundles opens Ramify without a command-line argument.
