@@ -13,14 +13,18 @@ mkdir -p "$T/bin"
 printf '#!/bin/sh\necho "$*" >>"%s/docker.log"\n' "$T" >"$T/bin/docker"; chmod +x "$T/bin/docker"
 export PATH="$T/bin:$PATH"
 fails=0
+# The ports and fixture names are fixed: two runs at once break each other. One run per machine.
+SMOKE_LOCK=/tmp/ramify-smoke.lock   # fixed, not $TMPDIR: a sandboxed shell sees another one
+mkdir "$SMOKE_LOCK" 2>/dev/null || { echo "smoke: another run holds $SMOKE_LOCK (pid $(cat "$SMOKE_LOCK/pid" 2>/dev/null)); remove it if that run is gone"; exit 2; }
+echo $$ >"$SMOKE_LOCK/pid"
 
-teardown() { [ -n "${KEEP:-}" ] && { echo "kept $T"; return; }
-  for p in $(seq 17000 17010) $(seq 17100 17100) $(seq 17200 17210) $(seq 17300 17305); do
+teardown() { rm -rf "$SMOKE_LOCK"; [ -n "${KEEP:-}" ] && { echo "kept $T"; return; }
+  for p in $(seq 17000 17010) $(seq 17100 17100) $(seq 17200 17210) $(seq 17300 17315); do
     lsof -ti tcp:"$p" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null
   done
   # The fixtures' marker sleeps outlive their group when a run stops half way, and a later run's
   # pgrep would find them.
-  pkill -f "sleep 9172[0-9][0-9]" 2>/dev/null; pkill -f "time.sleep(7173[0-9][0-9])" 2>/dev/null; pkill -f "$T/fakejest/jest" 2>/dev/null
+  pkill -f "sleep 9172[0-9][0-9]" 2>/dev/null; pkill -f "time.sleep(717[0-9][0-9][0-9])" 2>/dev/null; pkill -f "$T/fakejest/jest" 2>/dev/null
   rm -rf "$T"
 }
 trap teardown EXIT
@@ -622,6 +626,46 @@ check "mem with nothing to reclaim says so"      bash -c "! grep -qE '(zombie|me
 check "mem --help prints its usage"              bash -c "'$RAMIFY' mem --help | grep -q '^usage: ramify mem \[--apply\]'"
 check "--help lists mem"                         bash -c "'$RAMIFY' --help | grep -q '^  mem \[--apply\]'"
 for w in m-ok m-finale; do RAMIFY_ROOT="$T/memapp-wt/$w" "$RAMIFY" down >/dev/null 2>&1; done
+
+# ── reap stops the stacks of deleted worktrees ──
+# Three stacks: one serves, one is a zombie, one loses its worktree. Only that one goes.
+git init -q --bare -b main "$T/reap.git"; git clone -q "$T/reap.git" "$T/reapapp" 2>/dev/null
+cat >"$T/reapapp/.ramify.conf" <<'EOF'
+RAMIFY_WORKTREES=../reapapp-wt
+RAMIFY_SERVICES=web
+web_port=17310
+web_health=/
+web_cmd='python3 -c "import time; time.sleep(7$PORT)" & exec python3 -m http.server $PORT'
+EOF
+(cd "$T/reapapp" && git config user.email t@t && git config user.name t && git add -A && git commit -qm init && git push -q origin main 2>/dev/null)
+for w in r-ok r-zombie r-gone; do
+  (cd "$T/reapapp" && "$RAMIFY" new "$w" >/dev/null 2>&1)
+  RAMIFY_ROOT="$T/reapapp-wt/$w" "$RAMIFY" up >/dev/null 2>&1
+done
+reap_pgid() { cat "$RAMIFY_STATE_DIR/reapapp/$1.web.pid"; }
+RK="$(reap_pgid r-ok)" RZ="$(reap_pgid r-zombie)" RG="$(reap_pgid r-gone)"
+lsof -ti tcp:17312 -sTCP:LISTEN | xargs kill 2>/dev/null
+git -C "$T/reapapp" worktree remove --force "$T/reapapp-wt/r-gone"
+R="$(RAMIFY_ZOMBIE_AFTER=0 "$RAMIFY" reap 2>&1)"
+check "reap stops the stack of a removed worktree" bash -c "! kill -0 -- -$RG 2>/dev/null && ! curl -sf -o /dev/null --max-time 2 http://localhost:17313/"
+check "reap removes the state of a removed worktree" bash -c "[ ! -e '$RAMIFY_STATE_DIR/reapapp/r-gone.env' ] && ! ls '$RAMIFY_STATE_DIR/reapapp/'r-gone.*.pid 2>/dev/null"
+# Earlier sections remove worktrees too, so reap may stop more than r-gone: count lines, not the total.
+check "reap prints one line per stack it stops"  bash -c "[ \$(grep -c 'reapapp/r-gone  stopped' <<<'$R') = 1 ] && ! grep -qv ' — its worktree no longer exists\$' <<<'$R'"
+check "reap keeps ok and zombie stacks"          bash -c "kill -0 -- -$RK && kill -0 -- -$RZ"
+R="$(RAMIFY_ZOMBIE_AFTER=0 "$RAMIFY" reap 2>&1)"; rc=$?
+check "reap with nothing to stop prints nothing" bash -c "[ $rc = 0 ] && [ -z '$R' ]"
+check "reap --help prints its usage"             bash -c "'$RAMIFY' reap --help | grep -q '^usage: ramify reap'"
+check "--help lists reap"                        bash -c "'$RAMIFY' --help | grep -q '^  reap '"
+RS="$T/reapstate"
+startup() { echo '{"session_id":"reap","cwd":"/"}' | RAMIFY_STATE_DIR="$1" "$HOOK" session-start >/dev/null 2>&1; }
+startup "$RS"
+reaped() { local i; for i in $(seq 1 20); do [ -f "$RS/reap.stamp" ] && [ -f "$RS/reap.log" ] && return 0; sleep 0.5; done; return 1; }
+check "session start starts reap in the background" reaped
+m1="$(stat -f %m "$RS/reap.stamp" 2>/dev/null || stat -c %Y "$RS/reap.stamp")"; sleep 1; startup "$RS"
+check "a second session start within 10 minutes does not reap" test "$m1" = "$(stat -f %m "$RS/reap.stamp" 2>/dev/null || stat -c %Y "$RS/reap.stamp")"
+RAMIFY_REAP=0 startup "$T/reapoff"
+check "RAMIFY_REAP=0 turns the session-start reap off" test ! -e "$T/reapoff/reap.stamp"
+for w in r-ok r-zombie; do RAMIFY_ROOT="$T/reapapp-wt/$w" "$RAMIFY" down >/dev/null 2>&1; done
 
 # ── two clones with the same directory name keep their own state ──
 # An old clone left in another folder must not share slots and pid files with the live one: its
