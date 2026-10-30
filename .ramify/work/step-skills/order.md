@@ -9,6 +9,7 @@ steps:
 - {step: qa-plan, date: '2026-10-30'}
 - {step: build, date: '2026-10-30'}
 - {step: review, date: '2026-10-30'}
+- {step: pr, date: '2026-10-30', note: '#32'}
 ---
 
 # step-skills
