@@ -1,3 +1,4 @@
+mod commands;
 mod config;
 mod dash;
 mod workflow;
@@ -8,6 +9,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("");
     let json = args.iter().any(|arg| arg == "--json");
+    if command == "config" {
+        std::process::exit(commands::config(&args[1..]));
+    }
+    if command == "status" {
+        std::process::exit(commands::status());
+    }
     let result = match (command, json) {
         ("dash-project", true) => dash::project_json().map(|text| (text, false)),
         ("dash", true) => dash::all_json().map(|text| (text, true)),

@@ -516,7 +516,7 @@ fn build_servers(processes: &[Process]) -> Vec<BuildServer> {
         .collect()
 }
 
-fn health_ok(config: &Config, service: &str, port: u32) -> bool {
+pub(crate) fn health_ok(config: &Config, service: &str, port: u32) -> bool {
     http_status(config, service, port)
         .map(|status| status < 400)
         .unwrap_or(false)
@@ -544,7 +544,7 @@ fn health_path(config: &Config, service: &str) -> String {
     }
 }
 
-fn listening(port: u32) -> bool {
+pub(crate) fn listening(port: u32) -> bool {
     for host in ["127.0.0.1", "::1"] {
         if let Ok(mut addresses) = (host, port as u16).to_socket_addrs() {
             if let Some(address) = addresses.next() {
@@ -603,7 +603,7 @@ fn branch_of(path: &Path) -> String {
         .unwrap_or_else(|_| "?".into())
 }
 
-fn env_get(path: &Path, key: &str) -> Option<String> {
+pub(crate) fn env_get(path: &Path, key: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
         .filter_map(|line| line.strip_prefix(&format!("{key}=")))

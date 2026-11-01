@@ -82,7 +82,7 @@ done
 RAMIFY_RS="${RAMIFY_RS:-$RAMIFY_HOME/cli/target/release/ramify}"
 if [ -z "${RAMIFY_SHELL:-}" ] && [ -x "$RAMIFY_RS" ]; then
   case "${1:-}" in
-    dash|dash-project) exec "$RAMIFY_RS" "$@" ;;
+    config|status|dash|dash-project) exec "$RAMIFY_RS" "$@" ;;
   esac
 fi
 

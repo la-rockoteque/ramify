@@ -21,6 +21,12 @@ pub struct Config {
     pub branch_prefix: String,
     pub workflow_source: String,
     pub home: PathBuf,
+    pub config_path: PathBuf,
+    pub worktrees: String,
+    pub qa_plan: String,
+    pub ticket_pattern: String,
+    pub workflow_docs: String,
+    pub session_names: String,
     pub values: HashMap<String, String>,
 }
 
@@ -31,6 +37,36 @@ impl Config {
             None => detect_repo_root()?,
         };
         Self::for_root(&repo_root)
+    }
+
+    pub fn value(&self, key: &str) -> Option<String> {
+        if let Some(value) = self.values.get(key) {
+            return Some(value.clone());
+        }
+        if let Ok(value) = std::env::var(key) {
+            return Some(value);
+        }
+        match key {
+            "RAMIFY_PROJECT" => Some(self.project.clone()),
+            "RAMIFY_REMOTE" => Some(self.remote.clone()),
+            "RAMIFY_MAIN" => Some(self.main.clone()),
+            "RAMIFY_WORKTREES" => Some(self.worktrees.clone()),
+            "RAMIFY_BRANCH_PREFIX" => Some(self.branch_prefix.clone()),
+            "RAMIFY_SERVICES" => Some(self.services.join(" ")),
+            "RAMIFY_CONTAINERS" => Some(self.containers.join(" ")),
+            "RAMIFY_QA_PLAN" => Some(self.qa_plan.clone()),
+            "RAMIFY_JIRA_URL" => Some(self.jira_url.clone()),
+            "RAMIFY_JIRA_DONE" => Some(String::new()),
+            "RAMIFY_JIRA_PROGRESS" => Some("In Progress".into()),
+            "RAMIFY_JIRA_REVIEW" => Some(String::new()),
+            "RAMIFY_JIRA_SYNC" => Some("1".into()),
+            "RAMIFY_TICKET_PATTERN" => Some(self.ticket_pattern.clone()),
+            "RAMIFY_WORKFLOW_SOURCE" => Some(self.workflow_source.clone()),
+            "RAMIFY_WORKFLOW_DOCS" => Some(self.workflow_docs.clone()),
+            "RAMIFY_SESSION_NAMES" => Some(self.session_names.clone()),
+            "RAMIFY_MAX_SLOT" => Some(self.max_slot.to_string()),
+            _ => None,
+        }
     }
 
     /// A per-service setting, such as `web_port` or `web_health`.
@@ -73,6 +109,7 @@ impl Config {
         let get_or = |key: &str, default: &str| get(key).unwrap_or_else(|| default.to_string());
 
         let project = get("RAMIFY_PROJECT").unwrap_or_else(|| basename(&primary));
+        let worktrees = get_or("RAMIFY_WORKTREES", &format!("../{}-wt", basename(&primary)));
         let state_root = get("RAMIFY_STATE_DIR").unwrap_or_else(|| "/tmp/ramify".into());
         let mut state_dir = PathBuf::from(&state_root).join(&project);
         let twin = PathBuf::from(format!(
@@ -111,6 +148,12 @@ impl Config {
             branch_prefix: get_or("RAMIFY_BRANCH_PREFIX", ""),
             workflow_source: get_or("RAMIFY_WORKFLOW_SOURCE", "auto"),
             home,
+            config_path: file.clone(),
+            worktrees,
+            qa_plan: get_or("RAMIFY_QA_PLAN", ""),
+            ticket_pattern: get_or("RAMIFY_TICKET_PATTERN", "[A-Za-z][A-Za-z0-9]*-[0-9]+"),
+            workflow_docs: get_or("RAMIFY_WORKFLOW_DOCS", ""),
+            session_names: get_or("RAMIFY_SESSION_NAMES", "trees"),
             values,
         })
     }
