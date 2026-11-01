@@ -945,7 +945,7 @@ pub fn shared_down() -> i32 {
         if pidfile.is_file() {
             stop_pidfile(&pidfile, port.parse().ok());
         }
-        if let Some(port) = port.parse().ok() {
+        if let Ok(port) = port.parse() {
             kill_port(&config, port);
         }
         println!("shared {service} :{port} stopped — every worktree pointed at it now reaches nothing");
