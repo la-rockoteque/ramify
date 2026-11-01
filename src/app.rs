@@ -8,11 +8,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use serde_json::Value;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -55,8 +56,32 @@ struct Worker {
     history: PathBuf,
     stderr: PathBuf,
     offset: u64,
-    pending: String,
+    pending: Vec<u8>,
     saw_text: bool,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+struct Loader {
+    child: Child,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl Drop for Loader {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 pub struct App {
@@ -74,8 +99,12 @@ pub struct App {
     pub scroll_up: usize,
     pub history: Vec<Value>,
     pub quit: bool,
+    pub ramify_bin: Option<PathBuf>,
+    pub worker_binary: Option<PathBuf>,
     worker: Option<Worker>,
+    loader: Option<Loader>,
     task_seq: u64,
+    picker_from: usize,
 }
 
 impl App {
@@ -95,8 +124,12 @@ impl App {
             scroll_up: 0,
             history: Vec::new(),
             quit: false,
+            ramify_bin: None,
+            worker_binary: None,
             worker: None,
+            loader: None,
             task_seq: 0,
+            picker_from: 0,
         }
     }
 
@@ -107,36 +140,96 @@ impl App {
             root: self.root.clone(),
             args: vec!["dash-project".into(), "--json".into()],
         };
-        let result = runner.run(&spec);
-        match result {
-            Err(error) => {
-                self.screen = Screen::Error;
-                self.message = format!("could not run Ramify: {error}");
-                self.message_kind = MessageKind::Failure;
-            }
-            Ok(output) if !output.ok() => {
-                self.screen = Screen::Error;
-                self.message = format!("could not read Ramify state: {}", output.text());
-                self.message_kind = MessageKind::Failure;
-            }
-            Ok(output) => match parse_project(&output.stdout) {
-                Err(error) => {
-                    self.screen = Screen::Error;
-                    self.message = format!("could not read Ramify state: {error}");
-                    self.message_kind = MessageKind::Failure;
-                }
-                Ok(project) => {
-                    if project_for_root(std::slice::from_ref(&project), &self.root).is_none() {
-                        self.project = None;
-                        self.screen = Screen::Empty;
-                    } else {
-                        self.project = Some(project);
-                        self.screen = Screen::Main;
-                        self.clamp_selection();
-                    }
-                }
-            },
+        match runner.run(&spec) {
+            Err(error) => self.fail_load(format!("could not run Ramify: {error}")),
+            Ok(output) if !output.ok() => self.apply_dash_error(&output.text()),
+            Ok(output) => self.apply_dashboard(&output.stdout),
         }
+    }
+
+    /// The interface uses this: the command runs in a child, so Loading is drawn.
+    pub fn load_async(&mut self) {
+        self.screen = Screen::Loading;
+        let directory = match task_directory() {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.fail_load(error);
+                return;
+            }
+        };
+        let stdout = directory.join(format!("load-{}.json", self.task_seq));
+        let stderr = directory.join(format!("load-{}.log", self.task_seq));
+        self.task_seq += 1;
+        let out = match File::create(&stdout) {
+            Ok(file) => file,
+            Err(error) => {
+                self.fail_load(format!("could not open the load log: {error}"));
+                return;
+            }
+        };
+        let err = match File::create(&stderr) {
+            Ok(file) => file,
+            Err(error) => {
+                self.fail_load(format!("could not open the load log: {error}"));
+                return;
+            }
+        };
+        let child = std::process::Command::new(self.ramify_binary())
+            .args(["dash-project", "--json"])
+            .current_dir(&self.root)
+            .env("RAMIFY_ROOT", &self.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .spawn();
+        match child {
+            Ok(child) => {
+                self.loader = Some(Loader {
+                    child,
+                    stdout,
+                    stderr,
+                })
+            }
+            Err(error) => self.fail_load(format!("could not run Ramify: {error}")),
+        }
+    }
+
+    fn ramify_binary(&self) -> PathBuf {
+        self.ramify_bin
+            .clone()
+            .or_else(|| std::env::var_os("RAM_CODE_RAMIFY").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("ramify"))
+    }
+
+    fn apply_dashboard(&mut self, json: &str) {
+        match parse_project(json) {
+            Err(error) => self.fail_load(format!("could not read Ramify state: {error}")),
+            Ok(project) => {
+                if project_for_root(std::slice::from_ref(&project), &self.root).is_none() {
+                    self.project = None;
+                    self.screen = Screen::Empty;
+                } else {
+                    self.project = Some(project);
+                    self.screen = Screen::Main;
+                    self.clamp_selection();
+                }
+            }
+        }
+    }
+
+    fn apply_dash_error(&mut self, text: &str) {
+        if text.contains("ramify setup") || text.contains("not inside a git checkout") {
+            self.project = None;
+            self.screen = Screen::Empty;
+        } else {
+            self.fail_load(format!("could not read Ramify state: {text}"));
+        }
+    }
+
+    fn fail_load(&mut self, message: String) {
+        self.screen = Screen::Error;
+        self.message = message;
+        self.message_kind = MessageKind::Failure;
     }
 
     pub fn next(&mut self) {
@@ -261,20 +354,30 @@ impl App {
         self.running = true;
         self.input.clear();
 
-        let directory = std::env::temp_dir().join(format!("ram-code-{}", std::process::id()));
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            self.push(Role::Error, format!("could not create the task folder: {error}"));
-            self.running = false;
-            return;
-        }
+        let directory = match task_directory() {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.push(Role::Error, error);
+                self.running = false;
+                return;
+            }
+        };
         let history = directory.join("history.json");
         let events = directory.join(format!("events-{}.jsonl", self.task_seq));
         let stderr = directory.join(format!("stderr-{}.log", self.task_seq));
         self.task_seq += 1;
-        if let Ok(text) = serde_json::to_string(&self.history) {
-            let _ = std::fs::write(&history, text);
+        match OpenOptions::new().write(true).create_new(true).open(&history) {
+            Ok(mut file) => {
+                if let Ok(text) = serde_json::to_string(&self.history) {
+                    let _ = file.write_all(text.as_bytes());
+                }
+            }
+            Err(error) => {
+                self.push(Role::Error, format!("could not write the history: {error}"));
+                self.running = false;
+                return;
+            }
         }
-        let _ = std::fs::remove_file(&events);
         let stderr_file = match File::create(&stderr) {
             Ok(file) => file,
             Err(error) => {
@@ -283,13 +386,14 @@ impl App {
                 return;
             }
         };
-        let binary = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(error) => {
-                self.push(Role::Error, format!("could not find the ram-code binary: {error}"));
-                self.running = false;
-                return;
-            }
+        let binary = self
+            .worker_binary
+            .clone()
+            .or_else(|| std::env::current_exe().ok());
+        let Some(binary) = binary else {
+            self.push(Role::Error, "could not find the ram-code binary");
+            self.running = false;
+            return;
         };
         let child = std::process::Command::new(binary)
             .arg("--task")
@@ -312,7 +416,7 @@ impl App {
                     history,
                     stderr,
                     offset: 0,
-                    pending: String::new(),
+                    pending: Vec::new(),
                     saw_text: false,
                 });
             }
@@ -324,36 +428,17 @@ impl App {
     }
 
     pub fn poll_events(&mut self) {
-        let mut parsed: Vec<Value> = Vec::new();
-        let mut saw_finished = false;
-        let mut exit_status = None;
+        self.poll_loader();
 
-        if let Some(worker) = self.worker.as_mut() {
-            if let Ok(mut file) = File::open(&worker.events) {
-                if file.seek(SeekFrom::Start(worker.offset)).is_ok() {
-                    let mut bytes = Vec::new();
-                    if file.read_to_end(&mut bytes).is_ok() {
-                        worker.offset += bytes.len() as u64;
-                        worker.pending.push_str(&String::from_utf8_lossy(&bytes));
-                    }
-                }
-            }
-            while let Some(index) = worker.pending.find('\n') {
-                let line: String = worker.pending.drain(..=index).collect();
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<Value>(line) {
-                    if value.get("type").and_then(Value::as_str) == Some("finished") {
-                        saw_finished = true;
-                    }
-                    parsed.push(value);
-                }
-            }
-            if let Ok(Some(status)) = worker.child.try_wait() {
-                exit_status = Some(status);
-            }
+        let (mut parsed, mut saw_finished) = self.read_worker_events();
+        let exit_status = self
+            .worker
+            .as_mut()
+            .and_then(|worker| worker.child.try_wait().ok().flatten());
+        if exit_status.is_some() && !saw_finished {
+            let (more, finished) = self.read_worker_events();
+            parsed.extend(more);
+            saw_finished |= finished;
         }
 
         for value in parsed {
@@ -378,6 +463,57 @@ impl App {
                 self.push(Role::Error, text);
             }
         }
+    }
+
+    fn poll_loader(&mut self) {
+        let Some(loader) = self.loader.as_mut() else {
+            return;
+        };
+        let status = match loader.child.try_wait() {
+            Ok(Some(status)) => status,
+            _ => return,
+        };
+        let stdout = std::fs::read_to_string(&loader.stdout).unwrap_or_default();
+        let stderr = std::fs::read_to_string(&loader.stderr).unwrap_or_default();
+        self.loader = None;
+        if status.success() {
+            self.apply_dashboard(&stdout);
+        } else {
+            self.apply_dash_error(&stderr);
+        }
+    }
+
+    fn read_worker_events(&mut self) -> (Vec<Value>, bool) {
+        let mut parsed = Vec::new();
+        let mut finished = false;
+        let Some(worker) = self.worker.as_mut() else {
+            return (parsed, finished);
+        };
+        if let Ok(mut file) = File::open(&worker.events) {
+            if file.seek(SeekFrom::Start(worker.offset)).is_ok() {
+                let mut bytes = Vec::new();
+                if file.read_to_end(&mut bytes).is_ok() {
+                    worker.offset += bytes.len() as u64;
+                    worker.pending.extend_from_slice(&bytes);
+                }
+            }
+        }
+        while let Some(index) = worker.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = worker.pending.drain(..=index).collect();
+            let text = String::from_utf8_lossy(&line[..line.len().saturating_sub(1)])
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if value.get("type").and_then(Value::as_str) == Some("finished") {
+                    finished = true;
+                }
+                parsed.push(value);
+            }
+        }
+        (parsed, finished)
     }
 
     fn apply_worker_value(&mut self, value: Value) {
@@ -430,10 +566,14 @@ impl App {
             return;
         };
         let _ = worker.child.wait();
+        let directory = worker.history.parent().map(|path| path.to_path_buf());
         if let Ok(text) = std::fs::read_to_string(&worker.history) {
             if let Ok(history) = serde_json::from_str::<Vec<Value>>(&text) {
                 self.history = history;
             }
+        }
+        if let Some(directory) = directory {
+            let _ = std::fs::remove_dir_all(directory);
         }
         self.running = false;
     }
@@ -469,21 +609,24 @@ impl App {
         match self.screen {
             Screen::Main => self.key_chat(key),
             Screen::Picker => self.key_picker(key),
-            Screen::Message => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
-                    self.back();
-                }
-            }
-            Screen::Empty | Screen::Error => match key.code {
-                KeyCode::Char('r') => self.load(),
+            Screen::Message => match key.code {
+                KeyCode::Enter | KeyCode::Esc => self.back(),
                 KeyCode::Char('q') => self.quit = true,
                 _ => {}
             },
-            Screen::Detail => {
-                if key.code == KeyCode::Esc {
-                    self.back();
-                }
-            }
+            Screen::Empty | Screen::Error => match key.code {
+                KeyCode::Char('r') => self.load_async(),
+                KeyCode::Char('q') => self.quit = true,
+                _ => {}
+            },
+            Screen::Detail => match key.code {
+                KeyCode::Esc => self.back(),
+                KeyCode::Char('q') => self.quit = true,
+                KeyCode::Char('u') => self.invoke(Action::Up),
+                KeyCode::Char('d') => self.invoke(Action::Down),
+                KeyCode::Char('s') => self.invoke(Action::Step),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -494,10 +637,17 @@ impl App {
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Tab if !self.running => self.screen = Screen::Picker,
+            KeyCode::Tab if !self.running => {
+                self.picker_from = self.selected;
+                self.screen = Screen::Picker;
+            }
             KeyCode::Up => self.scroll_up = self.scroll_up.saturating_add(1),
             KeyCode::Down => self.scroll_up = self.scroll_up.saturating_sub(1),
-            KeyCode::Char('i') if self.input.is_empty() => self.open_selected(),
+            KeyCode::Char('o')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.input.is_empty() =>
+            {
+                self.open_selected()
+            }
             KeyCode::Char(character) if !self.running => self.input.push(character),
             _ => {}
         }
@@ -505,7 +655,11 @@ impl App {
 
     fn key_picker(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Tab => self.screen = Screen::Main,
+            KeyCode::Esc | KeyCode::Tab => {
+                self.selected = self.picker_from;
+                self.clamp_selection();
+                self.screen = Screen::Main;
+            }
             KeyCode::Char('j') | KeyCode::Down => self.next(),
             KeyCode::Char('k') | KeyCode::Up => self.previous(),
             KeyCode::Enter => {
@@ -562,7 +716,7 @@ impl App {
                     self.run_action_inline(Action::CreateWorktree(rest.to_string()));
                 }
             }
-            "/refresh" => self.load(),
+            "/refresh" => self.load_async(),
             "/worktrees" => self.screen = Screen::Picker,
             "/clear" => {
                 self.entries.clear();
@@ -583,7 +737,7 @@ impl App {
             Ok(output) if output.ok() => {
                 let text = output.text();
                 self.push(Role::Info, if text.is_empty() { "done".into() } else { text });
-                self.load();
+                self.load_async();
             }
             Ok(output) => {
                 let text = output.text();
@@ -689,7 +843,7 @@ impl App {
         let hint = if self.running {
             " working… · ↑/↓ scroll · ^C quit "
         } else {
-            " enter send · tab worktrees · i inspect · /help · ^C quit "
+            " enter send · tab worktrees · ^O inspect · /help · ^C quit "
         };
         let block = Block::bordered()
             .border_style(Style::default().fg(accent()))
@@ -919,6 +1073,27 @@ impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         App::render(self, area, buf);
     }
+}
+
+fn task_directory() -> Result<PathBuf, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "ram-code-{}-{nanos}",
+        std::process::id()
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&path)
+        .map_err(|error| format!("could not create the task folder: {error}"))?;
+    Ok(path)
 }
 
 fn accent() -> Color {

@@ -55,7 +55,6 @@ pub enum AgentEvent {
     ToolCall { name: String, input: String },
     ToolResult(String),
     Error(String),
-    Done(String),
 }
 
 pub trait Llm: Send + Sync {

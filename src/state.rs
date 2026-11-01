@@ -80,7 +80,15 @@ struct RawService {
 }
 
 #[derive(Deserialize)]
-struct RawWorkflow {
+#[serde(untagged)]
+enum RawWorkflow {
+    Ok(RawWorkflowOk),
+    #[allow(dead_code)]
+    Broken(serde_json::Value),
+}
+
+#[derive(Deserialize)]
+struct RawWorkflowOk {
     workflow: String,
     #[serde(default)]
     lane: Option<String>,
@@ -95,12 +103,6 @@ struct RawStep {
     skill: Option<String>,
     #[serde(default)]
     gate: Option<String>,
-}
-
-pub fn parse_dash(json: &str) -> Result<Vec<Project>, String> {
-    let raw: Vec<RawProject> =
-        serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
-    Ok(raw.into_iter().map(convert).collect())
 }
 
 pub fn parse_project(json: &str) -> Result<Project, String> {
@@ -131,14 +133,17 @@ fn convert(project: RawProject) -> Project {
                             up: s.up || s.state.as_deref() == Some("ready"),
                         })
                         .collect(),
-                    workflow: wt.workflow.map(|w| Workflow {
-                        name: w.workflow,
-                        lane: w.lane.unwrap_or_default(),
-                        next: w.next.map(|s| Step {
-                            step: s.step,
-                            skill: s.skill.unwrap_or_default(),
-                            gate: s.gate,
+                    workflow: wt.workflow.and_then(|workflow| match workflow {
+                        RawWorkflow::Ok(w) => Some(Workflow {
+                            name: w.workflow,
+                            lane: w.lane.unwrap_or_default(),
+                            next: w.next.map(|s| Step {
+                                step: s.step,
+                                skill: s.skill.unwrap_or_default(),
+                                gate: s.gate,
+                            }),
                         }),
+                        RawWorkflow::Broken(_) => None,
                     }),
                 })
             .collect(),

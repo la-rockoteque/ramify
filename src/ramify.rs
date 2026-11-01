@@ -53,14 +53,7 @@ impl Action {
             Action::Up => vec!["up".into()],
             Action::Down => vec!["down".into()],
             Action::Workflow => vec!["workflow".into()],
-            Action::CreateWorktree(slug) => {
-                vec![
-                    "new".into(),
-                    slug.clone(),
-                    "--workflow".into(),
-                    "feature".into(),
-                ]
-            }
+            Action::CreateWorktree(slug) => vec!["new".into(), slug.clone()],
         }
     }
 }

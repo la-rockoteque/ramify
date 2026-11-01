@@ -107,6 +107,9 @@ impl Tools {
                     .arg("-c")
                     .arg(command)
                     .current_dir(&self.root)
+                    .env_remove("ANTHROPIC_AUTH_TOKEN")
+                    .env_remove("ANTHROPIC_BASE_URL")
+                    .env_remove("RAM_CODE_MODEL")
                     .output()
                     .map_err(|e| format!("could not run command: {e}"))?;
                 let mut text = String::new();
@@ -130,7 +133,32 @@ impl Tools {
         {
             return Err("path must stay inside the worktree".into());
         }
-        Ok(self.root.join(path))
+        let root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
+        let joined = self.root.join(path);
+        let mut probe = joined.clone();
+        let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if let Ok(canonical) = probe.canonicalize() {
+                let mut full = canonical;
+                for part in suffix.iter().rev() {
+                    full.push(part);
+                }
+                if full.starts_with(&root) {
+                    return Ok(joined);
+                }
+                return Err("path must stay inside the worktree".into());
+            }
+            match (probe.parent(), probe.file_name()) {
+                (Some(parent), Some(name)) => {
+                    suffix.push(name.to_os_string());
+                    probe = parent.to_path_buf();
+                }
+                _ => return Err("path must stay inside the worktree".into()),
+            }
+        }
     }
 }
 
@@ -142,9 +170,59 @@ fn required<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a str, Stri
 }
 
 fn truncate(mut text: String, limit: usize) -> String {
-    if text.len() > limit {
-        text.truncate(limit);
-        text.push_str("\n[truncated]");
+    if text.len() <= limit {
+        return text;
     }
+    let mut cut = limit;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    text.push_str("\n[truncated]");
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ram-code-tools-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn truncate_keeps_a_char_boundary() {
+        let text = "é".repeat(10);
+        let cut = truncate(text.clone(), 3);
+        assert!(cut.starts_with("é"));
+        assert!(cut.ends_with("[truncated]"));
+        assert_eq!(cut.trim_end_matches("\n[truncated]"), "é");
+    }
+
+    #[test]
+    fn a_symlink_outside_the_root_is_rejected() {
+        let outside = temp("outside");
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        let root = temp("root");
+        symlink(&outside, root.join("link")).unwrap();
+
+        let tools = Tools::new(&root);
+        assert!(tools.resolve("link/secret.txt").is_err());
+        assert!(tools.call("read_file", &json!({"path": "link/secret.txt"})).is_err());
+    }
+
+    #[test]
+    fn a_parent_path_is_rejected() {
+        let root = temp("parent");
+        let tools = Tools::new(&root);
+        assert!(tools.resolve("../x").is_err());
+        assert!(tools.resolve("/etc/passwd").is_err());
+    }
 }

@@ -16,10 +16,6 @@ fn main() -> std::io::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    if args.iter().any(|arg| arg == "--events") {
-        eprintln!("child start pid {}", std::process::id());
-    }
-
     if let Some(position) = args.iter().position(|arg| arg == "--task") {
         let task = args
             .get(position + 1)
@@ -67,7 +63,6 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
             }
         }
         AgentEvent::Error(error) => eprintln!("error: {error}"),
-        AgentEvent::Done(_) => {}
     });
     match result {
         Ok(answer) => {
@@ -108,12 +103,9 @@ fn run_worker(root: &Path, task: &str, events: &Path, history: &Path) -> std::io
             }
             AgentEvent::ToolResult(text) => json!({"type": "tool_result", "text": text}),
             AgentEvent::Error(text) => json!({"type": "error", "text": text}),
-            AgentEvent::Done(_) => Value::Null,
         };
-        if !value.is_null() {
-            let _ = writeln!(out, "{value}");
-            let _ = out.flush();
-        }
+        let _ = writeln!(out, "{value}");
+        let _ = out.flush();
     });
     match result {
         Ok((answer, new_history)) => {
@@ -140,14 +132,19 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
             break;
         }
         if app.screen == Screen::Splash && splash_from.elapsed() >= Duration::from_millis(1500) {
-            app.load();
+            app.load_async();
             splash_from = std::time::Instant::now();
+        }
+        if app.screen == Screen::Loading {
+            // Keep typed keys in the terminal buffer until the loader finishes.
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
         }
         if event::poll(Duration::from_millis(120))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if app.screen == Screen::Splash {
-                        app.load();
+                        app.load_async();
                         splash_from = std::time::Instant::now();
                     } else {
                         app.on_key(key);
