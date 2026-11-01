@@ -337,3 +337,50 @@ fn runs_match_the_shell() {
         );
     }
 }
+
+#[test]
+fn card_matches_the_shell() {
+    let fixture = temp("card");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=3000\nweb_health=/health\nweb_cmd='true'\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let name = fixture.file_name().unwrap().to_string_lossy().into_owned();
+    let state = temp("card-state");
+    fs::create_dir_all(state.join(&name)).unwrap();
+    fs::write(
+        state.join(&name).join(format!("{name}.env")),
+        "SLOT=2\nWEB_PORT=3000\nWEB_SHARED=0\n",
+    )
+    .unwrap();
+    let registry = temp("card-registry").join("projects");
+    let repo = repo_root();
+
+    let shell = run_args(
+        &repo.join("bin/ramify"),
+        &["card"],
+        &fixture,
+        &state,
+        &registry,
+        true,
+    );
+    let rust = run_args(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &["card"],
+        &fixture,
+        &state,
+        &registry,
+        false,
+    );
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        String::from_utf8_lossy(&rust.stdout),
+        "stdout differs"
+    );
+}

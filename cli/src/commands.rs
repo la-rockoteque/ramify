@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::dash::{health_ok, listening};
+use crate::dash::{env_get, health_ok, listening};
 use std::path::Path;
 use std::process::Command;
 
@@ -319,4 +319,175 @@ fn run_str(run: &serde_json::Value, key: &str) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+const BOX_WIDTH: usize = 64;
+
+pub fn card() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = check_services(&config) {
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    let worktree = &config.worktree;
+    let env = config.state_dir.join(format!("{worktree}.env"));
+    if !env.is_file() {
+        println!("no stack for {worktree} — run 'ramify up'");
+        return 1;
+    }
+    let branch = branch_of(&config.repo_root);
+    let mut shown_branch = branch.clone();
+    if !crate::config::git(&["status", "--porcelain"], &config.repo_root)
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        shown_branch.push_str(" *");
+    }
+    box_line('┌', '┐');
+    row2(worktree, &format!("slot {}", env_get(&env, "SLOT").unwrap_or_default()));
+    row2(
+        &shown_branch,
+        &format!("up {}", crate::dash::uptime_of(&env).unwrap_or_else(|| "—".into())),
+    );
+    if let Some(text) = workflow_line(&config, &branch) {
+        row(&text);
+    }
+    for text in run_lines(&config.repo_root) {
+        row(&text);
+    }
+    box_line('├', '┤');
+    let processes = crate::dash::processes();
+    for service in &config.services {
+        let upper = service.to_uppercase();
+        let Some(port) = env_get(&env, &format!("{upper}_PORT")) else {
+            continue;
+        };
+        let Some(parsed) = port.parse().ok() else {
+            continue;
+        };
+        let shared = config.service(service, "shared_port").is_some();
+        let kind = if shared {
+            if env_get(&env, &format!("{upper}_SHARED")).as_deref() == Some("1") {
+                format!("{service} shared")
+            } else {
+                format!("{service} private")
+            }
+        } else {
+            service.clone()
+        };
+        let memory = if kind == format!("{service} shared") {
+            String::new()
+        } else {
+            crate::dash::service_mb(
+                &config.state_dir.join(format!("{worktree}.{service}.pid")),
+                &processes,
+            )
+            .map(|mb| format!(" {mb} MB"))
+            .unwrap_or_default()
+        };
+        let left = format!(
+            "{kind:<12} {:<22}{memory}",
+            format!("http://localhost:{port}")
+        );
+        row2(&left, crate::dash::probe(&config, service, parsed));
+        if let Some(spec) = config.service(service, "smoke") {
+            if let Some(failure) = smoke(&config, &spec, parsed) {
+                row(&format!("  smoke {}", failure));
+            }
+        }
+    }
+    box_line('└', '┘');
+    0
+}
+
+fn box_line(left: char, right: char) {
+    println!("{left}{}{right}", "─".repeat(BOX_WIDTH + 2));
+}
+
+fn row(text: &str) {
+    let padding = BOX_WIDTH.saturating_sub(text.chars().count());
+    println!("│ {text}{} │", " ".repeat(padding));
+}
+
+fn row2(left: &str, right: &str) {
+    let width = BOX_WIDTH
+        .saturating_sub(left.chars().count())
+        .saturating_sub(right.chars().count())
+        .saturating_sub(1);
+    println!("│ {left}{} {right} │", " ".repeat(width));
+}
+
+fn workflow_line(config: &Config, branch: &str) -> Option<String> {
+    let progress = crate::workflow::report(config, &config.repo_root, branch)?;
+    let where_ = match &progress.next {
+        Some(_) if progress.asked.is_some() => {
+            format!("⏳ {} waits on you", progress.asked.clone().unwrap())
+        }
+        Some(step) => format!(
+            "→ {}{}",
+            step.step,
+            if step.gate == "human" {
+                " (human)"
+            } else {
+                ""
+            }
+        ),
+        None => "✓ done".into(),
+    };
+    Some(format!(
+        "{}/{} {}/{} {}",
+        progress.workflow, progress.lane, progress.done, progress.total, where_
+    ))
+}
+
+fn run_lines(root: &Path) -> Vec<String> {
+    let directory = std::env::var("RAMIFY_RUNS_DIR").unwrap_or_else(|_| {
+        let base = std::env::var("CLAUDE_CONFIG_DIR")
+            .unwrap_or_else(|_| format!("{}/.claude", std::env::var("HOME").unwrap_or_default()));
+        format!("{base}/ramify/runs")
+    });
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+        .iter()
+        .filter_map(|name| {
+            let text =
+                std::fs::read_to_string(Path::new(&directory).join(name).join("meta.json")).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+            if meta.get("status").and_then(|value| value.as_str()) != Some("pending") {
+                return None;
+            }
+            if run_str(&meta, "root") != root.to_string_lossy() {
+                return None;
+            }
+            Some(format!("▶ run {} waits on you", run_str(&meta, "id")))
+        })
+        .collect()
+}
+
+fn smoke(_config: &Config, spec: &str, port: u32) -> Option<String> {
+    let (path, codes) = spec.split_once(' ').unwrap_or((spec, ""));
+    let code = crate::dash::http_status_path(port, path)?;
+    let matches = regex::Regex::new(&format!("^({codes})$"))
+        .map(|regex| regex.is_match(&code.to_string()))
+        .unwrap_or(false);
+    if matches {
+        None
+    } else {
+        Some(format!("{path} returned {code}"))
+    }
 }

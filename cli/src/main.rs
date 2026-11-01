@@ -16,6 +16,9 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "card" {
+        std::process::exit(commands::card());
+    }
     if command == "runs" {
         std::process::exit(commands::runs(&args[1..]));
     }

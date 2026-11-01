@@ -419,13 +419,13 @@ fn orphans(config: &Config) -> Vec<Orphan> {
     orphans
 }
 
-struct Process {
-    rss: u64,
-    pgid: u64,
-    command: String,
+pub(crate) struct Process {
+    pub(crate) rss: u64,
+    pub(crate) pgid: u64,
+    pub(crate) command: String,
 }
 
-fn processes() -> Vec<Process> {
+pub(crate) fn processes() -> Vec<Process> {
     let Ok(output) = Command::new("ps")
         .args(["-axww", "-o", "rss=,pgid=,command="])
         .output()
@@ -472,7 +472,7 @@ fn is_build_server(command: &str) -> bool {
         || (command.contains("rzc.dll") && command.contains(" server"))
 }
 
-fn service_mb(pidfile: &Path, processes: &[Process]) -> Option<u64> {
+pub(crate) fn service_mb(pidfile: &Path, processes: &[Process]) -> Option<u64> {
     let group: u64 = std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()?;
     let mut total = 0u64;
     let mut count = 0u64;
@@ -522,7 +522,7 @@ pub(crate) fn health_ok(config: &Config, service: &str, port: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn probe(config: &Config, service: &str, port: u32) -> &'static str {
+pub(crate) fn probe(config: &Config, service: &str, port: u32) -> &'static str {
     if !listening(port) {
         return "down";
     }
@@ -558,22 +558,26 @@ pub(crate) fn listening(port: u32) -> bool {
 }
 
 fn http_status(config: &Config, service: &str, port: u32) -> Option<u16> {
+    http_status_path(port, &health_path(config, service))
+}
+
+/// The HTTP status code for a path on a local port, trying IPv4 then IPv6.
+pub(crate) fn http_status_path(port: u32, path: &str) -> Option<u16> {
     for host in ["127.0.0.1", "::1"] {
-        if let Some(status) = http_status_on(host, config, service, port) {
+        if let Some(status) = http_code(host, port, path) {
             return Some(status);
         }
     }
     None
 }
 
-fn http_status_on(host: &str, config: &Config, service: &str, port: u32) -> Option<u16> {
+fn http_code(host: &str, port: u32, path: &str) -> Option<u16> {
     let address = (host, port as u16).to_socket_addrs().ok()?.next()?;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     stream
         .set_write_timeout(Some(Duration::from_secs(3)))
         .ok()?;
-    let path = health_path(config, service);
     let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).ok()?;
     let mut buffer = [0u8; 512];
@@ -625,7 +629,7 @@ fn ticket_of(branch: &str, config: &Config) -> Option<String> {
         .map(|found| found.as_str().to_uppercase())
 }
 
-fn uptime_of(path: &Path) -> Option<String> {
+pub(crate) fn uptime_of(path: &Path) -> Option<String> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let elapsed = std::time::SystemTime::now()
         .duration_since(modified)
