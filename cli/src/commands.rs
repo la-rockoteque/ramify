@@ -2404,7 +2404,9 @@ pub fn prune(args: &[String]) -> i32 {
     };
     let apply = args.iter().any(|arg| arg == "--apply");
     prune_project(&config, apply);
-    docker_prune(apply);
+    if std::env::var_os("RAMIFY_NO_DOCKER").is_none() {
+        docker_prune(apply);
+    }
     0
 }
 
@@ -2418,7 +2420,9 @@ fn prune_all(args: &[String]) -> i32 {
         prune_project(&config, apply);
         println!();
     }
-    docker_prune(apply);
+    if std::env::var_os("RAMIFY_NO_DOCKER").is_none() {
+        docker_prune(apply);
+    }
     if !apply {
         println!("dry run — 'ramify prune --all --apply' does it");
     }

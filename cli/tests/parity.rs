@@ -1085,7 +1085,8 @@ fn prune_and_delete_match_the_shell() {
             .env("RAMIFY_ROOT", fixture)
             .env("RAMIFY_STATE_DIR", state)
             .env("RAMIFY_REGISTRY", registry)
-            .env("RAMIFY_HOME", &repo);
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_NO_DOCKER", "1");
         if shell_mode {
             command.env("RAMIFY_SHELL", "1");
         } else {
@@ -1180,8 +1181,8 @@ fn complete_matches_the_shell() {
         let registry = temp(&format!("{name}-registry")).join("projects");
         (fixture, worktrees, state, registry)
     };
-    let (shell_fixture, shell_wt, shell_state, shell_registry) = make("complete-shell");
-    let (rust_fixture, rust_wt, rust_state, rust_registry) = make("complete-rust");
+    let (shell_fixture, _shell_wt, shell_state, shell_registry) = make("complete-shell");
+    let (rust_fixture, _rust_wt, rust_state, rust_registry) = make("complete-rust");
     let repo = repo_root();
     let run = |binary: &Path, fixture: &Path, state: &Path, registry: &Path, shell_mode: bool| {
         let mut command = Command::new(binary);
