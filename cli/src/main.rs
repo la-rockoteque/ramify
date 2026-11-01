@@ -16,6 +16,12 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "label" {
+        std::process::exit(commands::label(&args[1..]));
+    }
+    if command == "lane" {
+        std::process::exit(commands::lane(&args[1..]));
+    }
     if command == "gates" {
         std::process::exit(commands::gates(&args[1..]));
     }

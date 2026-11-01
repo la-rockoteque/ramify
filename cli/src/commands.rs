@@ -826,3 +826,41 @@ fn worktree_of(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
+
+
+pub fn label(args: &[String]) -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    let slug = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config.worktree.clone());
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(slug.as_bytes());
+    let digest = hasher.finalize();
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let index = u32::from_str_radix(&hash[..8], 16).unwrap_or(0) % 8;
+    let colors = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+    println!("/rename {slug}");
+    println!("/color {}", colors[index as usize]);
+    0
+}
+
+pub fn lane(args: &[String]) -> i32 {
+    match crate::workflow::lane_text(args) {
+        Ok(text) => {
+            println!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            1
+        }
+    }
+}

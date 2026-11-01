@@ -442,3 +442,89 @@ fn gates_match_the_shell() {
         );
     }
 }
+
+#[test]
+fn label_matches_the_shell() {
+    let fixture = temp("label");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("label-state");
+    let registry = temp("label-registry").join("projects");
+    let repo = repo_root();
+
+    for args in [vec!["label"], vec!["label", "my-slug"]] {
+        let shell = run_args(&repo.join("bin/ramify"), &args, &fixture, &state, &registry, true);
+        let rust = run_args(
+            Path::new(env!("CARGO_BIN_EXE_ramify")),
+            &args,
+            &fixture,
+            &state,
+            &registry,
+            false,
+        );
+        assert_eq!(shell.status.code(), rust.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{args:?} differs"
+        );
+    }
+}
+
+#[test]
+fn lane_matches_the_shell() {
+    let make = |name: &str| {
+        let fixture = temp(name);
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+        fs::create_dir_all(fixture.join(".ramify/work/demo")).unwrap();
+        fs::write(
+            fixture.join(".ramify/work/demo/order.md"),
+            "---\nworkflow: feature\nlane: light\nbranch: main\ntags: []\ncreated: 2026-11-01\nsteps:\n- {step: spec, date: '2026-11-01'}\n---\n\n# demo\n",
+        )
+        .unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        fixture.canonicalize().unwrap()
+    };
+    let shell_fixture = make("lane-shell");
+    let rust_fixture = make("lane-rust");
+    let repo = repo_root();
+    let shell_state = temp("lane-shell-state");
+    let rust_state = temp("lane-rust-state");
+    let shell_registry = temp("lane-shell-registry").join("projects");
+    let rust_registry = temp("lane-rust-registry").join("projects");
+
+    for args in [vec!["lane", "standard"], vec!["lane", "light"], vec!["step"]] {
+        let shell = run_args(
+            &repo.join("bin/ramify"),
+            &args,
+            &shell_fixture,
+            &shell_state,
+            &shell_registry,
+            true,
+        );
+        let rust = run_args(
+            Path::new(env!("CARGO_BIN_EXE_ramify")),
+            &args,
+            &rust_fixture,
+            &rust_state,
+            &rust_registry,
+            false,
+        );
+        assert_eq!(shell.status.code(), rust.status.code(), "{args:?} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{args:?} stdout differs"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{args:?} stderr differs"
+        );
+    }
+}

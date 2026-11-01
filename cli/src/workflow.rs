@@ -431,8 +431,9 @@ pub fn order_text(cfg: &Config) -> Result<String, String> {
             let does = definition
                 .and_then(|def| def.does.clone())
                 .unwrap_or_default();
+            let folder = path.parent().unwrap_or(&cfg.repo_root);
             let gate = if definition.and_then(|def| def.gate.as_deref()) == Some("human") {
-                gate_note(definition, &meta, step, &cfg.repo_root)
+                gate_note(definition, &meta, step, folder, &cfg.repo_root)
             } else {
                 String::new()
             };
@@ -451,6 +452,7 @@ fn gate_note(
     definition: Option<&StepDef>,
     meta: &OrderMeta,
     step: &str,
+    folder: &Path,
     root: &Path,
 ) -> String {
     if meta
@@ -462,20 +464,24 @@ fn gate_note(
             "  (human gate: asked, waits on `ramify approve {step}` or the approvals window)"
         );
     }
-    let missing: Vec<&String> = definition
-        .and_then(|def| def.files.as_ref())
-        .map(|files| {
-            files
-                .iter()
-                .filter(|file| !root.join(file).is_file())
-                .collect()
+    let names = definition
+        .and_then(|def| def.files.clone())
+        .unwrap_or_else(|| vec![format!("{step}.md")]);
+    let missing: Vec<String> = names
+        .iter()
+        .filter(|file| !folder.join(file).is_file())
+        .map(|file| {
+            folder
+                .join(file)
+                .strip_prefix(root)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| file.clone())
         })
-        .unwrap_or_default();
+        .collect();
     if !missing.is_empty() {
-        let names: Vec<&str> = missing.iter().map(|file| file.as_str()).collect();
         return format!(
             "  (human gate: write {}, then Ramify asks)",
-            names.join(", ")
+            missing.join(", ")
         );
     }
     "  (human gate: record it only after the user's explicit OK)".into()
@@ -544,6 +550,92 @@ pub fn asked_json(cfg: &Config) -> Result<String, String> {
         "files": files,
     });
     Ok(crate::pyjson::to_string(&value))
+}
+
+pub fn lane_text(args: &[String]) -> Result<String, String> {
+    let Some(lane) = args.first() else {
+        return Err("usage: ramify lane <lane>".into());
+    };
+    let config = Config::resolve()?;
+    let definitions = definitions(&config).ok_or("no workflows are defined")?;
+    let work_dir = definitions
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| ".ramify/work".into());
+    let branch = std::env::var("WF_BRANCH")
+        .ok()
+        .or_else(|| crate::config::git(&["rev-parse", "--abbrev-ref", "HEAD"], &config.repo_root).ok())
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    let (path, meta) = find_order(&config.repo_root, &work_dir, &branch, &definitions)
+        .ok_or_else(|| format!("no work order for branch {branch}"))?;
+    let workflow = definitions
+        .workflows
+        .get(&meta.workflow)
+        .ok_or_else(|| format!("no workflow '{}'", meta.workflow))?;
+    if !workflow.lanes.contains_key(lane) {
+        let names: Vec<&str> = workflow.lanes.keys().map(String::as_str).collect();
+        return Err(format!(
+            "no lane '{lane}' in {} — one of: {}",
+            meta.workflow,
+            names.join(", ")
+        ));
+    }
+    let order: Vec<&String> = workflow.lanes.keys().collect();
+    let current = order
+        .iter()
+        .position(|name| *name == &meta.lane)
+        .unwrap_or(0);
+    let wanted = order
+        .iter()
+        .position(|name| *name == lane)
+        .unwrap_or(0);
+    if wanted < current {
+        return Err(format!(
+            "{lane} is lighter than {}: a lane is raised, never lowered",
+            meta.lane
+        ));
+    }
+    if lane == &meta.lane {
+        return Ok(format!("  already on the {lane} lane"));
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let updated = written_lane(&text, lane)
+        .ok_or_else(|| format!("{} has no lane line", path.display()))?;
+    std::fs::write(&path, updated)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    let lane_steps = workflow.lanes.get(lane).cloned().unwrap_or_default();
+    let recorded: Vec<&str> = meta.steps.iter().map(|entry| entry.step.as_str()).collect();
+    let next = lane_steps
+        .iter()
+        .find(|step| !recorded.contains(&step.as_str()))
+        .cloned()
+        .unwrap_or_else(|| "nothing".into());
+    Ok(format!("  lane raised to {lane} — next: {next}"))
+}
+
+fn written_lane(text: &str, lane: &str) -> Option<String> {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut fences = 0;
+    let mut replaced = false;
+    for line in &mut lines {
+        if line.trim() == "---" {
+            fences += 1;
+            if fences == 2 {
+                break;
+            }
+            continue;
+        }
+        if fences == 1 && line.starts_with("lane:") && !replaced {
+            *line = format!("lane: {lane}");
+            replaced = true;
+        }
+    }
+    if !replaced {
+        return None;
+    }
+    Some(format!("{}\n", lines.join("\n")))
 }
 
 pub fn workflow_text(args: &[String]) -> Result<String, String> {
