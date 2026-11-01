@@ -21,6 +21,7 @@ pub struct Config {
     pub branch_prefix: String,
     pub workflow_source: String,
     pub home: PathBuf,
+    pub values: HashMap<String, String>,
 }
 
 impl Config {
@@ -30,6 +31,16 @@ impl Config {
             None => detect_repo_root()?,
         };
         Self::for_root(&repo_root)
+    }
+
+    /// A per-service setting, such as `web_port` or `web_health`.
+    pub fn service(&self, service: &str, key: &str) -> Option<String> {
+        let name = format!("{service}_{key}");
+        self.values
+            .get(&name)
+            .cloned()
+            .or_else(|| std::env::var(&name).ok())
+            .filter(|value| !value.is_empty())
     }
 
     pub fn for_root(root: &Path) -> Result<Self, String> {
@@ -69,7 +80,13 @@ impl Config {
             state_dir.display(),
             short_hash(&primary)
         ));
-        if twin.join("primary").is_file() {
+        let claim = std::fs::read_to_string(state_dir.join("primary"))
+            .ok()
+            .map(|text| text.trim().to_string());
+        let claimed_elsewhere = claim
+            .as_deref()
+            .is_some_and(|claim| claim != primary.to_string_lossy() && Path::new(claim).is_dir());
+        if twin.join("primary").is_file() || claimed_elsewhere {
             state_dir = twin;
         }
         let slots = state_dir.join("slots");
@@ -77,6 +94,7 @@ impl Config {
             Some(home) => PathBuf::from(home),
             None => detect_home()?,
         };
+        let values = values.clone();
         Ok(Self {
             repo_root,
             primary,
@@ -93,6 +111,7 @@ impl Config {
             branch_prefix: get_or("RAMIFY_BRANCH_PREFIX", ""),
             workflow_source: get_or("RAMIFY_WORKFLOW_SOURCE", "auto"),
             home,
+            values,
         })
     }
 }

@@ -87,3 +87,38 @@ fn a_missing_config_matches_the_shell() {
         "stderr differs"
     );
 }
+
+#[test]
+fn dash_project_with_services_matches_the_shell() {
+    let fixture = temp("services");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=3000\nweb_health=/health\nweb_cmd='true'\nweb_shared_port=3100\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+
+    let name = fixture.file_name().unwrap().to_string_lossy().into_owned();
+    let state = temp("services-state");
+    fs::create_dir_all(state.join(&name)).unwrap();
+    fs::write(
+        state.join(&name).join(format!("{name}.env")),
+        "SLOT=2\nWEB_PORT=3000\nWEB_SHARED=0\n",
+    )
+    .unwrap();
+    let registry = temp("services-registry").join("projects");
+    let repo = repo_root();
+
+    let shell = run(&repo.join("bin/ramify"), &fixture, &state, &registry, true);
+    let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &fixture, &state, &registry, false);
+
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        String::from_utf8_lossy(&rust.stdout),
+        "stdout differs"
+    );
+}
