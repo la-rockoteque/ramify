@@ -694,6 +694,31 @@ fn mem_project(
     rows
 }
 
+pub fn reap() -> i32 {
+    let footprints = HashMap::new();
+    for config in service_projects() {
+        let rows = mem_project(&config, false, "reap", &footprints);
+        for row in rows {
+            if row.verdict != "orphan" {
+                continue;
+            }
+            let now = Command::new("date")
+                .arg("+%F %T")
+                .output()
+                .ok()
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .unwrap_or_default();
+            println!(
+                "{now}  {}/{}  {} — its worktree no longer exists",
+                row.project,
+                row.worktree,
+                if row.note.is_empty() { "stopped" } else { &row.note }
+            );
+        }
+    }
+    0
+}
+
 fn remove_worktree_state(config: &Config, worktree: &str) {
     if let Ok(entries) = std::fs::read_dir(&config.state_dir) {
         for entry in entries.flatten() {

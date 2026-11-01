@@ -795,3 +795,76 @@ fn stacks_section(text: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[test]
+fn reap_matches_the_shell() {
+    use std::os::unix::process::CommandExt;
+    let fixture = temp("reap");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=47400\nweb_health=/\nweb_cmd='true'\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let name = fixture.file_name().unwrap().to_string_lossy().into_owned();
+    let registry = temp("reap-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, format!("{}\n", fixture.display())).unwrap();
+    let repo = repo_root();
+
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .expect("sleep");
+    let pid = child.id();
+    let make_state = |suffix: &str| {
+        let state = temp(suffix);
+        let directory = state.join(&name);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("gone.env"),
+            "SLOT=1\nWEB_PORT=47401\nWEB_SHARED=0\n",
+        )
+        .unwrap();
+        fs::write(directory.join("gone.web.pid"), format!("{pid}\n")).unwrap();
+        state
+    };
+    let shell_state = make_state("reap-shell-state");
+    let rust_state = make_state("reap-rust-state");
+
+    let shell = Command::new(repo.join("bin/ramify"))
+        .args(["reap"])
+        .env("RAMIFY_SHELL", "1")
+        .env("RAMIFY_STATE_DIR", &shell_state)
+        .env("RAMIFY_REGISTRY", &registry)
+        .env("RAMIFY_HOME", &repo)
+        .output()
+        .unwrap();
+    let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+        .args(["reap"])
+        .env_remove("RAMIFY_SHELL")
+        .env("RAMIFY_STATE_DIR", &rust_state)
+        .env("RAMIFY_REGISTRY", &registry)
+        .env("RAMIFY_HOME", &repo)
+        .output()
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(shell.status.code(), rust.status.code());
+    let strip = |text: &str| {
+        text.lines()
+            .map(|line| line.chars().skip(19).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        strip(&String::from_utf8_lossy(&shell.stdout)),
+        strip(&String::from_utf8_lossy(&rust.stdout)),
+        "stdout differs"
+    );
+}

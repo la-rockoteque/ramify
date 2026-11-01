@@ -17,6 +17,9 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "reap" {
+        std::process::exit(mem::reap());
+    }
     if command == "mem" {
         std::process::exit(mem::mem(&args[1..]));
     }
