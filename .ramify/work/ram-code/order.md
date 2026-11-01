@@ -10,6 +10,8 @@ steps:
 - {step: build, date: '2026-11-01'}
 - {step: audit, date: '2026-11-01'}
 - {step: qa, date: '2026-11-01', na: true, note: this repo declares no services; every QA case is settled by build}
+- {step: review, date: '2026-11-01'}
+- {step: pr, date: '2026-11-01', note: '#34'}
 ---
 
 # Ram Code
