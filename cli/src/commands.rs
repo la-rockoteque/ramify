@@ -2230,7 +2230,7 @@ pub fn cleanup() -> i32 {
         eprintln!("ramify: {error}");
         return 1;
     }
-    let worktrees = match crate::config::git(&["worktree", "list", "--porcelain"], &config.primary) {
+    let _worktrees = match crate::config::git(&["worktree", "list", "--porcelain"], &config.primary) {
         Ok(text) if !text.trim().is_empty() => text
             .lines()
             .filter_map(|line| line.strip_prefix("worktree "))
@@ -2389,4 +2389,418 @@ fn worktree_root(primary: &Path, worktree: &str) -> Option<PathBuf> {
         .filter_map(|line| line.strip_prefix("worktree "))
         .map(PathBuf::from)
         .find(|path| path.file_name().map(|name| name.to_string_lossy() == worktree).unwrap_or(false))
+}
+
+pub fn prune(args: &[String]) -> i32 {
+    if args.iter().any(|arg| arg == "--all") {
+        return prune_all(args);
+    }
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    let apply = args.iter().any(|arg| arg == "--apply");
+    prune_project(&config, apply);
+    docker_prune(apply);
+    0
+}
+
+fn prune_all(args: &[String]) -> i32 {
+    let apply = args.iter().any(|arg| arg == "--apply");
+    for root in crate::dash::projects() {
+        let Ok(config) = Config::for_root(&root) else {
+            continue;
+        };
+        println!("━━ {} ━━", config.project);
+        prune_project(&config, apply);
+        println!();
+    }
+    docker_prune(apply);
+    if !apply {
+        println!("dry run — 'ramify prune --all --apply' does it");
+    }
+    0
+}
+
+fn prune_project(config: &Config, apply: bool) {
+    let here = config.repo_root.canonicalize().unwrap_or_else(|_| config.repo_root.clone());
+    let fetched = Command::new("git")
+        .args(["-C", &config.primary.to_string_lossy(), "fetch", "-p", "-q", &config.remote])
+        .status();
+    if !matches!(fetched, Ok(status) if status.success()) {
+        println!("  (fetch failed — judging on the last known {}/{}）", config.remote, config.main);
+    }
+    if apply {
+        let _ = Command::new("git")
+            .args(["-C", &config.primary.to_string_lossy(), "worktree", "prune"])
+            .status();
+    }
+    let mut kept = 0;
+    let mut count = 0;
+    let branches = crate::config::git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"], &config.primary)
+        .unwrap_or_default();
+    for branch in branches.lines().filter(|branch| !branch.is_empty()) {
+        if branch == config.main {
+            continue;
+        }
+        let Some(reason) = crate::mem::merged_reason(config, branch) else {
+            continue;
+        };
+        let path = worktree_of_branch(config, branch);
+        if let Some(path) = &path {
+            if path.is_dir() {
+                if path == &config.primary || path == &here {
+                    println!("  keep   {:<45} checked out here", branch);
+                    kept += 1;
+                    continue;
+                }
+                if !crate::config::git(&["status", "--porcelain"], path)
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    println!(
+                        "  keep   {:<45} {} has uncommitted changes",
+                        branch,
+                        path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                    );
+                    kept += 1;
+                    continue;
+                }
+            }
+        }
+        let worktree = path
+            .as_ref()
+            .map(|path| {
+                format!(
+                    " + worktree {}",
+                    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
+        println!("  prune  {:<45} {reason}{worktree}", branch);
+        count += 1;
+        if !apply {
+            continue;
+        }
+        if let Some(path) = &path {
+            if path.is_dir() {
+                let removed = Command::new("git")
+                    .args(["-C", &config.primary.to_string_lossy(), "worktree", "remove"])
+                    .arg(path)
+                    .status();
+                if !matches!(removed, Ok(status) if status.success()) {
+                    println!("    worktree remove failed — branch and stack kept");
+                    continue;
+                }
+                forget_worktree(config, path);
+            }
+        }
+        let _ = Command::new("git")
+            .args(["-C", &config.primary.to_string_lossy(), "branch", "-D", "-q", branch])
+            .status();
+    }
+
+    // Detached worktrees whose HEAD is already in main.
+    let text = crate::config::git(&["worktree", "list", "--porcelain"], &config.primary).unwrap_or_default();
+    let mut path: Option<PathBuf> = None;
+    for line in text.lines() {
+        if let Some(found) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(found));
+        } else if line == "detached" {
+            let Some(detached) = path.clone() else { continue };
+            if !detached.is_dir() || detached == config.primary || detached == here {
+                continue;
+            }
+            let head = crate::config::git(&["rev-parse", "HEAD"], &detached).unwrap_or_default();
+            let ancestor = Command::new("git")
+                .args([
+                    "-C",
+                    &config.primary.to_string_lossy(),
+                    "merge-base",
+                    "--is-ancestor",
+                    head.trim(),
+                    &format!("{}/{}", config.remote, config.main),
+                ])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !ancestor {
+                continue;
+            }
+            let name = detached.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            if !crate::config::git(&["status", "--porcelain"], &detached)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                println!("  keep   {:<45} has uncommitted changes", format!("{name} (detached)"));
+                kept += 1;
+                continue;
+            }
+            println!("  prune  {:<45} detached, HEAD in main", format!("{name} (detached)"));
+            count += 1;
+            if !apply {
+                continue;
+            }
+            let removed = Command::new("git")
+                .args(["-C", &config.primary.to_string_lossy(), "worktree", "remove"])
+                .arg(&detached)
+                .status();
+            if !matches!(removed, Ok(status) if status.success()) {
+                println!("    worktree remove failed — stack kept");
+                continue;
+            }
+            forget_worktree(config, &detached);
+        } else if line.is_empty() {
+            path = None;
+        }
+    }
+    if count == 0 {
+        println!("nothing merged to prune");
+    } else if apply {
+        println!("{count} pruned, {kept} kept");
+    } else {
+        println!("{count} to prune, {kept} kept — 'ramify prune --apply' does it");
+    }
+}
+
+fn worktree_of_branch(config: &Config, branch: &str) -> Option<PathBuf> {
+    let text = crate::config::git(&["worktree", "list", "--porcelain"], &config.primary).ok()?;
+    let mut current: Option<PathBuf> = None;
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path));
+        } else if line == format!("branch refs/heads/{branch}") {
+            return current;
+        }
+    }
+    None
+}
+
+fn forget_worktree(config: &Config, path: &Path) {
+    let worktree = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    kill_worktree(config, &worktree);
+    remove_state_and_logs(config, &worktree);
+}
+
+fn docker_prune(apply: bool) {
+    if Command::new("docker").arg("info").output().map(|output| !output.status.success()).unwrap_or(true) {
+        return;
+    }
+    println!("docker:");
+    if let Ok(output) = Command::new("docker")
+        .args([
+            "system",
+            "df",
+            "--format",
+            "{{printf \"%-15s\" .Type}} {{.Size}} total, {{.Reclaimable}} reclaimable",
+        ])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            println!("  {line}");
+        }
+    }
+    if apply {
+        let _ = Command::new("docker")
+            .args([
+                "container",
+                "prune",
+                "-f",
+                "--filter",
+                "label!=com.docker.compose.project",
+            ])
+            .output();
+        if let Ok(output) = Command::new("docker").args(["image", "prune", "-a", "-f"]).output() {
+            if let Some(last) = String::from_utf8_lossy(&output.stdout).lines().last() {
+                println!("  images  {last}");
+            }
+        }
+        if let Ok(output) = Command::new("docker").args(["builder", "prune", "-f"]).output() {
+            if let Some(last) = String::from_utf8_lossy(&output.stdout).lines().last() {
+                println!("  build   {last}");
+            }
+        }
+    } else {
+        println!("  --apply removes stopped non-compose containers, unused images and build cache; volumes stay");
+    }
+}
+
+pub fn delete(args: &[String]) -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    let name = args.first().cloned().unwrap_or_default();
+    let Some(path) = worktree_root(&config.primary, &name) else {
+        eprintln!("no worktree named '{name}'");
+        return 1;
+    };
+    let here = config.repo_root.canonicalize().unwrap_or_else(|_| config.repo_root.clone());
+    if path == config.primary {
+        eprintln!("refusing: {} is the primary checkout", path.display());
+        return 1;
+    }
+    if path == here {
+        eprintln!("refusing: this shell is inside {}", path.display());
+        return 1;
+    }
+    let branch = crate::config::git(&["symbolic-ref", "--short", "-q", "HEAD"], &path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let dirty = crate::config::git(&["status", "--porcelain"], &path)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let unpushed = if branch.is_empty() {
+        0
+    } else {
+        crate::config::git(
+            &["rev-list", "--count", &branch, "--not", "--remotes"],
+            &config.primary,
+        )
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+    };
+    println!(
+        "force delete {} ({}): {dirty} uncommitted file(s), {unpushed} commit(s) on no remote",
+        path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+        if branch.is_empty() { "detached".to_string() } else { branch.clone() }
+    );
+    if !args.iter().any(|arg| arg == "--yes") {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("add --yes to confirm");
+            return 1;
+        }
+        println!("Delete it? This cannot be undone. Type yes to continue.");
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
+            return 0;
+        }
+    }
+    let removed = Command::new("git")
+        .args(["-C", &config.primary.to_string_lossy(), "worktree", "remove", "--force", "--force"])
+        .arg(&path)
+        .status();
+    if !matches!(removed, Ok(status) if status.success()) {
+        return 1;
+    }
+    forget_worktree(&config, &path);
+    if !branch.is_empty() {
+        let _ = Command::new("git")
+            .args(["-C", &config.primary.to_string_lossy(), "branch", "-D", "-q", &branch])
+            .status();
+    }
+    println!(
+        "deleted {}{}",
+        path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+        if branch.is_empty() { String::new() } else { format!(" and {branch}") }
+    );
+    0
+}
+
+pub fn complete(args: &[String]) -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    let name = args.first().cloned().unwrap_or_default();
+    let Some(path) = worktree_root(&config.primary, &name) else {
+        eprintln!("no worktree named '{name}'");
+        return 1;
+    };
+    let here = config.repo_root.canonicalize().unwrap_or_else(|_| config.repo_root.clone());
+    if path == config.primary {
+        eprintln!("refusing: {} is the primary checkout", path.display());
+        return 1;
+    }
+    if path == here {
+        eprintln!("refusing: this shell is inside {}", path.display());
+        return 1;
+    }
+    let branch = crate::config::git(&["symbolic-ref", "--short", "-q", "HEAD"], &path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let dirty = crate::config::git(&["status", "--porcelain"], &path)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let unpushed = if branch.is_empty() {
+        0
+    } else {
+        crate::config::git(
+            &["rev-list", "--count", &branch, "--not", "--remotes"],
+            &config.primary,
+        )
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+    };
+    let worktree = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    if dirty > 0 {
+        eprintln!("refusing: {worktree} has {dirty} uncommitted file(s) — commit and push them, or 'ramify delete'");
+        return 1;
+    }
+    if unpushed > 0 {
+        eprintln!("refusing: {unpushed} commit(s) of {branch} are on no remote — push them, or 'ramify delete'");
+        return 1;
+    }
+    let key = crate::dash::ticket_of(&branch, &config);
+    if let Some(key) = &key {
+        eprintln!("ramify: closing {key} needs the Jira port, not yet done");
+        return 1;
+    }
+    println!(
+        "complete {worktree} ({})",
+        if branch.is_empty() { "detached" } else { &branch }
+    );
+    if !args.iter().any(|arg| arg == "--yes") {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("add --yes to confirm");
+            return 1;
+        }
+        println!("Complete it? Type yes to continue.");
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
+            return 0;
+        }
+    }
+    let removed = Command::new("git")
+        .args(["-C", &config.primary.to_string_lossy(), "worktree", "remove"])
+        .arg(&path)
+        .status();
+    if !matches!(removed, Ok(status) if status.success()) {
+        return 1;
+    }
+    forget_worktree(&config, &path);
+    if !branch.is_empty() {
+        let _ = Command::new("git")
+            .args(["-C", &config.primary.to_string_lossy(), "branch", "-D", "-q", &branch])
+            .status();
+    }
+    println!(
+        "completed {worktree}{}",
+        if branch.is_empty() {
+            String::new()
+        } else {
+            format!(", {branch} removed here (its remote branch is kept)")
+        }
+    );
+    0
 }

@@ -17,6 +17,15 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "prune" {
+        std::process::exit(commands::prune(&args[1..]));
+    }
+    if command == "delete" {
+        std::process::exit(commands::delete(&args[1..]));
+    }
+    if command == "complete" {
+        std::process::exit(commands::complete(&args[1..]));
+    }
     if command == "cleanup" {
         std::process::exit(commands::cleanup());
     }

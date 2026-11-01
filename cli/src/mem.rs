@@ -302,7 +302,7 @@ fn branch_of(path: &Path) -> String {
         .unwrap_or_else(|_| "?".into())
 }
 
-fn merged_reason(config: &Config, branch: &str) -> Option<String> {
+pub(crate) fn merged_reason(config: &Config, branch: &str) -> Option<String> {
     let main = format!("{}/{}", config.remote, config.main);
     let track = Command::new("git")
         .args([

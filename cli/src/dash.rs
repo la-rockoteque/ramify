@@ -752,7 +752,7 @@ pub(crate) fn env_get(path: &Path, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn ticket_of(branch: &str, config: &Config) -> Option<String> {
+pub(crate) fn ticket_of(branch: &str, config: &Config) -> Option<String> {
     if config.jira_url.is_empty() {
         return None;
     }

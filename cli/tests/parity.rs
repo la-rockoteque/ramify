@@ -1042,3 +1042,113 @@ fn cleanup_matches_the_shell() {
         "stderr differs"
     );
 }
+
+#[test]
+fn prune_and_delete_match_the_shell() {
+    let make = |name: &str| {
+        let base = temp(name);
+        let bare = base.join("bare.git");
+        git(&["init", "-q", "--bare", &bare.to_string_lossy()], &base);
+        let fixture = base.join("demo-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+        fs::write(fixture.join("file.txt"), "one\n").unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        git(&["remote", "add", "origin", &bare.to_string_lossy()], &fixture);
+        git(&["push", "-q", "-u", "origin", "main"], &fixture);
+        git(&["checkout", "-q", "-b", "feat/old"], &fixture);
+        fs::write(fixture.join("file.txt"), "two\n").unwrap();
+        git(&["commit", "-qam", "old"], &fixture);
+        git(&["checkout", "-q", "main"], &fixture);
+        git(&["merge", "-q", "--no-ff", "feat/old", "-m", "merge old"], &fixture);
+        git(&["push", "-q", "origin", "main"], &fixture);
+        let fixture = fixture.canonicalize().unwrap();
+        let worktrees = base.join("wt");
+        fs::create_dir_all(worktrees.join("old")).unwrap();
+        git(
+            &["worktree", "add", "-q", &worktrees.join("old").to_string_lossy(), "feat/old"],
+            &fixture,
+        );
+        let state = temp(&format!("{name}-state"));
+        let registry = temp(&format!("{name}-registry")).join("projects");
+        (fixture, worktrees, state, registry)
+    };
+    let (shell_fixture, shell_wt, shell_state, shell_registry) = make("prune-shell");
+    let (rust_fixture, rust_wt, rust_state, rust_registry) = make("prune-rust");
+    let repo = repo_root();
+    let run = |binary: &Path, fixture: &Path, state: &Path, registry: &Path, shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["prune"])
+            .env("RAMIFY_ROOT", fixture)
+            .env("RAMIFY_STATE_DIR", state)
+            .env("RAMIFY_REGISTRY", registry)
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let shell = run(&repo.join("bin/ramify"), &shell_fixture, &shell_state, &shell_registry, true);
+    let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_fixture, &rust_state, &rust_registry, false);
+    assert_eq!(shell.status.code(), rust.status.code());
+    let normalize = |text: &str, worktrees: &Path| {
+        let canonical = worktrees.canonicalize().unwrap_or_else(|_| worktrees.to_path_buf());
+        let text = text.replace(&canonical.to_string_lossy().into_owned(), "<WT>");
+        text.replace(&worktrees.to_string_lossy().into_owned(), "<WT>")
+    };
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&shell.stdout), &shell_wt),
+        normalize(&String::from_utf8_lossy(&rust.stdout), &rust_wt),
+        "prune stdout differs"
+    );
+
+    for (fixture, worktrees) in [(&shell_fixture, &shell_wt), (&rust_fixture, &rust_wt)] {
+        let _ = Command::new("git")
+            .args(["-C", &fixture.to_string_lossy(), "worktree", "remove", "--force"])
+            .arg(worktrees.join("old"))
+            .status();
+        let _ = Command::new("git")
+            .args(["-C", &fixture.to_string_lossy(), "branch", "-D", "-q", "feat/old"])
+            .status();
+        fs::create_dir_all(worktrees.join("old")).unwrap();
+        let _ = Command::new("git")
+            .args(["-C", &fixture.to_string_lossy(), "worktree", "add", "-q"])
+            .arg(worktrees.join("old"))
+            .arg("--detach")
+            .status();
+    }
+
+    let shell_delete = {
+        let mut command = Command::new(repo.join("bin/ramify"));
+        command
+            .args(["delete", "old", "--yes"])
+            .env("RAMIFY_ROOT", &shell_fixture)
+            .env("RAMIFY_STATE_DIR", &shell_state)
+            .env("RAMIFY_REGISTRY", &shell_registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1");
+        command.output().unwrap()
+    };
+    let rust_delete = {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ramify"));
+        command
+            .args(["delete", "old", "--yes"])
+            .env("RAMIFY_ROOT", &rust_fixture)
+            .env("RAMIFY_STATE_DIR", &rust_state)
+            .env("RAMIFY_REGISTRY", &rust_registry)
+            .env("RAMIFY_HOME", &repo);
+        command.env_remove("RAMIFY_SHELL");
+        command.output().unwrap()
+    };
+    assert_eq!(shell_delete.status.code(), rust_delete.status.code(), "delete exit");
+    assert_eq!(
+        String::from_utf8_lossy(&shell_delete.stdout),
+        String::from_utf8_lossy(&rust_delete.stdout),
+        "delete stdout differs"
+    );
+}
