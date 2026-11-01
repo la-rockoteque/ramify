@@ -1213,3 +1213,60 @@ fn complete_matches_the_shell() {
         "stderr differs"
     );
 }
+
+#[test]
+fn statusline_matches_the_shell() {
+    use std::io::Write;
+    let fixture = temp("statusline");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    fs::create_dir_all(fixture.join(".ramify/work/demo")).unwrap();
+    fs::write(
+        fixture.join(".ramify/work/demo/order.md"),
+        "---\nworkflow: feature\nlane: light\nbranch: main\ntags: []\ncreated: 2026-11-01\nsteps: []\n---\n\n# demo\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("statusline-state");
+    let repo = repo_root();
+    let input = format!(
+        "{{\"session_id\":\"test\",\"workspace\":{{\"current_dir\":\"{}\"}}}}",
+        fixture.display()
+    );
+
+    let run = |binary: &Path, args: &[&str], shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(args)
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_HOME", &repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    for args in [vec!["statusline"], vec!["statusline", "--json"]] {
+        let shell = run(&repo.join("bin/ramify"), &args, true);
+        let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &args, false);
+        assert_eq!(shell.status.code(), rust.status.code(), "{args:?} exit");
+        let shell_text = String::from_utf8_lossy(&shell.stdout)
+            .replace(&fixture.to_string_lossy().into_owned(), "<F>");
+        let rust_text = String::from_utf8_lossy(&rust.stdout)
+            .replace(&fixture.to_string_lossy().into_owned(), "<F>");
+        assert_eq!(shell_text, rust_text, "{args:?} stdout differs");
+    }
+}

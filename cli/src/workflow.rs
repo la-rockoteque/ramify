@@ -372,6 +372,24 @@ fn frontmatter(text: &str) -> Option<Value> {
 }
 
 #[allow(clippy::items_after_test_module)]
+pub fn line(progress: &Progress) -> String {
+    let where_ = match &progress.next {
+        Some(_) if progress.asked.is_some() => {
+            format!("⏳ {} waits on you", progress.asked.clone().unwrap())
+        }
+        Some(step) => format!(
+            "→ {}{}",
+            step.step,
+            if step.gate == "human" { " (human)" } else { "" }
+        ),
+        None => "✓ done".into(),
+    };
+    format!(
+        "{}/{} {}/{} {where_}",
+        progress.workflow, progress.lane, progress.done, progress.total
+    )
+}
+
 pub fn order_text(cfg: &Config) -> Result<String, String> {
     let definitions = definitions(cfg).ok_or("no workflows are defined")?;
     let work_dir = definitions

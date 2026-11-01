@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod mem;
 mod pyjson;
+mod statusline;
 mod dash;
 mod workflow;
 
@@ -34,6 +35,9 @@ fn main() {
     }
     if command == "reap" {
         std::process::exit(mem::reap());
+    }
+    if command == "statusline" {
+        std::process::exit(statusline::statusline(&args[1..]));
     }
     if command == "mem" {
         std::process::exit(mem::mem(&args[1..]));
