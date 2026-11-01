@@ -447,7 +447,7 @@ pub(crate) fn strays(config: &Config) -> Vec<Stray> {
     strays
 }
 
-fn tagged_groups(config: &Config) -> Vec<(u64, String, String)> {
+pub(crate) fn tagged_groups(config: &Config) -> Vec<(u64, String, String)> {
     let mut tagger = Sha1::new();
     tagger.update(config.state_dir.to_string_lossy().as_bytes());
     let digest = tagger.finalize();
@@ -501,7 +501,7 @@ fn valid_service_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-fn protected(pgid: u64) -> bool {
+pub(crate) fn protected(pgid: u64) -> bool {
     let mut pid = std::process::id();
     while pid > 1 {
         if pid as u64 == pgid {

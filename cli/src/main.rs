@@ -16,6 +16,12 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "down" {
+        std::process::exit(commands::down());
+    }
+    if command == "shared-down" {
+        std::process::exit(commands::shared_down());
+    }
     if command == "ping" {
         std::process::exit(commands::ping());
     }

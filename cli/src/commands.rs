@@ -896,3 +896,251 @@ pub fn ping() -> i32 {
     }
     0
 }
+
+pub fn down() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = check_services(&config) {
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    kill_worktree(&config, &config.worktree);
+    let _ = std::fs::remove_file(
+        config
+            .state_dir
+            .join(format!("{}.errors", config.worktree)),
+    );
+    println!(
+        "{} stopped. Shared containers and instances left running on purpose.",
+        config.worktree
+    );
+    0
+}
+
+pub fn shared_down() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = check_services(&config) {
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    for service in &config.services {
+        let Some(port) = config.service(service, "shared_port") else {
+            continue;
+        };
+        let pidfile = config
+            .state_dir
+            .join("shared")
+            .join(format!("{service}.pid"));
+        if pidfile.is_file() {
+            stop_pidfile(&pidfile, port.parse().ok());
+        }
+        if let Some(port) = port.parse().ok() {
+            kill_port(&config, port);
+        }
+        println!("shared {service} :{port} stopped — every worktree pointed at it now reaches nothing");
+    }
+    0
+}
+
+fn kill_worktree(config: &Config, worktree: &str) {
+    let env = config.state_dir.join(format!("{worktree}.env"));
+    for service in &config.services {
+        let upper = service.to_uppercase();
+        let shared = env_get(&env, &format!("{upper}_SHARED")).as_deref() == Some("1");
+        let port = if shared {
+            None
+        } else {
+            env_get(&env, &format!("{upper}_PORT")).and_then(|port| port.parse().ok())
+        };
+        let pidfile = config
+            .state_dir
+            .join(format!("{worktree}.{service}.pid"));
+        if pidfile.is_file() {
+            stop_pidfile(&pidfile, port);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&config.state_dir) {
+        let prefix = format!("{worktree}.");
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&prefix) && name.ends_with(".pid") {
+                stop_pidfile(&entry.path(), None);
+            }
+        }
+    }
+    for (group, tagged_worktree, _) in crate::dash::tagged_groups(config) {
+        if tagged_worktree == worktree && our_group(config, group) {
+            signal_group(group);
+        }
+    }
+    for service in &config.services {
+        let upper = service.to_uppercase();
+        if env_get(&env, &format!("{upper}_SHARED")).as_deref() == Some("1") {
+            continue;
+        }
+        if let Some(port) = env_get(&env, &format!("{upper}_PORT")).and_then(|port| port.parse().ok())
+        {
+            kill_port(config, port);
+        }
+    }
+    release_slot(config, env_get(&env, "SLOT"), worktree);
+    let _ = std::fs::remove_file(&env);
+}
+
+fn release_slot(config: &Config, slot: Option<String>, worktree: &str) {
+    let Some(slot) = slot.filter(|slot| !slot.is_empty()) else {
+        return;
+    };
+    let path = config.slots.join(&slot);
+    let holder = std::fs::read_to_string(&path).unwrap_or_default();
+    let holder = holder.split_whitespace().next().unwrap_or("");
+    if holder != worktree {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    println!("  slot {slot} released");
+}
+
+fn group_members(group: u64) -> Vec<u64> {
+    let Ok(output) = Command::new("ps")
+        .args(["-axww", "-o", "pid=,pgid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid: u64 = parts.next()?.parse().ok()?;
+            let pgid: u64 = parts.next()?.parse().ok()?;
+            let command = parts.collect::<Vec<_>>().join(" ");
+            (pgid == group && !is_build_server(&command)).then_some(pid)
+        })
+        .collect()
+}
+
+fn is_build_server(command: &str) -> bool {
+    (command.contains("MSBuild.dll")
+        && (command.contains("nodeReuse:true") || command.contains("nodemode:8")))
+        || command.contains("VBCSCompiler.dll")
+        || (command.contains("rzc.dll") && command.contains(" server"))
+}
+
+fn our_group(config: &Config, group: u64) -> bool {
+    crate::dash::tagged_groups(config)
+        .iter()
+        .any(|(tagged, _, _)| *tagged == group)
+}
+
+fn signal_group(group: u64) {
+    if group <= 1 || crate::dash::protected(group) {
+        return;
+    }
+    for round in 0..16 {
+        let members: Vec<u64> = group_members(group)
+            .into_iter()
+            .filter(|pid| *pid > 1 && !crate::dash::protected(*pid))
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        if round == 0 {
+            for pid in members {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status();
+            }
+        } else if round == 15 {
+            for pid in members {
+                let _ = Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
+fn stop_pidfile(pidfile: &Path, port: Option<u32>) {
+    let pid = std::fs::read_to_string(pidfile)
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(pidfile);
+    let Ok(group) = pid.parse::<u64>() else {
+        return;
+    };
+    if group <= 1 || group_members(group).is_empty() {
+        return;
+    }
+    let config = Config::resolve();
+    if let Ok(config) = &config {
+        if our_group(config, group) {
+            signal_group(group);
+            return;
+        }
+    }
+    if let Some(port) = port {
+        for listener in listeners(port) {
+            if listener_group(listener) == Some(group) {
+                signal_group(group);
+                return;
+            }
+        }
+    }
+    eprintln!(
+        "ramify: left process group {group} alone — {} names it, but nothing proves it is ours",
+        pidfile.display()
+    );
+}
+
+fn kill_port(config: &Config, port: u32) {
+    for listener in listeners(port) {
+        let Some(group) = listener_group(listener) else {
+            continue;
+        };
+        if our_group(config, group) {
+            signal_group(group);
+        } else {
+            eprintln!("ramify: left pid {listener} alone on :{port} — it is not one of ours");
+        }
+    }
+}
+
+fn listeners(port: u32) -> Vec<u64> {
+    let Ok(output) = Command::new("lsof")
+        .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+fn listener_group(pid: u64) -> Option<u64> {
+    Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .ok()
+        })
+}

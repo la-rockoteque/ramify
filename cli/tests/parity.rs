@@ -571,3 +571,64 @@ fn ping_matches_the_shell() {
         String::from_utf8_lossy(&rust.stderr)
     );
 }
+
+#[test]
+fn down_and_shared_down_match_the_shell() {
+    let make = |name: &str| {
+        let base = temp(name);
+        let fixture = base.join("demo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(
+            fixture.join(".ramify.conf"),
+            "RAMIFY_SERVICES=\"web\"\nweb_port=3000\nweb_health=/health\nweb_cmd='true'\nweb_shared_port=3100\n",
+        )
+        .unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        let fixture = fixture.canonicalize().unwrap();
+        let state = temp(&format!("{name}-state"));
+        fs::create_dir_all(state.join("demo").join("slots")).unwrap();
+        fs::write(
+            state.join("demo").join("demo.env"),
+            "SLOT=2\nWEB_PORT=3000\nWEB_SHARED=0\n",
+        )
+        .unwrap();
+        fs::write(state.join("demo").join("slots").join("2"), "demo 999999\n").unwrap();
+        let registry = temp(&format!("{name}-registry")).join("projects");
+        (fixture, state, registry, "demo".to_string())
+    };
+
+    for args in [vec!["down"], vec!["shared-down"]] {
+        let (shell_fixture, shell_state, shell_registry, _) = make(&format!("{args:?}-shell"));
+        let (rust_fixture, rust_state, rust_registry, _) = make(&format!("{args:?}-rust"));
+        let repo = repo_root();
+        let shell = run_args(
+            &repo.join("bin/ramify"),
+            &args,
+            &shell_fixture,
+            &shell_state,
+            &shell_registry,
+            true,
+        );
+        let rust = run_args(
+            Path::new(env!("CARGO_BIN_EXE_ramify")),
+            &args,
+            &rust_fixture,
+            &rust_state,
+            &rust_registry,
+            false,
+        );
+        assert_eq!(shell.status.code(), rust.status.code(), "{args:?} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{args:?} stdout differs"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{args:?} stderr differs"
+        );
+    }
+}
