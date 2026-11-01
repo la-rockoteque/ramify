@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::dash::{env_get, health_ok, listening};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
 
@@ -350,19 +351,25 @@ pub fn card() -> i32 {
     {
         shown_branch.push_str(" *");
     }
-    box_line('┌', '┐');
-    row2(worktree, &format!("slot {}", env_get(&env, "SLOT").unwrap_or_default()));
-    row2(
+    let style = CardStyle::new(&config.project, branch == config.main, color_on());
+    style.box_line('┌', '┐');
+    style.row2(
+        worktree,
+        &format!("slot {}", env_get(&env, "SLOT").unwrap_or_default()),
+        "",
+    );
+    style.row2(
         &shown_branch,
         &format!("up {}", crate::dash::uptime_of(&env).unwrap_or_else(|| "—".into())),
+        "",
     );
     if let Some(text) = workflow_line(&config, &branch) {
-        row(&text);
+        style.row(&text);
     }
     for text in run_lines(&config.repo_root) {
-        row(&text);
+        style.row(&text);
     }
-    box_line('├', '┤');
+    style.box_line('├', '┤');
     let processes = crate::dash::processes();
     for service in &config.services {
         let upper = service.to_uppercase();
@@ -396,32 +403,157 @@ pub fn card() -> i32 {
             "{kind:<12} {:<22}{memory}",
             format!("http://localhost:{port}")
         );
-        row2(&left, crate::dash::probe(&config, service, parsed));
+        let color = if kind == format!("{service} shared") {
+            style.service_color(service)
+        } else {
+            String::new()
+        };
+        style.row2(&left, crate::dash::probe(&config, service, parsed), &color);
         if let Some(spec) = config.service(service, "smoke") {
             if let Some(failure) = smoke(&config, &spec, parsed) {
-                row(&format!("  smoke {}", failure));
+                style.row(&format!("  smoke {}", failure));
             }
         }
     }
-    box_line('└', '┘');
+    style.box_line('└', '┘');
     0
 }
 
-fn box_line(left: char, right: char) {
-    println!("{left}{}{right}", "─".repeat(BOX_WIDTH + 2));
+struct CardStyle {
+    on: bool,
+    rc: String,
+    end: String,
+    bc: String,
 }
 
-fn row(text: &str) {
-    let padding = BOX_WIDTH.saturating_sub(text.chars().count());
-    println!("│ {text}{} │", " ".repeat(padding));
+impl CardStyle {
+    fn new(project: &str, main_branch: bool, on: bool) -> Self {
+        if !on {
+            return Self {
+                on,
+                rc: String::new(),
+                end: String::new(),
+                bc: String::new(),
+            };
+        }
+        let colors = ["34", "35", "36", "33", "94", "95", "96", "93"];
+        let color = colors[(cksum(project.as_bytes()) % 8) as usize];
+        let bc = format!("\x1b[{color}m");
+        let end = "\x1b[0m".to_string();
+        if main_branch {
+            Self {
+                on,
+                rc: format!("{end}{bc}\x1b[7m"),
+                end: end.clone(),
+                bc: format!("{bc}\x1b[7m"),
+            }
+        } else {
+            Self {
+                on,
+                rc: end.clone(),
+                end,
+                bc,
+            }
+        }
+    }
+
+    fn box_line(&self, left: char, right: char) {
+        println!(
+            "{}{left}{}{right}{}",
+            self.bc,
+            "─".repeat(BOX_WIDTH + 2),
+            self.end
+        );
+    }
+
+    fn row(&self, text: &str) {
+        let padding = BOX_WIDTH.saturating_sub(text.chars().count());
+        println!(
+            "{bc}│{rc} {text}{pad} {bc2}│{end}",
+            bc = self.bc,
+            rc = self.rc,
+            text = text,
+            pad = " ".repeat(padding),
+            bc2 = self.bc,
+            end = self.end
+        );
+    }
+
+    fn row2(&self, left: &str, right: &str, left_color: &str) {
+        let width = BOX_WIDTH
+            .saturating_sub(left.chars().count())
+            .saturating_sub(right.chars().count())
+            .saturating_sub(1);
+        let reset = if left_color.is_empty() { "" } else { self.rc.as_str() };
+        println!(
+            "{bc}│{rc} {lc}{left}{reset}{pad} {paint} {bc2}│{end}",
+            bc = self.bc,
+            rc = self.rc,
+            lc = left_color,
+            left = left,
+            reset = reset,
+            pad = " ".repeat(width),
+            paint = self.paint(right),
+            bc2 = self.bc,
+            end = self.end
+        );
+    }
+
+    fn paint(&self, word: &str) -> String {
+        if !self.on {
+            return word.to_string();
+        }
+        let color = match word {
+            "ready" | "up" => "\x1b[32m",
+            "down" | "DOWN" | "not running" => "\x1b[31m",
+            "starting" => "\x1b[33m",
+            _ => return word.to_string(),
+        };
+        format!("{color}{word}{}", self.rc)
+    }
+
+    fn service_color(&self, service: &str) -> String {
+        if !self.on {
+            return String::new();
+        }
+        const COLORS: [&str; 8] = ["208", "213", "141", "117", "222", "180", "75", "177"];
+        format!(
+            "\x1b[38;5;{}m",
+            COLORS[(cksum(service.as_bytes()) % 8) as usize]
+        )
+    }
 }
 
-fn row2(left: &str, right: &str) {
-    let width = BOX_WIDTH
-        .saturating_sub(left.chars().count())
-        .saturating_sub(right.chars().count())
-        .saturating_sub(1);
-    println!("│ {left}{} {right} │", " ".repeat(width));
+fn color_on() -> bool {
+    std::env::var_os("NO_COLOR").is_none()
+        && (std::env::var("RAMIFY_COLOR").ok().as_deref() == Some("1")
+            || std::io::stdout().is_terminal())
+}
+
+/// POSIX `cksum`: CRC-32 (polynomial 0x04C11DB7) over the bytes, then over the length.
+fn cksum(bytes: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (index, entry) in table.iter_mut().enumerate() {
+        let mut value = (index as u32) << 24;
+        for _ in 0..8 {
+            value = if value & 0x8000_0000 != 0 {
+                (value << 1) ^ 0x04C1_1DB7
+            } else {
+                value << 1
+            };
+        }
+        *entry = value;
+    }
+    let mut crc: u32 = 0;
+    for byte in bytes {
+        crc = (crc << 8) ^ table[(((crc >> 24) ^ u32::from(*byte)) & 0xFF) as usize];
+    }
+    let mut length = bytes.len() as u64;
+    while length != 0 {
+        crc = (crc << 8) ^ table[(((crc >> 24) ^ (length & 0xFF) as u32) & 0xFF) as usize];
+        length >>= 8;
+    }
+    !crc
 }
 
 fn workflow_line(config: &Config, branch: &str) -> Option<String> {

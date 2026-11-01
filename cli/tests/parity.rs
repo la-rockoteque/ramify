@@ -54,7 +54,8 @@ fn run_args(
         .env("RAMIFY_ROOT", fixture)
         .env("RAMIFY_STATE_DIR", state)
         .env("RAMIFY_REGISTRY", registry)
-        .env("RAMIFY_HOME", repo_root());
+        .env("RAMIFY_HOME", repo_root())
+        .env("RAMIFY_COLOR", "1");
     if shell_mode {
         command.env("RAMIFY_SHELL", "1");
     } else {
