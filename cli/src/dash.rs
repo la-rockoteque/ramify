@@ -1,6 +1,7 @@
 use crate::config::{git, Config};
 use crate::workflow;
 use serde::Serialize;
+use sha1::{Digest, Sha1};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -235,7 +236,7 @@ fn project(config: &Config) -> Result<Project, String> {
         containers: containers(config),
         shared: shared(config, &processes),
         build_servers: build_servers(&processes),
-        strays: Vec::new(),
+        strays: strays(config),
         orphans: orphans(config),
         worktrees,
     })
@@ -417,6 +418,142 @@ fn orphans(config: &Config) -> Vec<Orphan> {
         });
     }
     orphans
+}
+
+pub(crate) fn strays(config: &Config) -> Vec<Stray> {
+    let mut strays = Vec::new();
+    for (pgid, worktree, service) in tagged_groups(config) {
+        if protected(pgid) || up_running(config, &worktree) {
+            continue;
+        }
+        let pidfile = if worktree == "@shared" {
+            config.state_dir.join("shared").join(format!("{service}.pid"))
+        } else {
+            config
+                .state_dir
+                .join(format!("{worktree}.{service}.pid"))
+        };
+        let held = std::fs::read_to_string(pidfile)
+            .map(|text| text.trim().to_string())
+            .unwrap_or_default();
+        if held != pgid.to_string() {
+            strays.push(Stray {
+                pgid: pgid.to_string(),
+                worktree,
+                service,
+            });
+        }
+    }
+    strays
+}
+
+fn tagged_groups(config: &Config) -> Vec<(u64, String, String)> {
+    let mut tagger = Sha1::new();
+    tagger.update(config.state_dir.to_string_lossy().as_bytes());
+    let digest = tagger.finalize();
+    let short: String = digest[..4].iter().map(|byte| format!("{byte:02x}")).collect();
+    let prefix = format!("RAMIFY_TAG={}@{short}/", config.project);
+    let Ok(output) = Command::new("ps")
+        .args(["-axwwE", "-o", "pgid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let mut groups = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if is_build_server(line) {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(pgid) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        for token in parts {
+            let Some(rest) = token.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some((worktree, service)) = rest.split_once('/') else {
+                continue;
+            };
+            if !valid_worktree(worktree) || !valid_service_name(service) {
+                continue;
+            }
+            groups.insert((pgid, worktree.to_string(), service.to_string()));
+        }
+    }
+    groups.into_iter().collect()
+}
+
+fn valid_worktree(name: &str) -> bool {
+    name == "@shared"
+        || (!name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'))
+}
+
+fn valid_service_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn protected(pgid: u64) -> bool {
+    let mut pid = std::process::id();
+    while pid > 1 {
+        if pid as u64 == pgid {
+            return true;
+        }
+        let group = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .and_then(|value| value.parse::<u64>().ok());
+        if group == Some(pgid) {
+            return true;
+        }
+        pid = Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+    }
+    false
+}
+
+fn up_running(config: &Config, worktree: &str) -> bool {
+    let lock = config
+        .state_dir
+        .join(format!("{worktree}.up.lock"));
+    if !lock.is_dir() {
+        return false;
+    }
+    let pid = std::fs::read_to_string(lock.join("pid"))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    if pid.is_empty() {
+        let age = std::fs::metadata(&lock)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        return age < 30;
+    }
+    if pid == std::process::id().to_string() {
+        return false;
+    }
+    Command::new("ps")
+        .args(["-o", "command=", "-p", &pid])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains("ramify"))
+        .unwrap_or(false)
 }
 
 pub(crate) struct Process {
