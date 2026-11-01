@@ -88,6 +88,7 @@ impl Llm for AnthropicLlm {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(120)))
                 .build(),
         );
         let mut response = agent
@@ -128,9 +129,21 @@ pub fn run_task(
     task: &str,
     on_event: &mut dyn FnMut(AgentEvent),
 ) -> Result<String, String> {
+    run_turn(llm, root, &[], task, on_event).map(|(answer, _)| answer)
+}
+
+/// Run one task with the earlier turns, and return the answer with the new history.
+pub fn run_turn(
+    llm: &dyn Llm,
+    root: &Path,
+    history: &[Value],
+    task: &str,
+    on_event: &mut dyn FnMut(AgentEvent),
+) -> Result<(String, Vec<Value>), String> {
     let tools = Tools::new(root);
     let definitions = Tools::definitions();
-    let mut messages = vec![json!({"role": "user", "content": task})];
+    let mut messages: Vec<Value> = history.to_vec();
+    messages.push(json!({"role": "user", "content": task}));
     let mut answer = String::new();
 
     for _ in 0..MAX_TURNS {
@@ -200,7 +213,8 @@ pub fn run_task(
         }
 
         if tool_results.is_empty() {
-            return Ok(answer.trim().to_string());
+            messages.push(json!({"role": "assistant", "content": content.clone()}));
+            return Ok((answer.trim().to_string(), messages));
         }
 
         messages.push(json!({"role": "assistant", "content": assistant_blocks}));

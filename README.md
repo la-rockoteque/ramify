@@ -28,9 +28,16 @@ Run it from a configured checkout:
 cargo run
 ```
 
-Press any key to leave the splash. Select a worktree and press `c` to type a task. The other
-keys are `j`/`k` to move, `enter` to open, `n` for a new worktree, `u`/`d` for the QA stack,
-`s` for the workflow step, `r` to refresh, `esc` to go back, and `q` to quit.
+Press any key to leave the splash. The interface is a chat:
+
+- `Enter` sends the message, `Tab` opens the worktree picker, `i` inspects the selected
+  worktree, `↑`/`↓` scroll, `Ctrl+C` quits.
+- Slash commands: `/help`, `/up`, `/down`, `/step`, `/status`, `/workflow`, `/new <slug>`,
+  `/refresh`, `/worktrees`, `/clear`, `/quit`.
+
+The first message starts a task in the selected worktree. The transcript stays, and later
+messages carry the earlier turns to the model. Each task runs in a worker process, so the
+interface keeps drawing while the model works.
 
 Ram Code reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. It stores no key. The model is
 `RAM_CODE_MODEL`, else `ANTHROPIC_DEFAULT_SONNET_MODEL`, else `deepseek-v4.1-flash`.

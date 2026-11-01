@@ -10,6 +10,8 @@ Ram Code is a Rust terminal application. It uses Ratatui with Crossterm for rend
 
 A coding screen takes a task for the selected worktree. Ram Code sends the task to DeepSeek through the Anthropic-compatible Nexapp endpoint. The model reads files, writes files and runs commands in that worktree. The screen shows each step and the final message. Credentials come from `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. Ram Code stores no key.
 
+The screen is a chat that keeps running. The transcript shows the user's task, the model's text, and each tool call with its result, in the style of Claude Code. After a task ends, the transcript stays and the next task carries the earlier turns to the model. Slash commands run the Ramify actions: `/up`, `/down`, `/step`, `/status`, `/new <slug>`, `/worktrees`, `/refresh`, `/clear`, `/help`, `/quit`. `Tab` opens the worktree picker.
+
 Each state is visible:
 
 - Empty state names the next step to configure a project.
@@ -36,6 +38,8 @@ AC6. Ram Code runs without Electron.
 AC7. Given a selected worktree and a task, when the user starts the task, then Ram Code sends it to DeepSeek with file and command tools rooted at that worktree, applies the tool calls, and shows progress and the final message.
 
 AC8. Given a missing token, when the user starts a task, then Ram Code shows the fix and the interface stays usable.
+
+AC9. Given a finished task, when the user sends another task, then the transcript stays visible and the model receives the earlier turns.
 
 ## Out of scope
 

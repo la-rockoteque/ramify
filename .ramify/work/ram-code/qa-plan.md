@@ -10,6 +10,7 @@
 | Q6 | AC6 | medium | `terminal_app_runs_without_electron`: build and launch the Rust binary in a pseudo-terminal with Electron unavailable; confirm the TUI starts and exits cleanly. | build |
 | Q7 | AC7 | high | `coding_task_sends_tools_to_worktree`: a fake model returns a `write_file` call and then a final message; confirm the file lands under the selected worktree, the tool ran with that root, and progress is shown. | build |
 | Q8 | AC8 | medium | `missing_api_token_shows_recovery`: start a task with no token and confirm an actionable message with the interface still usable. | build |
+| Q9 | AC9 | high | `follow_up_task_keeps_early_context`: a fake model answers two tasks in one session; confirm the second request carries the first task and its answer. | build |
 
 ## Write set
 

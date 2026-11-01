@@ -100,13 +100,20 @@ struct RawStep {
 pub fn parse_dash(json: &str) -> Result<Vec<Project>, String> {
     let raw: Vec<RawProject> =
         serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
-    Ok(raw
-        .into_iter()
-        .map(|project| Project {
-            name: project.name,
-            primary: project.primary,
-            worktrees: project
-                .worktrees
+    Ok(raw.into_iter().map(convert).collect())
+}
+
+pub fn parse_project(json: &str) -> Result<Project, String> {
+    let raw: RawProject = serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
+    Ok(convert(raw))
+}
+
+fn convert(project: RawProject) -> Project {
+    Project {
+        name: project.name,
+        primary: project.primary,
+        worktrees: project
+            .worktrees
                 .into_iter()
                 .map(|wt| Worktree {
                     name: wt.name,
@@ -134,9 +141,8 @@ pub fn parse_dash(json: &str) -> Result<Vec<Project>, String> {
                         }),
                     }),
                 })
-                .collect(),
-        })
-        .collect())
+            .collect(),
+    }
 }
 
 pub fn project_for_root<'a>(projects: &'a [Project], root: &Path) -> Option<&'a Project> {

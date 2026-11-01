@@ -1,4 +1,4 @@
-use ram_code::agent::{run_task, AgentConfig, AgentEvent, Llm};
+use ram_code::agent::{run_task, run_turn, AgentConfig, AgentEvent, Llm};
 use ram_code::app::{App, MessageKind, Screen};
 use ram_code::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use std::collections::HashMap;
@@ -107,7 +107,7 @@ fn dash_json(project: &str, primary: &Path, worktrees: &[(&str, &Path, &str)]) -
             })
         })
         .collect();
-    serde_json::json!([{
+    serde_json::json!({
         "name": project,
         "primary": primary,
         "stacks": true,
@@ -118,7 +118,7 @@ fn dash_json(project: &str, primary: &Path, worktrees: &[(&str, &Path, &str)]) -
         "strays": [],
         "orphans": [],
         "worktrees": list,
-    }])
+    })
     .to_string()
 }
 
@@ -157,7 +157,7 @@ fn startup_lists_project_and_worktrees() {
         &[("demo", &root, "main"), ("alpha", &alpha, "feat/alpha")],
     );
     let (mut app, _) = app_with(
-        vec![(vec!["dash", "--json"], out(&json))],
+        vec![(vec!["dash-project", "--json"], out(&json))],
         &root,
     );
     app.load();
@@ -179,7 +179,7 @@ fn selecting_worktree_shows_status_and_workflow() {
         &root,
         &[("demo", &root, "main"), ("beta", &beta, "feat/beta")],
     );
-    let (mut app, _) = app_with(vec![(vec!["dash", "--json"], out(&json))], &root);
+    let (mut app, _) = app_with(vec![(vec!["dash-project", "--json"], out(&json))], &root);
     app.load();
     app.select(1);
     app.open_selected();
@@ -204,7 +204,7 @@ fn actions_call_ramify_with_selected_root() {
     );
     let (mut app, runner) = app_with(
         vec![
-            (vec!["dash", "--json"], out(&json)),
+            (vec!["dash-project", "--json"], out(&json)),
             (vec!["up"], out("stack up")),
             (vec!["down"], out("stack down")),
             (vec!["step"], out("→ build")),
@@ -239,7 +239,7 @@ fn actions_call_ramify_with_selected_root() {
     let calls = runner.calls();
     let actions: Vec<&CommandSpec> = calls
         .iter()
-        .filter(|spec| spec.args != vec!["dash".to_string(), "--json".to_string()])
+        .filter(|spec| spec.args != vec!["dash-project".to_string(), "--json".to_string()])
         .collect();
     assert_eq!(actions.len(), 4, "expected four actions: {actions:?}");
     for spec in &actions {
@@ -259,7 +259,13 @@ fn actions_call_ramify_with_selected_root() {
 #[test]
 fn missing_project_state_shows_recovery() {
     let root = tmp("q4-empty");
-    let (mut empty, _) = app_with(vec![(vec!["dash", "--json"], out("[]"))], &root);
+    let other = serde_json::json!({
+        "name": "other",
+        "primary": "/tmp/other-project",
+        "worktrees": []
+    })
+    .to_string();
+    let (mut empty, _) = app_with(vec![(vec!["dash-project", "--json"], out(&other))], &root);
     empty.load();
     assert_eq!(empty.screen, Screen::Empty);
     let text = render_text(&empty);
@@ -268,7 +274,7 @@ fn missing_project_state_shows_recovery() {
 
     let root = tmp("q4-invalid");
     let (mut broken, _) = app_with(
-        vec![(vec!["dash", "--json"], out("not json"))],
+        vec![(vec!["dash-project", "--json"], out("not json"))],
         &root,
     );
     broken.load();
@@ -289,7 +295,7 @@ fn command_failure_returns_to_interface() {
     let json = dash_json("demo", &root, &[("demo", &root, "main")]);
     let (mut app, _) = app_with(
         vec![
-            (vec!["dash", "--json"], out(&json)),
+            (vec!["dash-project", "--json"], out(&json)),
             (vec!["up"], fail("stack failed: port busy")),
         ],
         &root,
@@ -318,7 +324,7 @@ fn terminal_app_runs_without_electron() {
     let json = dash_json("poc", &root, &[("poc", &root, "main")]);
     let escaped = json.replace('\'', "'\\''");
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = \"dash\" ]; then\n  printf '%s' '{escaped}'\n  exit 0\nfi\nprintf 'ok\\n'\nexit 0\n"
+        "#!/bin/sh\nif [ \"$1\" = \"dash-project\" ]; then\n  printf '%s' '{escaped}'\n  exit 0\nfi\nprintf 'ok\\n'\nexit 0\n"
     );
     let fake = bin_dir.join("ramify");
     fs::write(&fake, script).unwrap();
@@ -357,7 +363,7 @@ fn terminal_app_runs_without_electron() {
     let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(800));
         for _ in 0..30 {
-            if stdin.write_all(b"q").is_err() {
+            if stdin.write_all(b"\x03").is_err() {
                 break;
             }
             let _ = stdin.flush();
@@ -467,7 +473,7 @@ fn coding_task_sends_tools_to_worktree() {
 fn missing_api_token_shows_recovery() {
     let root = tmp("q8");
     let json = dash_json("demo", &root, &[("demo", &root, "main")]);
-    let (mut app, _) = app_with(vec![(vec!["dash", "--json"], out(&json))], &root);
+    let (mut app, _) = app_with(vec![(vec!["dash-project", "--json"], out(&json))], &root);
     app.load();
 
     let config = AgentConfig::from_env(|_| None);
@@ -485,4 +491,32 @@ fn missing_api_token_shows_recovery() {
     app.back();
     assert_eq!(app.screen, Screen::Main);
     assert!(render_text(&app).contains("demo"));
+}
+
+// ── Q9 ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn follow_up_task_keeps_early_context() {
+    let root = tmp("q9");
+    let llm = FakeLlm::new(vec![
+        serde_json::json!({
+            "content": [{"type": "text", "text": "first answer"}],
+            "stop_reason": "end_turn"
+        }),
+        serde_json::json!({
+            "content": [{"type": "text", "text": "second answer"}],
+            "stop_reason": "end_turn"
+        }),
+    ]);
+
+    let (first, history) = run_turn(&llm, &root, &[], "first task", &mut |_| {}).expect("first");
+    assert_eq!(first, "first answer");
+    let (second, _) = run_turn(&llm, &root, &history, "second task", &mut |_| {}).expect("second");
+    assert_eq!(second, "second answer");
+
+    let requests = llm.requests.lock().unwrap();
+    let sent = requests[1]["messages"].to_string();
+    assert!(sent.contains("first task"), "first task missing: {sent}");
+    assert!(sent.contains("first answer"), "first answer missing: {sent}");
+    assert!(sent.contains("second task"), "second task missing: {sent}");
 }

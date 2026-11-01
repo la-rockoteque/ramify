@@ -1,14 +1,17 @@
-use crate::agent::{run_task, AgentConfig, AgentEvent, AnthropicLlm};
+use crate::agent::AgentConfig;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
-use crate::state::{parse_dash, project_for_root, Project, Worktree};
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::state::{parse_project, project_for_root, Project, Worktree};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
+use serde_json::Value;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,9 +20,8 @@ pub enum Screen {
     Loading,
     Main,
     Detail,
-    Task,
+    Picker,
     Message,
-    Running,
     Empty,
     Error,
 }
@@ -32,10 +34,29 @@ pub enum MessageKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Prompt {
-    None,
-    NewWorktree,
-    Task,
+pub enum Role {
+    User,
+    Assistant,
+    Tool,
+    ToolResult,
+    Error,
+    Info,
+}
+
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub role: Role,
+    pub text: String,
+}
+
+struct Worker {
+    child: Child,
+    events: PathBuf,
+    history: PathBuf,
+    stderr: PathBuf,
+    offset: u64,
+    pending: String,
+    saw_text: bool,
 }
 
 pub struct App {
@@ -47,11 +68,14 @@ pub struct App {
     pub message: String,
     pub message_kind: MessageKind,
     pub detail: Option<Worktree>,
-    pub task_input: String,
-    pub log: Vec<String>,
-    pub events: Option<mpsc::Receiver<AgentEvent>>,
-    pub prompt: Prompt,
+    pub entries: Vec<Entry>,
+    pub input: String,
+    pub running: bool,
+    pub scroll_up: usize,
+    pub history: Vec<Value>,
     pub quit: bool,
+    worker: Option<Worker>,
+    task_seq: u64,
 }
 
 impl App {
@@ -65,11 +89,14 @@ impl App {
             message: String::new(),
             message_kind: MessageKind::Info,
             detail: None,
-            task_input: String::new(),
-            log: Vec::new(),
-            events: None,
-            prompt: Prompt::None,
+            entries: Vec::new(),
+            input: String::new(),
+            running: false,
+            scroll_up: 0,
+            history: Vec::new(),
             quit: false,
+            worker: None,
+            task_seq: 0,
         }
     }
 
@@ -78,7 +105,7 @@ impl App {
         let runner = self.runner.clone();
         let spec = CommandSpec {
             root: self.root.clone(),
-            args: vec!["dash".into(), "--json".into()],
+            args: vec!["dash-project".into(), "--json".into()],
         };
         let result = runner.run(&spec);
         match result {
@@ -92,23 +119,22 @@ impl App {
                 self.message = format!("could not read Ramify state: {}", output.text());
                 self.message_kind = MessageKind::Failure;
             }
-            Ok(output) => match parse_dash(&output.stdout) {
+            Ok(output) => match parse_project(&output.stdout) {
                 Err(error) => {
                     self.screen = Screen::Error;
                     self.message = format!("could not read Ramify state: {error}");
                     self.message_kind = MessageKind::Failure;
                 }
-                Ok(projects) => match project_for_root(&projects, &self.root) {
-                    None => {
+                Ok(project) => {
+                    if project_for_root(std::slice::from_ref(&project), &self.root).is_none() {
                         self.project = None;
                         self.screen = Screen::Empty;
-                    }
-                    Some(project) => {
-                        self.project = Some(project.clone());
+                    } else {
+                        self.project = Some(project);
                         self.screen = Screen::Main;
                         self.clamp_selection();
                     }
-                },
+                }
             },
         }
     }
@@ -203,17 +229,22 @@ impl App {
     }
 
     pub fn start_task(&mut self, config: Result<AgentConfig, String>) {
-        let config = match config {
-            Ok(config) => config,
-            Err(error) => {
-                self.message = error;
-                self.message_kind = MessageKind::Failure;
-                self.screen = Screen::Message;
-                return;
-            }
-        };
-        let task = self.task_input.trim().to_string();
-        if task.is_empty() {
+        let task = self.input.trim().to_string();
+        self.start_task_with_text(config, task);
+    }
+
+    pub fn start_task_with_text(&mut self, config: Result<AgentConfig, String>, task: String) {
+        if let Err(error) = config {
+            self.message = error;
+            self.message_kind = MessageKind::Failure;
+            self.screen = Screen::Message;
+            return;
+        }
+        if self.running {
+            self.push(Role::Info, "a task is still running");
+            return;
+        }
+        if task.trim().is_empty() {
             self.message = "type a task first".into();
             self.message_kind = MessageKind::Failure;
             self.screen = Screen::Message;
@@ -226,73 +257,202 @@ impl App {
             return;
         };
 
-        let (tx, rx) = mpsc::channel();
-        let root = worktree.path.clone();
-        self.log.clear();
-        self.log.push(format!("task for {}", worktree.name));
-        self.log.push(task.clone());
-        std::thread::spawn(move || {
-            let llm = AnthropicLlm::new(config);
-            let result = run_task(&llm, &root, &task, &mut |event| {
-                let _ = tx.send(event);
-            });
-            let _ = match result {
-                Ok(text) => tx.send(AgentEvent::Done(text)),
-                Err(error) => tx.send(AgentEvent::Error(error)),
-            };
-        });
-        self.events = Some(rx);
-        self.screen = Screen::Running;
+        self.push(Role::User, task.clone());
+        self.running = true;
+        self.input.clear();
+
+        let directory = std::env::temp_dir().join(format!("ram-code-{}", std::process::id()));
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            self.push(Role::Error, format!("could not create the task folder: {error}"));
+            self.running = false;
+            return;
+        }
+        let history = directory.join("history.json");
+        let events = directory.join(format!("events-{}.jsonl", self.task_seq));
+        let stderr = directory.join(format!("stderr-{}.log", self.task_seq));
+        self.task_seq += 1;
+        if let Ok(text) = serde_json::to_string(&self.history) {
+            let _ = std::fs::write(&history, text);
+        }
+        let _ = std::fs::remove_file(&events);
+        let stderr_file = match File::create(&stderr) {
+            Ok(file) => file,
+            Err(error) => {
+                self.push(Role::Error, format!("could not open the task log: {error}"));
+                self.running = false;
+                return;
+            }
+        };
+        let binary = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                self.push(Role::Error, format!("could not find the ram-code binary: {error}"));
+                self.running = false;
+                return;
+            }
+        };
+        let child = std::process::Command::new(binary)
+            .arg("--task")
+            .arg(&task)
+            .arg("--events")
+            .arg(&events)
+            .arg("--history")
+            .arg(&history)
+            .current_dir(&worktree.path)
+            .env("RAMIFY_ROOT", &worktree.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
+            .spawn();
+        match child {
+            Ok(child) => {
+                self.worker = Some(Worker {
+                    child,
+                    events,
+                    history,
+                    stderr,
+                    offset: 0,
+                    pending: String::new(),
+                    saw_text: false,
+                });
+            }
+            Err(error) => {
+                self.push(Role::Error, format!("could not start the task: {error}"));
+                self.running = false;
+            }
+        }
     }
 
     pub fn poll_events(&mut self) {
-        let mut events = Vec::new();
-        if let Some(rx) = &self.events {
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
-        }
-        for event in events {
-            match event {
-                AgentEvent::Text(text) => self.log.push(text),
-                AgentEvent::ToolCall { name, .. } => self.log.push(format!("→ {name}")),
-                AgentEvent::ToolResult(result) => {
-                    let first = result.lines().next().unwrap_or("").to_string();
-                    self.log.push(format!("  {first}"));
-                }
-                AgentEvent::Done(text) => {
-                    self.events = None;
-                    self.message = if text.is_empty() {
-                        "task finished".into()
-                    } else {
-                        text
-                    };
-                    self.message_kind = MessageKind::Success;
-                    self.screen = Screen::Message;
-                }
-                AgentEvent::Error(error) => {
-                    self.events = None;
-                    self.message = error;
-                    self.message_kind = MessageKind::Failure;
-                    self.screen = Screen::Message;
+        let mut parsed: Vec<Value> = Vec::new();
+        let mut saw_finished = false;
+        let mut exit_status = None;
+
+        if let Some(worker) = self.worker.as_mut() {
+            if let Ok(mut file) = File::open(&worker.events) {
+                if file.seek(SeekFrom::Start(worker.offset)).is_ok() {
+                    let mut bytes = Vec::new();
+                    if file.read_to_end(&mut bytes).is_ok() {
+                        worker.offset += bytes.len() as u64;
+                        worker.pending.push_str(&String::from_utf8_lossy(&bytes));
+                    }
                 }
             }
+            while let Some(index) = worker.pending.find('\n') {
+                let line: String = worker.pending.drain(..=index).collect();
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(line) {
+                    if value.get("type").and_then(Value::as_str) == Some("finished") {
+                        saw_finished = true;
+                    }
+                    parsed.push(value);
+                }
+            }
+            if let Ok(Some(status)) = worker.child.try_wait() {
+                exit_status = Some(status);
+            }
         }
+
+        for value in parsed {
+            self.apply_worker_value(value);
+        }
+        if saw_finished {
+            self.finish_task();
+        } else if let Some(status) = exit_status {
+            let was_running = self.running;
+            let stderr = self.worker.as_ref().map(|worker| worker.stderr.clone());
+            self.worker = None;
+            self.running = false;
+            if was_running {
+                let tail = stderr
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_default();
+                let text = if tail.trim().is_empty() {
+                    format!("the task process exited with {status}")
+                } else {
+                    tail
+                };
+                self.push(Role::Error, text);
+            }
+        }
+    }
+
+    fn apply_worker_value(&mut self, value: Value) {
+        match value.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let text = value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(worker) = self.worker.as_mut() {
+                    worker.saw_text = true;
+                }
+                self.push(Role::Assistant, text);
+            }
+            Some("tool_call") => {
+                let name = value.get("name").and_then(Value::as_str).unwrap_or("");
+                let input = value.get("input").and_then(Value::as_str).unwrap_or("");
+                self.push(Role::Tool, format!("{name} {input}"));
+            }
+            Some("tool_result") => {
+                let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+                let head: Vec<&str> = text.lines().take(2).collect();
+                self.push(Role::ToolResult, head.join("\n"));
+            }
+            Some("error") => {
+                self.push(
+                    Role::Error,
+                    value.get("text").and_then(Value::as_str).unwrap_or(""),
+                );
+                self.running = false;
+            }
+            Some("finished") => {
+                let answer = value.get("answer").and_then(Value::as_str).unwrap_or("");
+                let saw_text = self
+                    .worker
+                    .as_ref()
+                    .map(|worker| worker.saw_text)
+                    .unwrap_or(false);
+                if !saw_text && !answer.is_empty() {
+                    self.push(Role::Assistant, answer);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_task(&mut self) {
+        let Some(mut worker) = self.worker.take() else {
+            return;
+        };
+        let _ = worker.child.wait();
+        if let Ok(text) = std::fs::read_to_string(&worker.history) {
+            if let Ok(history) = serde_json::from_str::<Vec<Value>>(&text) {
+                self.history = history;
+            }
+        }
+        self.running = false;
+    }
+
+    fn push(&mut self, role: Role, text: impl Into<String>) {
+        self.entries.push(Entry {
+            role,
+            text: text.into(),
+        });
+        self.scroll_up = 0;
     }
 
     pub fn back(&mut self) {
         match self.screen {
-            Screen::Detail => {
+            Screen::Detail | Screen::Picker => {
                 self.detail = None;
                 self.screen = Screen::Main;
             }
-            Screen::Task => {
-                self.prompt = Prompt::None;
-                self.task_input.clear();
-                self.screen = Screen::Main;
-            }
-            Screen::Running | Screen::Message => {
-                self.prompt = Prompt::None;
+            Screen::Message => {
                 self.load();
             }
             _ => {}
@@ -300,81 +460,298 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        if self.screen == Screen::Task {
-            match key.code {
-                KeyCode::Esc => self.back(),
-                KeyCode::Enter => {
-                    let value = self.task_input.trim().to_string();
-                    if value.is_empty() {
-                        return;
-                    }
-                    match self.prompt {
-                        Prompt::NewWorktree => {
-                            self.task_input.clear();
-                            self.invoke(Action::CreateWorktree(value));
-                        }
-                        _ => self.start_task(AgentConfig::from_process_env()),
-                    }
-                }
-                KeyCode::Backspace => {
-                    self.task_input.pop();
-                }
-                KeyCode::Char(c) => self.task_input.push(c),
-                _ => {}
-            }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c'))
+        {
+            self.quit = true;
             return;
         }
-
-        match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => self.back(),
-            KeyCode::Char('r') => self.load(),
-            KeyCode::Char('j') | KeyCode::Down => self.next(),
-            KeyCode::Char('k') | KeyCode::Up => self.previous(),
-            KeyCode::Enter | KeyCode::Char('i') if self.screen == Screen::Main => {
-                self.open_selected()
+        match self.screen {
+            Screen::Main => self.key_chat(key),
+            Screen::Picker => self.key_picker(key),
+            Screen::Message => {
+                if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                    self.back();
+                }
             }
-            KeyCode::Char('c') if self.screen == Screen::Main || self.screen == Screen::Detail => {
-                self.task_input.clear();
-                self.prompt = Prompt::Task;
-                self.screen = Screen::Task;
+            Screen::Empty | Screen::Error => match key.code {
+                KeyCode::Char('r') => self.load(),
+                KeyCode::Char('q') => self.quit = true,
+                _ => {}
+            },
+            Screen::Detail => {
+                if key.code == KeyCode::Esc {
+                    self.back();
+                }
             }
-            KeyCode::Char('n') if self.screen == Screen::Main => {
-                self.task_input.clear();
-                self.prompt = Prompt::NewWorktree;
-                self.screen = Screen::Task;
-            }
-            KeyCode::Char('u') if self.screen == Screen::Main => self.invoke(Action::Up),
-            KeyCode::Char('d') if self.screen == Screen::Main => self.invoke(Action::Down),
-            KeyCode::Char('s') if self.screen == Screen::Main => self.invoke(Action::Step),
             _ => {}
         }
     }
 
+    fn key_chat(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.submit(),
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Tab if !self.running => self.screen = Screen::Picker,
+            KeyCode::Up => self.scroll_up = self.scroll_up.saturating_add(1),
+            KeyCode::Down => self.scroll_up = self.scroll_up.saturating_sub(1),
+            KeyCode::Char('i') if self.input.is_empty() => self.open_selected(),
+            KeyCode::Char(character) if !self.running => self.input.push(character),
+            _ => {}
+        }
+    }
+
+    fn key_picker(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab => self.screen = Screen::Main,
+            KeyCode::Char('j') | KeyCode::Down => self.next(),
+            KeyCode::Char('k') | KeyCode::Up => self.previous(),
+            KeyCode::Enter => {
+                let name = self
+                    .selected_worktree()
+                    .map(|worktree| worktree.name.clone())
+                    .unwrap_or_default();
+                self.history.clear();
+                self.entries.clear();
+                self.push(Role::Info, format!("session: {name}"));
+                self.screen = Screen::Main;
+            }
+            KeyCode::Char('q') => self.quit = true,
+            _ => {}
+        }
+    }
+
+    fn submit(&mut self) {
+        if self.running {
+            return;
+        }
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.input.clear();
+        if text.starts_with('/') {
+            self.handle_command(&text);
+            return;
+        }
+        self.start_task_with_text(AgentConfig::from_process_env(), text);
+    }
+
+    fn handle_command(&mut self, text: &str) {
+        let (command, rest) = match text.split_once(' ') {
+            Some((command, rest)) => (command, rest.trim()),
+            None => (text, ""),
+        };
+        match command {
+            "/help" => self.push(
+                Role::Info,
+                "enter send · tab worktrees · i inspect · ↑/↓ scroll · ^C quit\n\
+                 /up /down /step /status /workflow /new <slug> /refresh /worktrees /clear /quit",
+            ),
+            "/up" => self.run_action_inline(Action::Up),
+            "/down" => self.run_action_inline(Action::Down),
+            "/step" => self.run_action_inline(Action::Step),
+            "/status" => self.run_action_inline(Action::Status),
+            "/workflow" => self.run_action_inline(Action::Workflow),
+            "/new" => {
+                if rest.is_empty() {
+                    self.push(Role::Info, "usage: /new <slug>");
+                } else {
+                    self.run_action_inline(Action::CreateWorktree(rest.to_string()));
+                }
+            }
+            "/refresh" => self.load(),
+            "/worktrees" => self.screen = Screen::Picker,
+            "/clear" => {
+                self.entries.clear();
+                self.scroll_up = 0;
+            }
+            "/quit" => self.quit = true,
+            other => self.push(Role::Info, format!("unknown command {other}; try /help")),
+        }
+    }
+
+    fn run_action_inline(&mut self, action: Action) {
+        let Some(worktree) = self.selected_worktree().cloned() else {
+            self.push(Role::Info, "select a worktree first");
+            return;
+        };
+        match self.run_command(action, worktree.path.clone()) {
+            Err(error) => self.push(Role::Error, error),
+            Ok(output) if output.ok() => {
+                let text = output.text();
+                self.push(Role::Info, if text.is_empty() { "done".into() } else { text });
+                self.load();
+            }
+            Ok(output) => {
+                let text = output.text();
+                self.push(
+                    Role::Error,
+                    if text.is_empty() {
+                        format!("ramify exited {}", output.status)
+                    } else {
+                        text
+                    },
+                );
+            }
+        }
+    }
+
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        match self.screen {
+            Screen::Splash => self.render_splash(area, buf),
+            Screen::Main => self.render_chat(area, buf),
+            Screen::Picker => self.render_picker(area, buf),
+            _ => self.render_panel(area, buf),
+        }
+    }
+
+    fn render_splash(&self, area: Rect, buf: &mut Buffer) {
+        let block = Block::bordered().title(" Ram Code ");
+        let inner = block.inner(area);
+        block.render(area, buf);
+        Paragraph::new(splash_lines(inner.height as usize, inner.width as usize))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false })
+            .render(inner, buf);
+    }
+
+    fn render_chat(&self, area: Rect, buf: &mut Buffer) {
+        let chunks = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
+        .split(area);
+        self.render_header(chunks[0], buf);
+        self.render_transcript(chunks[1], buf);
+        self.render_input(chunks[2], buf);
+    }
+
+    fn render_header(&self, area: Rect, buf: &mut Buffer) {
+        let mut lines = Vec::new();
+        let name = self
+            .project
+            .as_ref()
+            .map(|project| project.name.as_str())
+            .unwrap_or("no project");
+        let path = self
+            .project
+            .as_ref()
+            .map(|project| project.primary.display().to_string())
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Ram Code ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("  {name}  {path}")),
+        ]));
+        let mut chips = Vec::new();
+        if let Some(project) = &self.project {
+            for (index, worktree) in project.worktrees.iter().enumerate() {
+                if index > 0 {
+                    chips.push(Span::raw(" "));
+                }
+                let style = if index == self.selected {
+                    Style::default().fg(Color::Black).bg(accent())
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                chips.push(Span::styled(format!(" {} ", worktree.name), style));
+            }
+        }
+        lines.push(Line::from(chips));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Style::default().fg(Color::DarkGray),
+        )));
+        Paragraph::new(lines).render(area, buf);
+    }
+
+    fn render_transcript(&self, area: Rect, buf: &mut Buffer) {
+        let lines = self.transcript_lines();
+        let height = area.height as usize;
+        let base = lines.len().saturating_sub(height);
+        let offset = base.saturating_sub(self.scroll_up);
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset as u16, 0))
+            .render(area, buf);
+    }
+
+    fn render_input(&self, area: Rect, buf: &mut Buffer) {
+        let hint = if self.running {
+            " working… · ↑/↓ scroll · ^C quit "
+        } else {
+            " enter send · tab worktrees · i inspect · /help · ^C quit "
+        };
+        let block = Block::bordered()
+            .border_style(Style::default().fg(accent()))
+            .title(Span::styled(" message ", Style::default().fg(accent())))
+            .title_bottom(Line::from(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            )));
+        let inner = block.inner(area);
+        block.render(area, buf);
+        let line = if self.running {
+            Line::from(vec![
+                Span::styled("⏳ ", Style::default().fg(accent())),
+                Span::styled("working…", Style::default().fg(Color::DarkGray)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(accent())),
+                Span::raw(self.input.clone()),
+                Span::styled("▊", Style::default().fg(accent())),
+            ])
+        };
+        Paragraph::new(line).render(inner, buf);
+    }
+
+    fn render_picker(&self, area: Rect, buf: &mut Buffer) {
+        let block = Block::bordered()
+            .title(" worktrees ")
+            .title_bottom(Line::from(" enter select · j/k move · esc back "));
+        let inner = block.inner(area);
+        block.render(area, buf);
+        let mut lines = Vec::new();
+        for (index, worktree) in self.worktrees().iter().enumerate() {
+            let marker = if index == self.selected { "❯" } else { " " };
+            let dirty = if worktree.dirty { "dirty" } else { "" };
+            let text = format!(
+                "{marker} {:<20} {:<24} {dirty}",
+                worktree.name, worktree.branch
+            );
+            let style = if index == self.selected {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(text, style)));
+        }
+        Paragraph::new(lines).render(inner, buf);
+    }
+
+    fn render_panel(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered().title(self.title());
         let inner = block.inner(area);
         block.render(area, buf);
-        let lines = self.lines();
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let paragraph = if self.screen == Screen::Splash {
-            paragraph.alignment(Alignment::Center)
-        } else {
-            paragraph
-        };
-        paragraph.render(inner, buf);
+        Paragraph::new(self.lines())
+            .wrap(Wrap { trim: false })
+            .render(inner, buf);
     }
 
     fn title(&self) -> String {
         match self.screen {
             Screen::Splash => " Ram Code ".into(),
-            Screen::Main => format!(
-                " Ram Code — {} ",
-                self.project
-                    .as_ref()
-                    .map(|project| project.name.as_str())
-                    .unwrap_or("ramify")
-            ),
+            Screen::Main => " Ram Code ".into(),
             Screen::Detail => format!(
                 " Ram Code — {} ",
                 self.detail
@@ -382,9 +759,7 @@ impl App {
                     .map(|worktree| worktree.name.as_str())
                     .unwrap_or("worktree")
             ),
-            Screen::Task if self.prompt == Prompt::NewWorktree => " Ram Code — new worktree ".into(),
-            Screen::Task => " Ram Code — task ".into(),
-            Screen::Running => " Ram Code — working ".into(),
+            Screen::Picker => " Ram Code — worktrees ".into(),
             Screen::Message => " Ram Code — result ".into(),
             Screen::Empty => " Ram Code — no project ".into(),
             Screen::Error => " Ram Code — error ".into(),
@@ -394,7 +769,6 @@ impl App {
 
     fn lines(&self) -> Vec<Line<'static>> {
         match self.screen {
-            Screen::Splash => splash_lines(),
             Screen::Loading => vec![Line::from("Reading Ramify state…")],
             Screen::Empty => vec![
                 Line::from("No Ramify project here."),
@@ -407,35 +781,7 @@ impl App {
                 Line::from(""),
                 Line::from("r retry · q quit"),
             ],
-            Screen::Main => self.main_lines(),
             Screen::Detail => self.detail_lines(),
-            Screen::Task => {
-                let heading = match self.prompt {
-                    Prompt::NewWorktree => "New worktree slug:".to_string(),
-                    _ => format!(
-                        "Task for {}:",
-                        self.selected_worktree()
-                            .map(|worktree| worktree.name.as_str())
-                            .unwrap_or("worktree")
-                    ),
-                };
-                vec![
-                    Line::from(heading),
-                    Line::from(self.task_input.clone()),
-                    Line::from(""),
-                    Line::from("enter run · esc back"),
-                ]
-            }
-            Screen::Running => {
-                let mut lines = vec![Line::from("Working…")];
-                lines.push(Line::from(""));
-                for entry in self.log.iter().rev().take(20).rev() {
-                    lines.push(Line::from(entry.clone()));
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from("esc back"));
-                lines
-            }
             Screen::Message => {
                 let mut lines: Vec<Line<'static>> = self
                     .message
@@ -457,43 +803,58 @@ impl App {
                 lines.push(Line::from("enter or esc back · q quit"));
                 lines
             }
+            _ => vec![Line::from("")],
         }
     }
 
-    fn main_lines(&self) -> Vec<Line<'static>> {
+    fn transcript_lines(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        if let Some(project) = &self.project {
-            lines.push(Line::from(format!(
-                "Project  {}  {}",
-                project.name,
-                project.primary.display()
+        if self.entries.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Ask for a change in the selected worktree.",
+                Style::default().fg(Color::Gray),
             )));
-        } else {
-            lines.push(Line::from("Project  (none)"));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from("Worktrees"));
-        if self.worktrees().is_empty() {
-            lines.push(Line::from("  (none)"));
-        }
-        for (index, worktree) in self.worktrees().iter().enumerate() {
-            let marker = if index == self.selected { ">" } else { " " };
-            let dirty = if worktree.dirty { " dirty" } else { "" };
-            let next = worktree
-                .workflow
-                .as_ref()
-                .and_then(|workflow| workflow.next.as_ref())
-                .map(|step| format!("  next: {}", step.step))
-                .unwrap_or_default();
-            lines.push(Line::from(format!(
-                "{marker} {:<18} {:<24}{dirty}{next}",
-                worktree.name, worktree.branch
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Press /help for commands, Tab to change the worktree.",
+                Style::default().fg(Color::DarkGray),
             )));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(
-            "j/k move · enter open · c code · n new · u up · d down · s step · r refresh · q quit",
-        ));
+        for entry in &self.entries {
+            let text = entry.text.lines().take(40);
+            match entry.role {
+                Role::User => lines.push(Line::from(vec![
+                    Span::styled(
+                        "❯ ",
+                        Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(text.collect::<Vec<_>>().join("\n")),
+                ])),
+                Role::Assistant => {
+                    push_prefixed(&mut lines, text, "⏺ ", Style::default().fg(accent()))
+                }
+                Role::Tool => push_prefixed(
+                    &mut lines,
+                    text,
+                    "⏺ ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Role::ToolResult => push_prefixed(
+                    &mut lines,
+                    text,
+                    "  ⎿ ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Role::Error => push_prefixed(&mut lines, text, "⏺ ", Style::default().fg(Color::Red)),
+                Role::Info => push_prefixed(
+                    &mut lines,
+                    text,
+                    "· ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            }
+            lines.push(Line::from(""));
+        }
         lines
     }
 
@@ -548,7 +909,7 @@ impl App {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(
-            "c code · u up · d down · s step · esc back · q quit",
+            "u up · d down · s step · esc back · q quit",
         ));
         lines
     }
@@ -560,13 +921,56 @@ impl Widget for &App {
     }
 }
 
-const RAM_LOGO: &[&str] = &[
-    "      ╱╲                   ╱╲",
-    "     ╱  ╲_________________╱  ╲",
-    "    ╱   ◉                 ◉   ╲",
-    "   ╱           ╲_______╱         ╲",
-    "   ╲_____________________________╱",
+fn accent() -> Color {
+    Color::Rgb(215, 119, 87)
+}
+
+fn push_prefixed<'a>(
+    lines: &mut Vec<Line<'static>>,
+    text: impl Iterator<Item = &'a str>,
+    prefix: &'static str,
+    style: Style,
+) {
+    let mut first = true;
+    for part in text {
+        let mark = if first {
+            Span::styled(prefix, style)
+        } else {
+            Span::raw(" ".repeat(prefix.chars().count()))
+        };
+        lines.push(Line::from(vec![mark, Span::raw(part.to_string())]));
+        first = false;
+    }
+}
+
+const RAM_ART: &[&str] = &[
+    "                     ░░░    ░▒▒▒▒▒▒▒▒▒░",
+    "                ░░▒▓▓█████▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒",
+    "              ▓▓██████████████▓▓▓▒▒▒▒▒▒▒▒▒",
+    "              ▓▓████████████████▓▒▒▒▒▒▒▒▒▒▒",
+    "         ░▒▒▒▒▓▓████████████████▓▒▒▓▓▓▒▒▒▒▒",
+    "       ▒▒▒▒▓▓▓██████████████████▓▒▒▓▓▓▒▒▒▒▒",
+    "       ▒▓████▓███████████████▓▓▓▓▓▒▓▓▓▒▒▒▒░",
+    "     ░▓████████████████████▓▓▓████▒▒▒▒▒▒▒▒",
+    "    ▒▓▓████████████████████▓▓▒████▒▒ ░░░",
+    "    ▓██████████████████████▓▓▒████▒░",
+    "    ▓████████████████████████▓▒▒▒▒▒▒░",
+    "   ░▓█████████████████████████▒▒▒▒▒▒░",
+    " ░▓███████████████████▓▒██████▒▒▒▒▒▒░",
+    " ░█████████████████▓▓▓▓▓██████░",
+    "███████████████████▓▓▓▒▓▓▓███▒",
+    "████████▓▓█████████▓▓▓▒▓▓▓█████▓▒▒▒░",
+    "████▓███▓▒▒▓████░▒▒▒   ▒▒▓███████▓▒▒▒▒",
+    "░░░░░░ ▓▓▓░░░░░░           ▓█████▓▓███░",
+    "       ▓▓███▒             ░▒▒████▓▓███░",
+    "       ▓▓███▒░    ░░░ ▒▓███▓▓▓████▓███▓",
+    "       ░▓███▒░   ▒▒▒▒████████████████████",
+    "          ▒▒▒░   ▒▒▒▒████████████████████",
+    "                 ▒▒▒▒████████████████████",
+    "                   ░░░░░▓▓▓▓██████████▓▓",
+    "                         ░░░ ░░▒▒▒  ░░░",
 ];
+
 
 const RAM_CODE_ART: &[&str] = &[
     "██████╗  █████╗ ███╗   ███╗    ██████╗  ██████╗ ██████╗ ███████╗",
@@ -577,28 +981,31 @@ const RAM_CODE_ART: &[&str] = &[
     "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝    ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝",
 ];
 
-fn splash_lines() -> Vec<Line<'static>> {
+fn splash_lines(height: usize, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for art in RAM_LOGO {
+    for art in RAM_ART {
         lines.push(Line::from(Span::styled(
             *art,
             Style::default().fg(Color::Cyan),
         )));
     }
-    lines.push(Line::from(""));
-    for art in RAM_CODE_ART {
-        lines.push(Line::from(Span::styled(
-            *art,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
-    for shade in shadow_rows(RAM_CODE_ART) {
-        lines.push(Line::from(Span::styled(
-            shade,
-            Style::default().fg(Color::DarkGray),
-        )));
+    let wordmark = RAM_CODE_ART.len() + shadow_rows(RAM_CODE_ART).len() + 1;
+    if width >= 64 && height >= lines.len() + wordmark + 5 {
+        lines.push(Line::from(""));
+        for art in RAM_CODE_ART {
+            lines.push(Line::from(Span::styled(
+                *art,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        for shade in shadow_rows(RAM_CODE_ART) {
+            lines.push(Line::from(Span::styled(
+                shade,
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -624,8 +1031,5 @@ fn shadow_rows(art: &[&str]) -> Vec<String> {
             far[index + 2] = '░';
         }
     }
-    vec![
-        near.into_iter().collect(),
-        far.into_iter().collect(),
-    ]
+    vec![near.into_iter().collect(), far.into_iter().collect()]
 }
