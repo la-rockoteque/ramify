@@ -545,6 +545,47 @@ fn default_lane(workflow: &WorkflowDef) -> Option<String> {
         .or_else(|| workflow.lanes.keys().next().cloned())
 }
 
+/// Python's `json.dumps` separates with ", " and ": "; the shell embeds its output verbatim.
+pub fn progress_json(progress: &Progress) -> String {
+    let mut bytes = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(&mut bytes, PythonFormatter);
+    progress
+        .serialize(&mut serializer)
+        .expect("progress serializes");
+    String::from_utf8(bytes).expect("json is UTF-8")
+}
+
+struct PythonFormatter;
+
+impl serde_json::ser::Formatter for PythonFormatter {
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if !first {
+            writer.write_all(b", ")?;
+        }
+        Ok(())
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if !first {
+            writer.write_all(b", ")?;
+        }
+        Ok(())
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        writer.write_all(b": ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,43 +627,3 @@ mod tests {
     }
 }
 
-/// Python's `json.dumps` separates with ", " and ": "; the shell embeds its output verbatim.
-pub fn progress_json(progress: &Progress) -> String {
-    let mut bytes = Vec::new();
-    let mut serializer = serde_json::Serializer::with_formatter(&mut bytes, PythonFormatter);
-    progress
-        .serialize(&mut serializer)
-        .expect("progress serializes");
-    String::from_utf8(bytes).expect("json is UTF-8")
-}
-
-struct PythonFormatter;
-
-impl serde_json::ser::Formatter for PythonFormatter {
-    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
-    where
-        W: ?Sized + std::io::Write,
-    {
-        if !first {
-            writer.write_all(b", ")?;
-        }
-        Ok(())
-    }
-
-    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
-    where
-        W: ?Sized + std::io::Write,
-    {
-        if !first {
-            writer.write_all(b", ")?;
-        }
-        Ok(())
-    }
-
-    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
-    where
-        W: ?Sized + std::io::Write,
-    {
-        writer.write_all(b": ")
-    }
-}
