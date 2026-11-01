@@ -1,0 +1,7 @@
+cli/**
+bin/ramify
+libexec/**
+tests/**
+README.md
+.gitignore
+.ramify/work/rust-cli/**

@@ -77,6 +77,26 @@ for a in "${@:2}"; do
   case "$a" in -h|--help) usage "$1" || { usage >&2; exit 2; }; exit 0 ;; esac
 done
 
+# The Rust port handles the commands it implements. RAMIFY_SHELL=1 forces this script, which the
+# parity tests use. A missing binary falls back here.
+RAMIFY_RS="${RAMIFY_RS:-$RAMIFY_HOME/cli/target/release/ramify}"
+if [ -z "${RAMIFY_SHELL:-}" ] && [ -x "$RAMIFY_RS" ]; then
+  case "${1:-}" in
+    config|status|card|dash|dash-project|runs|label|lane|ping|down|shared-down|write-set) exec "$RAMIFY_RS" "$@" ;;
+    workflow) case "${2:-list}" in list|show) exec "$RAMIFY_RS" "$@" ;; esac ;;
+    gates) exec "$RAMIFY_RS" "$@" ;;
+    mem) [ -n "${2:-}" ] || exec "$RAMIFY_RS" "$@" ;;
+    statusline) exec "$RAMIFY_RS" "$@" ;;
+    reap) exec "$RAMIFY_RS" "$@" ;;
+    new) exec "$RAMIFY_RS" "$@" ;;
+    cleanup) exec "$RAMIFY_RS" "$@" ;;
+    prune|delete|complete) exec "$RAMIFY_RS" "$@" ;;
+    step)
+      [ -n "${2:-}" ] || exec "$RAMIFY_RS" "$@"
+      case "${2:-}" in asked) exec "$RAMIFY_RS" "$@" ;; esac ;;
+  esac
+fi
+
 # `RAMIFY_ROOT` wins over the working directory: hooks run from the session's project directory,
 # not from the worktree under test, and a `down` aimed at the wrong tree kills nothing and
 # reports success.

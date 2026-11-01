@@ -1,0 +1,19 @@
+[package]
+name = "ramify-cli"
+version = "0.1.0"
+edition = "2021"
+description = "The ramify CLI, in Rust"
+
+[[bin]]
+name = "ramify"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+serde_yaml_ng = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+regex = "1"
+indexmap = { version = "2", features = ["serde"] }
