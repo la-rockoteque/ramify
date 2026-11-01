@@ -385,3 +385,60 @@ fn card_matches_the_shell() {
         "stdout differs"
     );
 }
+
+#[test]
+fn gates_match_the_shell() {
+    let fixture = temp("gates");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    fs::create_dir_all(fixture.join(".ramify/work/demo")).unwrap();
+    fs::write(
+        fixture.join(".ramify/work/demo/order.md"),
+        "---\nworkflow: feature\nlane: light\nbranch: main\ntags: []\ncreated: 2026-11-01\nsteps: []\nask: {step: spec, asked: '2026-11-01', files: [spec.md]}\n---\n\n# demo\n",
+    )
+    .unwrap();
+    fs::write(fixture.join("spec.md"), "The spec.\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let registry = temp("gates-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, format!("{}\n", fixture.display())).unwrap();
+    let repo = repo_root();
+
+    let shell_state = temp("gates-shell-state");
+    let rust_state = temp("gates-rust-state");
+    let shell = |args: &[&str]| {
+        Command::new(repo.join("bin/ramify"))
+            .args(args)
+            .env("RAMIFY_SHELL", "1")
+            .env("RAMIFY_STATE_DIR", &shell_state)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+    let rust = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(args)
+            .env_remove("RAMIFY_SHELL")
+            .env("RAMIFY_STATE_DIR", &rust_state)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+
+    for args in [vec!["gates", "--scan"], vec!["gates", "--json"], vec!["gates"]] {
+        let shell_out = shell(&args);
+        let rust_out = rust(&args);
+        assert_eq!(shell_out.status.code(), rust_out.status.code(), "{args:?} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell_out.stdout),
+            String::from_utf8_lossy(&rust_out.stdout),
+            "{args:?} stdout differs"
+        );
+    }
+}

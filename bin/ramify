@@ -84,7 +84,10 @@ if [ -z "${RAMIFY_SHELL:-}" ] && [ -x "$RAMIFY_RS" ]; then
   case "${1:-}" in
     config|status|card|dash|dash-project|runs) exec "$RAMIFY_RS" "$@" ;;
     workflow) case "${2:-list}" in list|show) exec "$RAMIFY_RS" "$@" ;; esac ;;
-    step) [ -n "${2:-}" ] || exec "$RAMIFY_RS" "$@" ;;
+    gates) exec "$RAMIFY_RS" "$@" ;;
+    step)
+      [ -n "${2:-}" ] || exec "$RAMIFY_RS" "$@"
+      case "${2:-}" in asked) exec "$RAMIFY_RS" "$@" ;; esac ;;
   esac
 fi
 

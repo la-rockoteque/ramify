@@ -16,6 +16,12 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "gates" {
+        std::process::exit(commands::gates(&args[1..]));
+    }
+    if command == "step" && args.get(1).map(String::as_str) == Some("asked") && json {
+        std::process::exit(commands::step_asked());
+    }
     if command == "card" {
         std::process::exit(commands::card());
     }

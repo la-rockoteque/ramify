@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::dash::{env_get, health_ok, listening};
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn config(args: &[String]) -> i32 {
@@ -622,4 +622,207 @@ fn smoke(_config: &Config, spec: &str, port: u32) -> Option<String> {
     } else {
         Some(format!("{path} returned {code}"))
     }
+}
+
+pub fn step_asked() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    match crate::workflow::asked_json(&config) {
+        Ok(text) => {
+            println!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            1
+        }
+    }
+}
+
+pub fn gates(args: &[String]) -> i32 {
+    let root = std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into());
+    let directory = Path::new(&root).join("gates");
+    match args.first().map(String::as_str) {
+        Some("--scan") => {
+            scan(&directory);
+            return 0;
+        }
+        Some("--check") => {
+            if let Some(path) = args.get(1) {
+                check(&directory, Path::new(path));
+            }
+            return 0;
+        }
+        Some("--json") => {
+            if !directory.join(".scanned").is_file() {
+                scan(&directory);
+            }
+            let entries = gate_entries(&directory);
+            let mut text = String::from("[");
+            for (index, (path, ask)) in entries.iter().enumerate() {
+                if index > 0 {
+                    text.push(',');
+                }
+                let project = project_of(path);
+                text.push_str(&format!(
+                    "{{\"project\":{},\"path\":{},\"worktree\":{},\"ask\":{ask}}}",
+                    serde_json::to_string(&project).unwrap(),
+                    serde_json::to_string(&path.to_string_lossy().into_owned()).unwrap(),
+                    serde_json::to_string(&worktree_of(path)).unwrap()
+                ));
+            }
+            text.push(']');
+            println!("{text}");
+            return 0;
+        }
+        _ => {}
+    }
+    if !directory.join(".scanned").is_file() {
+        scan(&directory);
+    }
+    let entries = gate_entries(&directory);
+    if entries.is_empty() {
+        println!("nothing waits on a decision");
+        return 0;
+    }
+    for (path, ask) in entries {
+        let value: serde_json::Value = serde_json::from_str(&ask).unwrap_or_default();
+        let step = value.get("step").and_then(|value| value.as_str()).unwrap_or("");
+        let asked = value.get("asked").and_then(|value| value.as_str()).unwrap_or("");
+        let files: Vec<&str> = value
+            .get("files")
+            .and_then(|files| files.as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|file| file.get("path").and_then(|path| path.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        println!(
+            "  {}/{}  {step:<9} asked {asked}  {}",
+            project_of(&path),
+            worktree_of(&path),
+            files.join(", ")
+        );
+    }
+    0
+}
+
+fn scan(directory: &Path) {
+    let _ = std::fs::create_dir_all(directory);
+    for root in crate::dash::projects() {
+        let Ok(config) = Config::for_root(&root) else {
+            continue;
+        };
+        let Ok(text) = crate::config::git(&["worktree", "list", "--porcelain"], &config.primary)
+        else {
+            continue;
+        };
+        for path in text
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(Path::new)
+        {
+            let has = path.join(".ramify").is_dir() || config.primary.join(".ramify").is_dir();
+            if has {
+                check(directory, path);
+            }
+        }
+    }
+    let _ = std::fs::write(directory.join(".scanned"), "");
+}
+
+fn check(directory: &Path, path: &Path) {
+    let Ok(real) = path.canonicalize() else {
+        return;
+    };
+    let entry = directory.join(entry_name(&real));
+    let Ok(config) = Config::for_root(&real) else {
+        return;
+    };
+    match crate::workflow::asked_json(&config) {
+        Ok(text) if text.starts_with('{') => {
+            let _ = std::fs::create_dir_all(directory);
+            let temporary = entry.with_extension(format!("{}", std::process::id()));
+            if std::fs::write(&temporary, format!("{}\n", real.display())).is_ok() {
+                let _ = std::fs::rename(&temporary, &entry);
+            }
+        }
+        _ => {
+            let _ = std::fs::remove_file(&entry);
+        }
+    }
+}
+
+fn entry_name(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn gate_entries(directory: &Path) -> Vec<(PathBuf, String)> {
+    let mut entries = Vec::new();
+    let Ok(read) = std::fs::read_dir(directory) else {
+        return entries;
+    };
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.ends_with(".tmp") || name.contains('.') {
+            // A hash name has no extension; a PID-suffixed temp file does.
+            if name.starts_with('.') || name.ends_with(".tmp") {
+                continue;
+            }
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Some(first) = text.lines().next() else {
+            continue;
+        };
+        let path = PathBuf::from(first);
+        if !path.is_dir() {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        let Ok(config) = Config::for_root(&path) else {
+            continue;
+        };
+        match crate::workflow::asked_json(&config) {
+            Ok(ask) if ask.starts_with('{') => entries.push((path, ask)),
+            _ => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+fn project_of(path: &Path) -> String {
+    let primary = crate::config::git(&["worktree", "list", "--porcelain"], path)
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("worktree "))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    Path::new(&primary)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or(primary)
+}
+
+fn worktree_of(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }

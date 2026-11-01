@@ -127,7 +127,7 @@ pub fn all_json() -> Result<String, String> {
     Ok(text)
 }
 
-fn projects() -> Vec<PathBuf> {
+pub(crate) fn projects() -> Vec<PathBuf> {
     let mut roots = BTreeSet::new();
     let mut unsorted: Vec<String> = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();

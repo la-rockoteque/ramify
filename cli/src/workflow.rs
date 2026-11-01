@@ -62,7 +62,7 @@ struct OrderMeta {
     branch: Option<String>,
     story: Option<String>,
     steps: Vec<OrderStep>,
-    ask: Option<(String, Option<String>)>,
+    ask: Option<Ask>,
 }
 
 struct OrderStep {
@@ -70,6 +70,13 @@ struct OrderStep {
     na: bool,
     date: Option<String>,
     note: Option<String>,
+}
+
+struct Ask {
+    step: String,
+    asked: Option<String>,
+    files: Vec<String>,
+    decision: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -126,10 +133,11 @@ pub fn report(cfg: &Config, root: &Path, branch: &str) -> Option<Progress> {
                 .unwrap_or_else(|| "auto".into()),
         }
     });
-    let asked = meta.ask.as_ref().and_then(|(step, decision)| match decision.as_deref() {
-        None | Some("open") => Some(step.clone()),
-        _ => None,
-    });
+    let asked = meta
+        .ask
+        .as_ref()
+        .filter(|ask| ask.decision.is_none())
+        .map(|ask| ask.step.clone());
     let states = lane
         .iter()
         .map(|step| {
@@ -292,7 +300,24 @@ fn extract(value: &Value, record: &RecordDef) -> Option<OrderMeta> {
             .get("decision")
             .and_then(Value::as_str)
             .map(str::to_string);
-        Some((step, decision))
+        let asked = ask.get("asked").map(scalar).filter(|value| !value.is_empty());
+        let files = ask
+            .get("files")
+            .and_then(Value::as_sequence)
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Ask {
+            step,
+            asked,
+            files,
+            decision,
+        })
     });
     Some(OrderMeta {
         workflow,
@@ -431,7 +456,7 @@ fn gate_note(
     if meta
         .ask
         .as_ref()
-        .is_some_and(|(asked, decision)| asked == step && decision.is_none())
+        .is_some_and(|ask| ask.step == step && ask.decision.is_none())
     {
         return format!(
             "  (human gate: asked, waits on `ramify approve {step}` or the approvals window)"
@@ -454,6 +479,71 @@ fn gate_note(
         );
     }
     "  (human gate: record it only after the user's explicit OK)".into()
+}
+
+pub fn asked_json(cfg: &Config) -> Result<String, String> {
+    let definitions = definitions(cfg).ok_or("no workflows are defined")?;
+    let work_dir = definitions
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| ".ramify/work".into());
+    let branch = std::env::var("WF_BRANCH")
+        .ok()
+        .or_else(|| crate::config::git(&["rev-parse", "--abbrev-ref", "HEAD"], &cfg.repo_root).ok())
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    let Some((_path, meta)) = find_order(&cfg.repo_root, &work_dir, &branch, &definitions) else {
+        return Ok("null".into());
+    };
+    let Some(ask) = meta.ask.as_ref().filter(|ask| ask.decision.is_none()) else {
+        return Ok("null".into());
+    };
+    let step = ask.step.clone();
+    let does = definitions
+        .steps
+        .get(&step)
+        .and_then(|definition| definition.does.clone());
+    let order_branch = meta.branch.clone().or_else(|| {
+        let story = meta.story.clone()?;
+        let pattern = definitions
+            .workflows
+            .get(&meta.workflow)?
+            .branch
+            .clone()?;
+        Some(pattern.replace("{slug}", &story))
+    });
+    let root = cfg.repo_root.canonicalize().unwrap_or_else(|_| cfg.repo_root.clone());
+    let files: Vec<serde_json::Value> = ask
+        .files
+        .iter()
+        .map(|relative| {
+            let full = cfg.repo_root.join(relative);
+            let canonical = full.canonicalize().unwrap_or_else(|_| full.clone());
+            let text = if !canonical.starts_with(&root) {
+                format!("(cannot read {relative}: outside the worktree)")
+            } else {
+                match std::fs::read(&canonical) {
+                    Ok(bytes) => {
+                        let limit = 512 << 10;
+                        let slice = &bytes[..bytes.len().min(limit)];
+                        String::from_utf8_lossy(slice).into_owned()
+                    }
+                    Err(error) => format!("(cannot read {relative}: {error})"),
+                }
+            };
+            serde_json::json!({"path": relative, "text": text})
+        })
+        .collect();
+    let value = serde_json::json!({
+        "step": step,
+        "does": does,
+        "asked": ask.asked,
+        "workflow": meta.workflow,
+        "lane": meta.lane,
+        "branch": order_branch,
+        "files": files,
+    });
+    Ok(crate::pyjson::to_string(&value))
 }
 
 pub fn workflow_text(args: &[String]) -> Result<String, String> {
