@@ -27,7 +27,8 @@ impl AgentConfig {
         let token = get("ANTHROPIC_AUTH_TOKEN").ok_or_else(|| {
             "ANTHROPIC_AUTH_TOKEN is not set. Export it, then start the task again.".to_string()
         })?;
-        let base_url = get("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let base_url =
+            normalize_base(&get("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string()));
         let model = get("RAM_CODE_MODEL")
             .or_else(|| get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
             .or_else(|| get("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"))
@@ -81,10 +82,7 @@ impl AnthropicLlm {
 
 impl Llm for AnthropicLlm {
     fn complete(&self, request: &Value) -> Result<Value, String> {
-        let url = format!(
-            "{}/v1/messages",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let url = messages_url(&self.config.base_url);
         let body = serde_json::to_string(request)
             .map_err(|e| format!("could not encode the model request: {e}"))?;
         let agent = ureq::Agent::new_with_config(
@@ -99,7 +97,7 @@ impl Llm for AnthropicLlm {
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .send(body.as_str())
-            .map_err(|e| format!("model API request failed: {e}"))?;
+            .map_err(|e| format!("model API request to {url} failed: {e}"))?;
         let status = response.status().as_u16();
         let text = response
             .body_mut()
@@ -221,4 +219,99 @@ fn shorten(text: &str, limit: usize) -> String {
         cut -= 1;
     }
     format!("{}…", &text[..cut])
+}
+
+pub fn normalize_base(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+
+    let (scheme, authority) = match unquoted.rfind("://") {
+        Some(index) => {
+            let before = &unquoted[..index];
+            let scheme = before
+                .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'))
+                .next()
+                .unwrap_or("");
+            (scheme.to_ascii_lowercase(), &unquoted[index + 3..])
+        }
+        None => ("http".to_string(), unquoted),
+    };
+
+    let host = authority.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        return DEFAULT_BASE_URL.to_string();
+    }
+    format!("{scheme}://{authority}")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn messages_url(base_url: &str) -> String {
+    let base = normalize_base(base_url);
+    let base = base.strip_suffix("/v1/messages").unwrap_or(&base);
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}/v1/messages")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(base: &str) -> AgentConfig {
+        AgentConfig::from_env(|key| match key {
+            "ANTHROPIC_AUTH_TOKEN" => Some("token".into()),
+            "ANTHROPIC_BASE_URL" => Some(base.into()),
+            _ => None,
+        })
+        .expect("config")
+    }
+
+    #[test]
+    fn base_url_without_scheme_gets_http() {
+        let config = config("127.0.0.1:15721");
+        assert_eq!(
+            messages_url(&config.base_url),
+            "http://127.0.0.1:15721/v1/messages"
+        );
+    }
+
+    #[test]
+    fn a_trailing_v1_is_not_duplicated() {
+        assert_eq!(
+            messages_url("http://127.0.0.1:15721/v1/"),
+            "http://127.0.0.1:15721/v1/messages"
+        );
+        assert_eq!(
+            messages_url("http://127.0.0.1:15721/v1/messages"),
+            "http://127.0.0.1:15721/v1/messages"
+        );
+    }
+
+    #[test]
+    fn a_doubled_scheme_keeps_the_last_one() {
+        assert_eq!(
+            messages_url("http:https://llms.nexapp.dev"),
+            "https://llms.nexapp.dev/v1/messages"
+        );
+        assert_eq!(
+            messages_url("  \"https://llms.nexapp.dev/\"  "),
+            "https://llms.nexapp.dev/v1/messages"
+        );
+    }
+
+    #[test]
+    fn an_empty_authority_falls_back_to_the_default() {
+        assert_eq!(
+            messages_url("http://"),
+            format!("{DEFAULT_BASE_URL}/v1/messages")
+        );
+    }
 }
