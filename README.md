@@ -16,6 +16,41 @@ It ships as one CLI with plugins for Claude Code and Codex. Both agents share th
 work orders, configuration, approvals, and QA stack state. The plugins supply lifecycle hooks
 and skills that tell the agent how to use the CLI.
 
+## Ram Code
+
+Ram Code is a terminal harness for Ramify, written in Rust with Ratatui (`Cargo.toml`, `src/`).
+It lists the project's worktrees, runs Ramify actions on them, and sends a coding task to
+DeepSeek inside the selected worktree.
+
+Run it from a configured checkout:
+
+```bash
+cargo run
+```
+
+Press any key to leave the splash. The interface is a chat:
+
+- `Enter` sends the message, `Tab` opens the worktree picker, `i` inspects the selected
+  worktree, `↑`/`↓` scroll, `Ctrl+C` quits.
+- Slash commands: `/help`, `/up`, `/down`, `/step`, `/status`, `/workflow`, `/new <slug>`,
+  `/refresh`, `/worktrees`, `/clear`, `/quit`.
+
+The first message starts a task in the selected worktree. The transcript stays, and later
+messages carry the earlier turns to the model. Each task runs in a worker process, so the
+interface keeps drawing while the model works.
+
+Ram Code reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. It stores no key. The model is
+`RAM_CODE_MODEL`, else `ANTHROPIC_DEFAULT_SONNET_MODEL`, else `deepseek-v4.1-flash`.
+
+Run one task without the interface:
+
+```bash
+RAMIFY_ROOT=/path/to/worktree cargo run -- --task "Add a --version flag"
+```
+
+The tests are `cargo test`; they cover the acceptance criteria in
+`.ramify/work/ram-code/spec.md`.
+
 ## Install
 
 ```bash
