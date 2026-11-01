@@ -1,44 +1,59 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
+use indexmap::IndexMap;
 use serde_yaml_ng::Value;
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Default)]
-struct Definitions {
+pub(crate) struct Definitions {
     #[serde(default)]
-    work_dir: Option<String>,
+    pub(crate) work_dir: Option<String>,
     #[serde(default)]
-    record: Option<RecordDef>,
+    pub(crate) record: Option<RecordDef>,
     #[serde(default)]
-    workflows: std::collections::HashMap<String, WorkflowDef>,
+    pub(crate) workflows: IndexMap<String, WorkflowDef>,
     #[serde(default)]
-    steps: std::collections::HashMap<String, StepDef>,
+    pub(crate) steps: std::collections::HashMap<String, StepDef>,
 }
 
 #[derive(Deserialize, Default, Clone)]
-struct RecordDef {
+pub(crate) struct RecordDef {
     #[serde(default)]
     filename: Option<String>,
     #[serde(default)]
     workflow_field: Option<String>,
     #[serde(default)]
     slug_field: Option<String>,
+    #[serde(default)]
+    date_field: Option<String>,
+    #[serde(default)]
+    note_field: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-struct WorkflowDef {
+pub(crate) struct WorkflowDef {
     #[serde(default)]
-    branch: Option<String>,
+    pub(crate) does: Option<String>,
     #[serde(default)]
-    lanes: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) branch: Option<String>,
+    #[serde(default)]
+    pub(crate) default_lane: Option<String>,
+    #[serde(default)]
+    pub(crate) lanes: IndexMap<String, Vec<String>>,
+    #[serde(default)]
+    pub(crate) min_lane: IndexMap<String, String>,
 }
 
 #[derive(Deserialize, Default)]
-struct StepDef {
+pub(crate) struct StepDef {
     #[serde(default)]
-    skill: Option<String>,
+    pub(crate) skill: Option<String>,
     #[serde(default)]
-    gate: Option<String>,
+    pub(crate) gate: Option<String>,
+    #[serde(default)]
+    pub(crate) does: Option<String>,
+    #[serde(default)]
+    pub(crate) files: Option<Vec<String>>,
 }
 
 struct OrderMeta {
@@ -53,6 +68,8 @@ struct OrderMeta {
 struct OrderStep {
     step: String,
     na: bool,
+    date: Option<String>,
+    note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -146,7 +163,7 @@ pub fn report(cfg: &Config, root: &Path, branch: &str) -> Option<Progress> {
     })
 }
 
-fn definitions(cfg: &Config) -> Option<Definitions> {
+pub(crate) fn definitions(cfg: &Config) -> Option<Definitions> {
     let file = workflows_file(cfg)?;
     let text = std::fs::read_to_string(file).ok()?;
     serde_yaml_ng::from_str(&text).ok()
@@ -240,6 +257,8 @@ fn extract(value: &Value, record: &RecordDef) -> Option<OrderMeta> {
         .get(slug_field.as_str())
         .and_then(Value::as_str)
         .map(str::to_string);
+    let date_field = record.date_field.clone().unwrap_or_else(|| "date".into());
+    let note_field = record.note_field.clone().unwrap_or_else(|| "note".into());
     let steps = value
         .get("steps")
         .and_then(Value::as_sequence)
@@ -249,7 +268,20 @@ fn extract(value: &Value, record: &RecordDef) -> Option<OrderMeta> {
                 .filter_map(|item| {
                     let step = item.get("step")?.as_str()?.to_string();
                     let na = item.get("na").and_then(Value::as_bool).unwrap_or(false);
-                    Some(OrderStep { step, na })
+                    let date = item
+                        .get(date_field.as_str())
+                        .map(scalar)
+                        .filter(|value| !value.is_empty());
+                    let note = item
+                        .get(note_field.as_str())
+                        .map(scalar)
+                        .filter(|value| !value.is_empty());
+                    Some(OrderStep {
+                        step,
+                        na,
+                        date,
+                        note,
+                    })
                 })
                 .collect()
         })
@@ -270,6 +302,15 @@ fn extract(value: &Value, record: &RecordDef) -> Option<OrderMeta> {
         steps,
         ask,
     })
+}
+
+fn scalar(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn matches_branch(meta: &OrderMeta, branch: &str, definitions: &Definitions) -> bool {
@@ -306,6 +347,204 @@ fn frontmatter(text: &str) -> Option<Value> {
 }
 
 #[allow(clippy::items_after_test_module)]
+pub fn order_text(cfg: &Config) -> Result<String, String> {
+    let definitions = definitions(cfg).ok_or("no workflows are defined")?;
+    let work_dir = definitions
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| ".ramify/work".into());
+    let branch = std::env::var("WF_BRANCH")
+        .ok()
+        .or_else(|| crate::config::git(&["rev-parse", "--abbrev-ref", "HEAD"], &cfg.repo_root).ok())
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    let (path, meta) = find_order(&cfg.repo_root, &work_dir, &branch, &definitions)
+        .ok_or_else(|| format!("no work order for branch {branch}"))?;
+    let workflow = definitions
+        .workflows
+        .get(&meta.workflow)
+        .ok_or_else(|| format!("no workflow '{}'", meta.workflow))?;
+    let lane = workflow
+        .lanes
+        .get(&meta.lane)
+        .ok_or_else(|| format!("lane '{}' is not one of {}'s", meta.lane, meta.workflow))?;
+
+    let recorded: Vec<&str> = meta.steps.iter().map(|entry| entry.step.as_str()).collect();
+    let pending: Vec<&String> = lane
+        .iter()
+        .filter(|step| !recorded.contains(&step.as_str()))
+        .collect();
+    let next = pending.first().map(|step| step.as_str());
+    let relative = path
+        .strip_prefix(&cfg.repo_root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let prefix = if definitions.record.is_some() {
+        "repository "
+    } else {
+        ""
+    };
+    let mut lines = vec![format!(
+        "{prefix}{} · {} lane · {relative}",
+        meta.workflow, meta.lane
+    )];
+    for step in lane {
+        if let Some(entry) = meta.steps.iter().find(|entry| &entry.step == step) {
+            let date = entry.date.clone().unwrap_or_default();
+            let na = if entry.na { "  n/a" } else { "" };
+            let note = entry
+                .note
+                .as_ref()
+                .map(|note| format!("  {note}"))
+                .unwrap_or_default();
+            lines.push(format!("  ✓ {step:<10} {date}{na}{note}"));
+        } else if next == Some(step.as_str()) {
+            let definition = definitions.steps.get(step);
+            let skill = definition
+                .and_then(|def| def.skill.clone())
+                .unwrap_or_default();
+            let does = definition
+                .and_then(|def| def.does.clone())
+                .unwrap_or_default();
+            let gate = if definition.and_then(|def| def.gate.as_deref()) == Some("human") {
+                gate_note(definition, &meta, step, &cfg.repo_root)
+            } else {
+                String::new()
+            };
+            lines.push(format!("  → {step:<10} {skill} — {does}{gate}"));
+        } else {
+            lines.push(format!("  · {step}"));
+        }
+    }
+    if next.is_none() {
+        lines.push("  every step is recorded".into());
+    }
+    Ok(lines.join("\n"))
+}
+
+fn gate_note(
+    definition: Option<&StepDef>,
+    meta: &OrderMeta,
+    step: &str,
+    root: &Path,
+) -> String {
+    if meta
+        .ask
+        .as_ref()
+        .is_some_and(|(asked, decision)| asked == step && decision.is_none())
+    {
+        return format!(
+            "  (human gate: asked, waits on `ramify approve {step}` or the approvals window)"
+        );
+    }
+    let missing: Vec<&String> = definition
+        .and_then(|def| def.files.as_ref())
+        .map(|files| {
+            files
+                .iter()
+                .filter(|file| !root.join(file).is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !missing.is_empty() {
+        let names: Vec<&str> = missing.iter().map(|file| file.as_str()).collect();
+        return format!(
+            "  (human gate: write {}, then Ramify asks)",
+            names.join(", ")
+        );
+    }
+    "  (human gate: record it only after the user's explicit OK)".into()
+}
+
+pub fn workflow_text(args: &[String]) -> Result<String, String> {
+    let config = Config::resolve()?;
+    let definitions = definitions(&config).ok_or("no workflows are defined")?;
+    match args.first().map(String::as_str) {
+        Some("show") => {
+            let Some(name) = args.get(1) else {
+                return Err("usage: ramify workflow show <workflow>".into());
+            };
+            let workflow = definitions.workflows.get(name).ok_or_else(|| {
+                format!(
+                    "no workflow '{name}' — one of: {}",
+                    definitions
+                        .workflows
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            let default = default_lane(workflow);
+            let mut lines = vec![format!(
+                "{name} — {}   branch {}",
+                workflow.does.clone().unwrap_or_default(),
+                workflow.branch.clone().unwrap_or_else(|| "{slug}".into())
+            )];
+            for (lane, steps) in &workflow.lanes {
+                lines.push(String::new());
+                lines.push(format!(
+                    "  {lane}{}",
+                    if Some(lane) == default.as_ref() {
+                        " (default)"
+                    } else {
+                        ""
+                    }
+                ));
+                for step in steps {
+                    let definition = definitions.steps.get(step);
+                    let skill = definition
+                        .and_then(|def| def.skill.clone())
+                        .unwrap_or_default();
+                    let gate = if definition.and_then(|def| def.gate.as_deref()) == Some("human") {
+                        "human gate"
+                    } else {
+                        ""
+                    };
+                    let does = definition
+                        .and_then(|def| def.does.clone())
+                        .unwrap_or_default();
+                    lines.push(format!("    {step:<10} {skill:<18} {gate:<10} {does}"));
+                }
+            }
+            for (tag, lane) in &workflow.min_lane {
+                lines.push(format!("  tag {tag} → at least {lane}"));
+            }
+            Ok(lines.join("\n"))
+        }
+        _ => {
+            let mut lines = Vec::new();
+            for (name, workflow) in &definitions.workflows {
+                let default = default_lane(workflow);
+                let lanes: Vec<String> = workflow
+                    .lanes
+                    .keys()
+                    .map(|lane| {
+                        if Some(lane) == default.as_ref() {
+                            format!("[{lane}]")
+                        } else {
+                            lane.clone()
+                        }
+                    })
+                    .collect();
+                lines.push(format!(
+                    "  {name:<10} {:<28} {}",
+                    lanes.join(" "),
+                    workflow.does.clone().unwrap_or_default()
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+    }
+}
+
+fn default_lane(workflow: &WorkflowDef) -> Option<String> {
+    workflow
+        .default_lane
+        .clone()
+        .or_else(|| workflow.lanes.keys().next().cloned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +565,7 @@ mod tests {
             filename: Some("story.md".into()),
             workflow_field: Some("kind".into()),
             slug_field: Some("story".into()),
+            ..Default::default()
         };
         let text = "---\nstory: sse-preview\nlane: light\nkind: feature\nsteps:\n  - { step: qa-plan, on: 2026-10-24 }\n---\n";
         let value = frontmatter(text).expect("frontmatter");

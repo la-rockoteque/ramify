@@ -217,3 +217,37 @@ fn branch_of(path: &Path) -> String {
         .map(|text| text.trim().to_string())
         .unwrap_or_else(|_| "?".into())
 }
+
+
+pub fn workflow(args: &[String]) -> i32 {
+    match crate::workflow::workflow_text(args) {
+        Ok(text) => {
+            println!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            1
+        }
+    }
+}
+
+pub fn step() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    match crate::workflow::order_text(&config) {
+        Ok(text) => {
+            println!("{text}");
+            0
+        }
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            1
+        }
+    }
+}

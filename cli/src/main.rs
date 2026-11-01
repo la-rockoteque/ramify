@@ -15,6 +15,12 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "workflow" {
+        std::process::exit(commands::workflow(&args[1..]));
+    }
+    if command == "step" && args.len() == 1 {
+        std::process::exit(commands::step());
+    }
     let result = match (command, json) {
         ("dash-project", true) => dash::project_json().map(|text| (text, false)),
         ("dash", true) => dash::all_json().map(|text| (text, true)),

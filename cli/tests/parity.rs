@@ -218,3 +218,80 @@ fn status_matches_the_shell() {
         "stdout differs"
     );
 }
+
+#[test]
+fn workflow_list_and_show_match_the_shell() {
+    let fixture = temp("workflow");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("workflow-state");
+    let registry = temp("workflow-registry").join("projects");
+    let repo = repo_root();
+
+    for args in [
+        vec!["workflow"],
+        vec!["workflow", "show", "feature"],
+        vec!["workflow", "show", "bug"],
+    ] {
+        let shell = run_args(&repo.join("bin/ramify"), &args, &fixture, &state, &registry, true);
+        let rust = run_args(
+            Path::new(env!("CARGO_BIN_EXE_ramify")),
+            &args,
+            &fixture,
+            &state,
+            &registry,
+            false,
+        );
+        assert_eq!(shell.status.code(), rust.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{args:?} differs"
+        );
+    }
+}
+
+#[test]
+fn step_display_matches_the_shell() {
+    let fixture = temp("step");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    fs::create_dir_all(fixture.join(".ramify/work/demo")).unwrap();
+    fs::write(
+        fixture.join(".ramify/work/demo/order.md"),
+        "---\nworkflow: feature\nlane: light\nbranch: main\ntags: []\ncreated: 2026-11-01\nsteps:\n- {step: spec, date: '2026-11-01'}\n- {step: qa-plan, date: '2026-11-01'}\n---\n\n# demo\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("step-state");
+    let registry = temp("step-registry").join("projects");
+    let repo = repo_root();
+
+    let shell = run_args(
+        &repo.join("bin/ramify"),
+        &["step"],
+        &fixture,
+        &state,
+        &registry,
+        true,
+    );
+    let rust = run_args(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &["step"],
+        &fixture,
+        &state,
+        &registry,
+        false,
+    );
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        String::from_utf8_lossy(&rust.stdout),
+        "stdout differs"
+    );
+}
