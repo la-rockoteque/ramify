@@ -669,6 +669,7 @@ fn check_slug(config: &Config, definitions: &Definitions, slug: &str) -> Result<
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_order(
     root: &Path,
     definitions_root: &Config,
