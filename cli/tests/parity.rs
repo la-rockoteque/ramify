@@ -868,3 +868,103 @@ fn reap_matches_the_shell() {
         "stdout differs"
     );
 }
+
+#[test]
+fn new_matches_the_shell() {
+    let make = |name: &str| {
+        let base = temp(name);
+        let bare = base.join("bare.git");
+        git(&["init", "-q", "--bare", &bare.to_string_lossy()], &base);
+        let fixture = base.join("demo-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        git(
+            &["remote", "add", "origin", &bare.to_string_lossy()],
+            &fixture,
+        );
+        git(&["push", "-q", "-u", "origin", "main"], &fixture);
+        let fixture = fixture.canonicalize().unwrap();
+        let worktrees = base.join("wt");
+        let state = temp(&format!("{name}-state"));
+        let registry = temp(&format!("{name}-registry")).join("projects");
+        (fixture, worktrees, state, registry)
+    };
+    let (shell_fixture, shell_wt, shell_state, shell_registry) = make("new-shell");
+    let (rust_fixture, rust_wt, rust_state, rust_registry) = make("new-rust");
+    let repo = repo_root();
+
+    let run = |binary: &Path,
+               fixture: &Path,
+               worktrees: &Path,
+               state: &Path,
+               registry: &Path,
+               shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["new", "demo", "--workflow", "feature"])
+            .env("RAMIFY_ROOT", fixture)
+            .env("RAMIFY_WORKTREES", worktrees)
+            .env("RAMIFY_STATE_DIR", state)
+            .env("RAMIFY_REGISTRY", registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_AUTOSTART", "0");
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let shell = run(
+        &repo.join("bin/ramify"),
+        &shell_fixture,
+        &shell_wt,
+        &shell_state,
+        &shell_registry,
+        true,
+    );
+    let rust = run(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &rust_fixture,
+        &rust_wt,
+        &rust_state,
+        &rust_registry,
+        false,
+    );
+    assert_eq!(shell.status.code(), rust.status.code());
+    let normalize = |text: &str, fixture: &Path, worktrees: &Path| {
+        let mut text = text.replace(&fixture.to_string_lossy().into_owned(), "<FIXTURE>");
+        let canonical = worktrees
+            .canonicalize()
+            .unwrap_or_else(|_| worktrees.to_path_buf());
+        text = text.replace(&canonical.to_string_lossy().into_owned(), "<WT>");
+        text.replace(&worktrees.to_string_lossy().into_owned(), "<WT>")
+    };
+    assert_eq!(
+        normalize(
+            &String::from_utf8_lossy(&shell.stdout),
+            &shell_fixture,
+            &shell_wt
+        ),
+        normalize(
+            &String::from_utf8_lossy(&rust.stdout),
+            &rust_fixture,
+            &rust_wt
+        ),
+        "stdout differs"
+    );
+    let shell_order = fs::read_to_string(shell_wt.join("demo/.ramify/work/demo/order.md")).unwrap();
+    let rust_order = fs::read_to_string(rust_wt.join("demo/.ramify/work/demo/order.md")).unwrap();
+    assert_eq!(shell_order, rust_order, "order differs");
+    let _ = Command::new("git")
+        .args(["-C", &shell_fixture.to_string_lossy(), "worktree", "remove", "--force"])
+        .arg(shell_wt.join("demo"))
+        .status();
+    let _ = Command::new("git")
+        .args(["-C", &rust_fixture.to_string_lossy(), "worktree", "remove", "--force"])
+        .arg(rust_wt.join("demo"))
+        .status();
+}

@@ -552,6 +552,185 @@ pub fn asked_json(cfg: &Config) -> Result<String, String> {
     Ok(crate::pyjson::to_string(&value))
 }
 
+pub struct BranchPlan {
+    pub branch: String,
+    pub lane: String,
+    pub notes: Vec<String>,
+}
+
+pub fn plan_branch(
+    config: &Config,
+    flow: &str,
+    slug: &str,
+    lane: Option<&str>,
+    tags: &[String],
+) -> Result<BranchPlan, String> {
+    if !valid_slug(slug) {
+        return Err(format!(
+            "'{slug}' is not a slug: letters, digits, '.', '_' and '-' only"
+        ));
+    }
+    let definitions = definitions(config).ok_or("no workflows are defined")?;
+    let workflow = definitions
+        .workflows
+        .get(flow)
+        .ok_or_else(|| {
+            format!(
+                "no workflow '{flow}' — one of: {}",
+                definitions
+                    .workflows
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let branch = workflow
+        .branch
+        .clone()
+        .unwrap_or_else(|| "{slug}".into())
+        .replace("{slug}", slug);
+    let mut lane = lane
+        .map(str::to_string)
+        .or_else(|| workflow.default_lane.clone())
+        .or_else(|| workflow.lanes.keys().next().cloned())
+        .unwrap_or_default();
+    if !workflow.lanes.contains_key(&lane) {
+        return Err(format!(
+            "no lane '{lane}' in {flow} — one of: {}",
+            workflow.lanes.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let mut notes = Vec::new();
+    let order: Vec<&String> = workflow.lanes.keys().collect();
+    for tag in tags {
+        let lower = tag.to_lowercase();
+        match workflow.min_lane.get(&lower) {
+            Some(floor) if floor != &lane => {
+                let floor_rank = order.iter().position(|name| *name == floor).unwrap_or(0);
+                let lane_rank = order.iter().position(|name| name == &&lane).unwrap_or(0);
+                if floor_rank > lane_rank {
+                    lane = floor.clone();
+                }
+            }
+            None => {
+                let known = workflow
+                    .min_lane
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                notes.push(format!(
+                    "  tag             '{lower}' sets no lane floor in {flow} (those that do: {})",
+                    if known.is_empty() { "none".to_string() } else { known }
+                ));
+            }
+            _ => {}
+        }
+    }
+    check_slug(config, &definitions, slug)?;
+    Ok(BranchPlan {
+        branch,
+        lane,
+        notes,
+    })
+}
+
+fn valid_slug(slug: &str) -> bool {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+fn check_slug(config: &Config, definitions: &Definitions, slug: &str) -> Result<(), String> {
+    let work_dir = definitions
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| ".ramify/work".into());
+    let filename = definitions
+        .record
+        .as_ref()
+        .and_then(|record| record.filename.clone())
+        .unwrap_or_else(|| "order.md".into());
+    let relative = format!("{work_dir}/{slug}/{filename}");
+    let spec = format!("{}/{}:{relative}", config.remote, config.main);
+    let status = std::process::Command::new("git")
+        .args(["-C", &config.primary.to_string_lossy(), "cat-file", "-e", &spec])
+        .status();
+    if matches!(status, Ok(status) if status.success()) {
+        return Err(format!(
+            "{}/{} already has {relative} — pick another slug",
+            config.remote, config.main
+        ));
+    }
+    Ok(())
+}
+
+pub fn start_order(
+    root: &Path,
+    definitions_root: &Config,
+    flow: &str,
+    slug: &str,
+    lane: &str,
+    tags: &[String],
+    notes: &[String],
+    branch: &str,
+) -> Result<Vec<String>, String> {
+    let config = config_for(root, definitions_root)?;
+    let definitions = definitions(&config).ok_or("no workflows are defined")?;
+    if definitions.record.is_some() {
+        return Err("this repository starts native records itself".into());
+    }
+    let work_dir = definitions
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| ".ramify/work".into());
+    let folder = root.join(&work_dir).join(slug);
+    let path = folder.join("order.md");
+    if path.exists() {
+        return Err(format!(
+            "{} already exists — pick another slug",
+            path.strip_prefix(root)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+        ));
+    }
+    std::fs::create_dir_all(&folder)
+        .map_err(|error| format!("could not create {}: {error}", folder.display()))?;
+    let created = std::process::Command::new("date")
+        .arg("+%F")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    let tags_text = if tags.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", tags.join(", "))
+    };
+    let body = format!(
+        "---\nworkflow: {flow}\nlane: {lane}\nbranch: {branch}\ntags: {tags_text}\ncreated: {created}\nsteps: []\n---\n\n# {slug}\n\nWhat this changes and why.\n"
+    );
+    std::fs::write(&path, body)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    let relative = path
+        .strip_prefix(root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let mut lines = vec![format!(
+        "  work order      {relative} ({flow}, {lane} lane)"
+    )];
+    lines.extend(notes.iter().cloned());
+    Ok(lines)
+}
+
+fn config_for(root: &Path, fallback: &Config) -> Result<Config, String> {
+    Config::for_root(root).or_else(|_| Ok::<Config, String>(fallback.clone()))
+}
+
 pub fn lane_text(args: &[String]) -> Result<String, String> {
     let Some(lane) = args.first() else {
         return Err("usage: ramify lane <lane>".into());

@@ -1969,3 +1969,246 @@ fn write_set_self_test() -> i32 {
     }
     status
 }
+
+pub fn new(args: &[String]) -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    let mut slug: Option<String> = None;
+    let mut flow: Option<String> = None;
+    let mut lane: Option<String> = None;
+    let mut tags: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        match argument.as_str() {
+            "--workflow" => {
+                let value = args.get(index + 1);
+                if value.is_none() || value.is_some_and(|value| value.starts_with('-')) {
+                    eprintln!("ramify: --workflow needs a value");
+                    return 1;
+                }
+                flow = value.cloned();
+                index += 1;
+            }
+            "--lane" | "--tag" => {
+                let value = args.get(index + 1);
+                if value.is_none() || value.is_some_and(|value| value.starts_with('-')) {
+                    eprintln!("ramify: {argument} needs a value");
+                    return 1;
+                }
+                if argument == "--lane" {
+                    lane = value.cloned();
+                } else {
+                    tags.extend(value.cloned());
+                }
+                index += 1;
+            }
+            _ if argument.starts_with("--") && argument.contains('=') => {
+                let (name, value) = argument.split_once('=').unwrap_or(("", ""));
+                eprintln!("ramify: write '{name} {value}', not '{argument}'");
+                return 1;
+            }
+            _ if argument.starts_with('-') => {
+                eprintln!("ramify: '{argument}' is not a slug: it starts with a dash");
+                return 1;
+            }
+            _ => {
+                if slug.is_some() {
+                    eprintln!("ramify: usage: ramify new <slug> [--workflow W]");
+                    return 1;
+                }
+                slug = Some(argument.clone());
+            }
+        }
+        index += 1;
+    }
+    let Some(slug) = slug else {
+        eprintln!("ramify: usage: ramify new <slug> [--workflow W [--lane L] [--tag T]...]");
+        return 1;
+    };
+    if flow.is_none() && (lane.is_some() || !tags.is_empty()) {
+        eprintln!("ramify: --lane and --tag need --workflow");
+        return 1;
+    }
+    let worktrees = config.value("RAMIFY_WORKTREES").unwrap_or_else(|| config.worktrees.clone());
+    let parent = if worktrees.starts_with('/') {
+        PathBuf::from(&worktrees)
+    } else {
+        config.primary.join(&worktrees)
+    };
+    if std::fs::create_dir_all(&parent).is_err() {
+        eprintln!("ramify: could not create {}", parent.display());
+        return 1;
+    }
+    let parent = parent.canonicalize().unwrap_or(parent);
+    let destination = parent.join(&slug);
+    let mut branch = format!("{}{slug}", config.branch_prefix);
+    let mut plan: Option<crate::workflow::BranchPlan> = None;
+    if let Some(flow) = &flow {
+        match crate::workflow::plan_branch(&config, flow, &slug, lane.as_deref(), &tags) {
+            Ok(planned) => {
+                branch = planned.branch.clone();
+                plan = Some(planned);
+            }
+            Err(error) => {
+                eprintln!("ramify: {error}");
+                return 1;
+            }
+        }
+    } else if config.workflow_source == "repo" || config.workflow_source == "select" {
+        let workflow_config = Config::for_root(&config.repo_root).unwrap_or_else(|_| config.clone());
+        if crate::workflow::report(&workflow_config, &config.repo_root, &branch).is_none() {
+            eprintln!("ramify: no work order for branch {branch}");
+            return 1;
+        }
+    }
+
+    let fetched = Command::new("git")
+        .args(["-C", &config.primary.to_string_lossy(), "fetch", "-q", &config.remote, &config.main])
+        .status();
+    if !matches!(fetched, Ok(status) if status.success()) {
+        println!(
+            "  (fetch failed — cutting from the last known {}/{})",
+            config.remote, config.main
+        );
+    }
+    let added = Command::new("git")
+        .args([
+            "-C",
+            &config.primary.to_string_lossy(),
+            "worktree",
+            "add",
+            "-q",
+            "--no-track",
+            "-b",
+            &branch,
+            &destination.to_string_lossy(),
+            &format!("{}/{}", config.remote, config.main),
+        ])
+        .status();
+    if !matches!(added, Ok(status) if status.success()) {
+        return 1;
+    }
+
+    let copy = config.value("RAMIFY_COPY").unwrap_or_default();
+    let exclude = config
+        .value("RAMIFY_COPY_EXCLUDE")
+        .unwrap_or_else(|| "worktrees/".into());
+    for entry in copy.split_whitespace() {
+        let source = config.primary.join(entry);
+        let target = destination.join(entry);
+        if source.is_dir() {
+            let _ = std::fs::create_dir_all(&target);
+            let mut command = Command::new("rsync");
+            command.args(["-a", "--ignore-existing"]);
+            if !exclude.is_empty() {
+                command.args(["--exclude", &exclude]);
+            }
+            let _ = command
+                .arg(format!("{}/", source.display()))
+                .arg(format!("{}/", target.display()))
+                .status();
+        } else if source.exists() && !target.exists() {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&source, &target);
+        }
+    }
+
+    if let (Some(flow), Some(plan)) = (&flow, &plan) {
+        match crate::workflow::start_order(
+            &destination,
+            &config,
+            flow,
+            &slug,
+            &plan.lane,
+            &tags,
+            &plan.notes,
+            &branch,
+        ) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(_) => println!("  (no work order written — 'ramify step' will say why)"),
+        }
+    } else if config.workflow_source == "repo" || config.workflow_source == "select" {
+        let workflow_config = Config::for_root(&destination).unwrap_or_else(|_| config.clone());
+        if crate::workflow::report(&workflow_config, &destination, &branch).is_none() {
+            eprintln!("ramify: no work order for branch {branch}");
+            return 1;
+        }
+    }
+
+    let autostart = !config.services.is_empty()
+        && config.value("RAMIFY_AUTOSTART").as_deref() != Some("0");
+    let bootstrap = config.value("RAMIFY_BOOTSTRAP").unwrap_or_default();
+    if !bootstrap.is_empty() || autostart {
+        let _ = std::fs::create_dir_all(&config.state_dir);
+        let state = config.state_dir.join(&slug);
+        let _ = std::fs::create_dir_all(&state);
+        let _ = std::fs::remove_file(state.join(format!("{slug}.errors")));
+        let log = state.join(format!("{slug}.bootstrap.log"));
+        let errors = state.join(format!("{slug}.errors"));
+        let self_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ramify"));
+        let script = "eval \"${1:-true}\" || { printf 'bootstrap\\t%s\\tbootstrap failed (exit %s)\\n' \"$6\" \"$?\" >>\"$5\"; exit 1; }\n[ \"$3\" = 1 ] && RAMIFY_ROOT=\"$2\" \"$4\" up";
+        let stdout = std::fs::File::create(&log);
+        if let Ok(stdout) = stdout {
+            let stderr = stdout.try_clone().ok();
+            use std::os::unix::process::CommandExt;
+            let mut command = Command::new("bash");
+            command
+                .args([
+                    "-c",
+                    script,
+                    "_",
+                    &bootstrap,
+                    &destination.to_string_lossy(),
+                    if autostart { "1" } else { "0" },
+                    &self_binary.to_string_lossy(),
+                    &errors.to_string_lossy(),
+                    &log.to_string_lossy(),
+                ])
+                .env("RAMIFY_ROOT", &destination)
+                .stdin(std::process::Stdio::null())
+                .stdout(stdout)
+                .process_group(0);
+            if let Some(stderr) = stderr {
+                command.stderr(stderr);
+            }
+            if command.spawn().is_ok() {
+                println!(
+                    "  bootstrap       running in the background — {}",
+                    log.display()
+                );
+            }
+        }
+    }
+
+    println!(
+        "  branch          {branch} (from {}/{})",
+        config.remote, config.main
+    );
+    println!("ramify: worktree {}", destination.display());
+    print!("{}", label_output(&config, &slug));
+    0
+}
+
+fn label_output(config: &Config, slug: &str) -> String {
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(slug.as_bytes());
+    let digest = hasher.finalize();
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let index = u32::from_str_radix(&hash[..8], 16).unwrap_or(0) % 8;
+    let colors = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+    let _ = config;
+    format!("/rename {slug}\n/color {}\n", colors[index as usize])
+}
