@@ -968,3 +968,77 @@ fn new_matches_the_shell() {
         .arg(rust_wt.join("demo"))
         .status();
 }
+
+#[test]
+fn cleanup_matches_the_shell() {
+    let base_port = 47500;
+    let make = |name: &str| {
+        let base = temp(name);
+        let fixture = base.join("demo-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(
+            fixture.join(".ramify.conf"),
+            format!("RAMIFY_SERVICES=\"web\"\nweb_port={base_port}\nweb_health=/\nweb_cmd='true'\n"),
+        )
+        .unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        let fixture = fixture.canonicalize().unwrap();
+        let state = temp(&format!("{name}-state"));
+        let directory = state.join("demo-repo");
+        fs::create_dir_all(directory.join("slots")).unwrap();
+        fs::write(directory.join("slots/1"), "ghost 999999\n").unwrap();
+        fs::write(directory.join("slots/2"), "gone 999999\n").unwrap();
+        fs::write(directory.join("slots/3"), "missing 999999\n").unwrap();
+        fs::write(directory.join("gone.env"), "SLOT=1\nWEB_PORT=47502\nWEB_SHARED=0\n").unwrap();
+        fs::write(directory.join("missing.env"), "SLOT=3\nWEB_PORT=47503\nWEB_SHARED=0\n").unwrap();
+        fs::write(directory.join("dead.env"), "SLOT=4\nWEB_PORT=47504\nWEB_SHARED=0\n").unwrap();
+        fs::write(directory.join("dead.web.pid"), "999999\n").unwrap();
+        let registry = temp(&format!("{name}-registry")).join("projects");
+        (fixture, state, registry)
+    };
+    let (shell_fixture, shell_state, shell_registry) = make("cleanup-shell");
+    let (rust_fixture, rust_state, rust_registry) = make("cleanup-rust");
+    let repo = repo_root();
+    let run = |binary: &Path, fixture: &Path, state: &Path, registry: &Path, shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["cleanup"])
+            .env("RAMIFY_ROOT", fixture)
+            .env("RAMIFY_STATE_DIR", state)
+            .env("RAMIFY_REGISTRY", registry)
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let shell = run(
+        &repo.join("bin/ramify"),
+        &shell_fixture,
+        &shell_state,
+        &shell_registry,
+        true,
+    );
+    let rust = run(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &rust_fixture,
+        &rust_state,
+        &rust_registry,
+        false,
+    );
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        String::from_utf8_lossy(&rust.stdout),
+        "stdout differs"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stderr),
+        String::from_utf8_lossy(&rust.stderr),
+        "stderr differs"
+    );
+}

@@ -1448,7 +1448,12 @@ fn slot_is_stale(config: &Config, slot: u32) -> bool {
     let holder = std::fs::read_to_string(&path).unwrap_or_default();
     let pid = holder.split_whitespace().nth(1).unwrap_or("");
     if !pid.is_empty() {
-        if let Ok(status) = Command::new("kill").args(["-0", pid]).status() {
+        if let Ok(status) = Command::new("kill")
+            .args(["-0", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
             if status.success() {
                 return false;
             }
@@ -2211,4 +2216,177 @@ fn label_output(config: &Config, slug: &str) -> String {
     let colors = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
     let _ = config;
     format!("/rename {slug}\n/color {}\n", colors[index as usize])
+}
+
+pub fn cleanup() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = check_services(&config) {
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    let worktrees = match crate::config::git(&["worktree", "list", "--porcelain"], &config.primary) {
+        Ok(text) if !text.trim().is_empty() => text
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        _ => {
+            eprintln!(
+                "cannot read the worktree list from {} — refusing to clean",
+                config.primary.display()
+            );
+            return 1;
+        }
+    };
+    let mut found = false;
+    for slot in 1..=config.max_slot {
+        let path = config.slots.join(slot.to_string());
+        if !path.is_file() {
+            continue;
+        }
+        let holder = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let held = env_get(&config.state_dir.join(format!("{holder}.env")), "SLOT")
+            .unwrap_or_default();
+        if slot_is_stale(&config, slot) {
+            let _ = std::fs::remove_file(&path);
+            found = true;
+            println!("  slot {slot}        released — {holder} left it claimed with nothing running");
+        } else if !held.is_empty() && held != slot.to_string() {
+            for port in slot_ports(&config, slot) {
+                kill_port(&config, port);
+            }
+            let _ = std::fs::remove_file(&path);
+            found = true;
+            println!("  slot {slot}        orphan of {holder} killed — its state had moved to slot {held}");
+        } else if worktree_root(&config.primary, &holder).is_none() {
+            println!("  slot {slot}        {holder} stopped — its worktree no longer exists");
+            kill_worktree(&config, &holder);
+            found = true;
+        }
+    }
+
+    let mut worktree_names: Vec<String> = std::fs::read_dir(&config.state_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| state_worktree(&entry.file_name().to_string_lossy()))
+                .collect()
+        })
+        .unwrap_or_default();
+    worktree_names.sort();
+    worktree_names.dedup();
+    for worktree in worktree_names {
+        if worktree_root(&config.primary, &worktree).is_none() {
+            kill_worktree(&config, &worktree);
+            remove_state_and_logs(&config, &worktree);
+            println!("  state          {worktree} removed — its worktree no longer exists");
+            found = true;
+        } else if !holds_a_slot(&config, &worktree) && stack_is_down(&config, &worktree) {
+            let mut removed = false;
+            if let Ok(entries) = std::fs::read_dir(&config.state_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with(&format!("{worktree}.")) && name.ends_with(".pid") {
+                        let pid = std::fs::read_to_string(entry.path())
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        let alive = Command::new("kill")
+                            .args(["-0", &pid])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .map(|status| status.success())
+                            .unwrap_or(false);
+                        if alive {
+                            continue;
+                        }
+                        let _ = std::fs::remove_file(entry.path());
+                        removed = true;
+                    }
+                }
+            }
+            let env = config.state_dir.join(format!("{worktree}.env"));
+            if env.is_file() {
+                let _ = std::fs::remove_file(&env);
+                removed = true;
+            }
+            if removed {
+                println!("  state          {worktree} cleared — its stack is not running any more");
+                found = true;
+            }
+        }
+    }
+
+    for stray in crate::dash::strays(&config) {
+        let Ok(group) = stray.pgid.parse::<u64>() else {
+            continue;
+        };
+        if our_group(&config, group) {
+            signal_group(group);
+        }
+        found = true;
+        println!(
+            "  stray          {} {} killed (process group {}) — no pid file pointed at it",
+            stray.worktree, stray.service, stray.pgid
+        );
+    }
+
+    if !found {
+        println!("nothing to clean — every claimed slot has a live stack behind it");
+    }
+    0
+}
+
+fn state_worktree(name: &str) -> Option<String> {
+    if let Some(worktree) = name.strip_suffix(".env") {
+        return (!worktree.is_empty()).then(|| worktree.to_string());
+    }
+    let regex = regex::Regex::new(r"^(.+?)\.(?:[a-z0-9_]+(?:\.prepare)?\.(?:log|pid))$").ok()?;
+    regex
+        .captures(name)
+        .and_then(|captures| captures.get(1))
+        .map(|worktree| worktree.as_str().to_string())
+}
+
+fn holds_a_slot(config: &Config, worktree: &str) -> bool {
+    for slot in 1..=config.max_slot {
+        let holder = std::fs::read_to_string(config.slots.join(slot.to_string()))
+            .unwrap_or_default();
+        if holder.split_whitespace().next() == Some(worktree) {
+            return true;
+        }
+    }
+    false
+}
+
+fn remove_state_and_logs(config: &Config, worktree: &str) {
+    if let Ok(entries) = std::fs::read_dir(&config.state_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&format!("{worktree}.")) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(config.state_dir.join(format!("{worktree}.up.lock")));
+}
+
+fn worktree_root(primary: &Path, worktree: &str) -> Option<PathBuf> {
+    let text = crate::config::git(&["worktree", "list", "--porcelain"], primary).ok()?;
+    text.lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .find(|path| path.file_name().map(|name| name.to_string_lossy() == worktree).unwrap_or(false))
 }

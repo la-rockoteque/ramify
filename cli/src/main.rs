@@ -17,6 +17,9 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "cleanup" {
+        std::process::exit(commands::cleanup());
+    }
     if command == "new" {
         std::process::exit(commands::new(&args[1..]));
     }

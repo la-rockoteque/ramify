@@ -88,6 +88,7 @@ if [ -z "${RAMIFY_SHELL:-}" ] && [ -x "$RAMIFY_RS" ]; then
     mem) [ -n "${2:-}" ] || exec "$RAMIFY_RS" "$@" ;;
     reap) exec "$RAMIFY_RS" "$@" ;;
     new) exec "$RAMIFY_RS" "$@" ;;
+    cleanup) exec "$RAMIFY_RS" "$@" ;;
     step)
       [ -n "${2:-}" ] || exec "$RAMIFY_RS" "$@"
       case "${2:-}" in asked) exec "$RAMIFY_RS" "$@" ;; esac ;;
