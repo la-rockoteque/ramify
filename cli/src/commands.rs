@@ -1768,3 +1768,200 @@ fn note_error(errors: &Path, service: &str, log: &str, message: &str) {
         let _ = writeln!(file, "{service}\t{log}\t{message}");
     }
 }
+
+pub fn write_set(args: &[String]) -> i32 {
+    let Some(argument) = args.first() else {
+        eprintln!("usage: ramify write-set <write-set-file> | --self-test");
+        return 2;
+    };
+    if argument == "--self-test" {
+        return write_set_self_test();
+    }
+    let base = std::env::var("BASE_REF").unwrap_or_else(|_| "origin/main".into());
+    let path = Path::new(argument);
+    if !path.is_file() {
+        eprintln!("check-write-set: no write set at {}", path.display());
+        return 2;
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("check-write-set: could not read {}: {error}", path.display());
+            return 2;
+        }
+    };
+    let (allowed, immutable) = parse_write_set(&text);
+    if allowed.is_empty() {
+        eprintln!(
+            "check-write-set: {} declares no allowed pattern — every change would be a violation.",
+            path.display()
+        );
+        return 2;
+    }
+    let changed = match changed_paths_for_write_set(&base) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+    let mut violations = 0;
+    for changed_path in &changed {
+        if matches_any(changed_path, &immutable) {
+            println!("IMMUTABLE  {changed_path}");
+            violations += 1;
+        } else if !matches_any(changed_path, &allowed) {
+            println!("OUTSIDE    {changed_path}");
+            violations += 1;
+        }
+    }
+    if violations > 0 {
+        println!();
+        println!(
+            "check-write-set: {violations} path(s) break the write set in {}.",
+            path.display()
+        );
+        println!("A path that genuinely belongs to this branch is ADDED to the write set as a deviation,");
+        println!("with the reason beside it. It is never waved through.");
+        return 1;
+    }
+    println!(
+        "check-write-set: the diff stays inside {}.",
+        path.display()
+    );
+    0
+}
+
+fn parse_write_set(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut allowed = Vec::new();
+    let mut immutable = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('!') {
+            immutable.push(rest.to_string());
+        } else {
+            allowed.push(line.to_string());
+        }
+    }
+    (allowed, immutable)
+}
+
+fn changed_paths_for_write_set(base: &str) -> Result<Vec<String>, String> {
+    if let Ok(explicit) = std::env::var("CHECK_WRITE_SET_PATHS") {
+        let mut paths: Vec<String> = explicit
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        return Ok(paths);
+    }
+    if Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", base])
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return Err(format!("check-write-set: no such base ref: {base}"));
+    }
+    let mut paths = Vec::new();
+    if let Ok(text) = crate::config::git(
+        &["diff", "--name-only", &format!("{base}...HEAD")],
+        &std::env::current_dir().unwrap_or_default(),
+    ) {
+        paths.extend(text.lines().map(str::to_string));
+    }
+    if let Ok(text) = crate::config::git(
+        &["status", "--porcelain", "--untracked-files=all"],
+        &std::env::current_dir().unwrap_or_default(),
+    ) {
+        for line in text.lines() {
+            let rest = line.get(3..).unwrap_or("");
+            for part in rest.split(" -> ") {
+                let part = part.trim();
+                let part = part.strip_prefix('"').and_then(|p| p.strip_suffix('"')).unwrap_or(part);
+                if !part.is_empty() {
+                    paths.push(part.to_string());
+                }
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn matches_any(path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| matches_pattern(path, pattern))
+}
+
+fn matches_pattern(path: &str, pattern: &str) -> bool {
+    let mut regex = String::from("^");
+    for character in pattern.chars() {
+        match character {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            c => regex.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    regex.push('$');
+    regex::Regex::new(&regex)
+        .map(|regex| regex.is_match(path))
+        .unwrap_or(false)
+}
+
+fn write_set_self_test() -> i32 {
+    let directory = std::env::temp_dir().join(format!("ramify-write-set-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&directory);
+    let paths = "src/api/orders.ts\ndocs/adr/0001-pipeline.md";
+    std::env::set_var("CHECK_WRITE_SET_PATHS", paths);
+    let fixtures = [
+        ("a covered diff passes", "src/*\ndocs/adr/*\n", 0, None),
+        ("an omitted path fails", "src/*\n", 1, Some("docs/adr/0001-pipeline.md")),
+        (
+            "an immutable path fails",
+            "src/*\ndocs/adr/*\n!docs/adr/*\n",
+            1,
+            Some("docs/adr/0001-pipeline.md"),
+        ),
+    ];
+    let mut status = 0;
+    for (name, content, expected, needle) in fixtures {
+        let file = directory.join(name.replace(' ', "_"));
+        let _ = std::fs::write(&file, content);
+        let (allowed, immutable) = parse_write_set(content);
+        let mut violations = 0;
+        let mut output = String::new();
+        for path in paths.lines() {
+            if matches_any(path, &immutable) {
+                output.push_str(&format!("IMMUTABLE  {path}\n"));
+                violations += 1;
+            } else if !matches_any(path, &allowed) {
+                output.push_str(&format!("OUTSIDE    {path}\n"));
+                violations += 1;
+            }
+        }
+        let code = if violations > 0 { 1 } else { 0 };
+        let named = needle.map(|needle| output.contains(needle)).unwrap_or(true);
+        if code != expected || !named {
+            println!(
+                "self-test FAIL [{name}]: expected exit {expected}, got {code}"
+            );
+            println!("{output}");
+            status = 1;
+        } else {
+            println!("self-test ok   [{name}]");
+        }
+    }
+    std::env::remove_var("CHECK_WRITE_SET_PATHS");
+    let _ = std::fs::remove_dir_all(&directory);
+    if status == 0 {
+        println!("check-write-set: self-test passed (pattern matching only — the diff half is not covered here).");
+    }
+    status
+}

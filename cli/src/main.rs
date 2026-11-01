@@ -16,6 +16,9 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "write-set" {
+        std::process::exit(commands::write_set(&args[1..]));
+    }
     if command == "up" {
         std::process::exit(commands::up());
     }

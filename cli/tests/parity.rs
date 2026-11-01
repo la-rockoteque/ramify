@@ -672,3 +672,77 @@ fn up_starts_a_service_and_down_stops_it() {
 
     let _ = Command::new("kill").args(["-9", &pid]).status();
 }
+
+#[test]
+fn write_set_matches_the_shell() {
+    let fixture = temp("write-set");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    fs::create_dir_all(fixture.join("src")).unwrap();
+    fs::create_dir_all(fixture.join("docs/adr")).unwrap();
+    fs::write(fixture.join("src/app.rs"), "one\n").unwrap();
+    fs::write(fixture.join("docs/adr/0001.md"), "one\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    fs::write(fixture.join("src/app.rs"), "two\n").unwrap();
+    fs::write(fixture.join("docs/adr/0001.md"), "two\n").unwrap();
+
+    let sets = [
+        ("pass.txt", "src/*\ndocs/adr/*\n"),
+        ("omit.txt", "src/*\n"),
+        ("immutable.txt", "src/*\ndocs/adr/*\n!docs/adr/*\n"),
+    ];
+    for (name, content) in sets {
+        fs::write(fixture.join(name), content).unwrap();
+    }
+    let repo = repo_root();
+    for name in ["pass.txt", "omit.txt", "immutable.txt", "missing.txt"] {
+        let path = fixture.join(name);
+        let shell = Command::new(repo.join("bin/ramify"))
+            .args(["write-set", &path.to_string_lossy()])
+            .current_dir(&fixture)
+            .env("BASE_REF", "HEAD")
+            .env("RAMIFY_SHELL", "1")
+            .env("RAMIFY_HOME", &repo)
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(["write-set", &path.to_string_lossy()])
+            .current_dir(&fixture)
+            .env("BASE_REF", "HEAD")
+            .env_remove("RAMIFY_SHELL")
+            .env("RAMIFY_HOME", &repo)
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{name} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{name} stdout"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{name} stderr"
+        );
+    }
+
+    let shell = Command::new(repo.join("bin/ramify"))
+        .args(["write-set", "--self-test"])
+        .env("RAMIFY_SHELL", "1")
+        .env("RAMIFY_HOME", &repo)
+        .output()
+        .unwrap();
+    let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+        .args(["write-set", "--self-test"])
+        .env_remove("RAMIFY_SHELL")
+        .env("RAMIFY_HOME", &repo)
+        .output()
+        .unwrap();
+    assert_eq!(shell.status.code(), rust.status.code(), "self-test exit");
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        String::from_utf8_lossy(&rust.stdout),
+        "self-test stdout"
+    );
+}
