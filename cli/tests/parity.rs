@@ -295,3 +295,45 @@ fn step_display_matches_the_shell() {
         "stdout differs"
     );
 }
+
+#[test]
+fn runs_match_the_shell() {
+    let runs = temp("runs");
+    fs::create_dir_all(runs.join("20260101-1")).unwrap();
+    fs::write(
+        runs.join("20260101-1").join("meta.json"),
+        r#"{"id": "20260101-1", "status": "pending", "source": "echo one", "note": "", "cwd": "/tmp/x", "created": "2026-01-01T00:00:00"}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(runs.join("20260102-2")).unwrap();
+    fs::write(
+        runs.join("20260102-2").join("meta.json"),
+        "{\"id\": \"20260102-2\", \"status\": \"ran\", \"exit\": 0, \"source\": \"script\", \"note\": \"do it\", \"cwd\": \"/tmp/y\", \"created\": \"2026-01-02T00:00:00\"}\n",
+    )
+    .unwrap();
+    let repo = repo_root();
+
+    for args in [vec!["runs"], vec!["runs", "--json"]] {
+        let shell = Command::new(repo.join("bin/ramify"))
+            .args(&args)
+            .env("RAMIFY_SHELL", "1")
+            .env("RAMIFY_RUNS_DIR", &runs)
+            .env("RAMIFY_HOME", &repo)
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(&args)
+            .env_remove("RAMIFY_SHELL")
+            .env("RAMIFY_RUNS_DIR", &runs)
+            .env("RAMIFY_HOME", &repo)
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{args:?} differs"
+        );
+    }
+}

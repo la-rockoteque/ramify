@@ -251,3 +251,72 @@ pub fn step() -> i32 {
         }
     }
 }
+
+
+pub fn runs(args: &[String]) -> i32 {
+    let json = args.first().map(String::as_str) == Some("--json");
+    let directory = std::env::var("RAMIFY_RUNS_DIR").unwrap_or_else(|_| {
+        let base = std::env::var("CLAUDE_CONFIG_DIR")
+            .unwrap_or_else(|_| format!("{}/.claude", std::env::var("HOME").unwrap_or_default()));
+        format!("{base}/ramify/runs")
+    });
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.reverse();
+    let metas: Vec<serde_json::Value> = names
+        .iter()
+        .filter_map(|name| {
+            let text = std::fs::read_to_string(Path::new(&directory).join(name).join("meta.json")).ok()?;
+            serde_json::from_str(&text).ok()
+        })
+        .collect();
+    if json {
+        println!("{}", crate::pyjson::to_string(&metas));
+        return 0;
+    }
+    if metas.is_empty() {
+        println!("no run yet");
+    }
+    for run in metas.iter().take(20) {
+        let status = run_str(run, "status");
+        let state = match run.get("exit").and_then(|exit| exit.as_i64()) {
+            Some(exit) => format!("{status} exit {exit}"),
+            None => status,
+        };
+        let project = run_str(run, "project");
+        let worktree = run_str(run, "worktree");
+        let cwd = run_str(run, "cwd");
+        let where_ = if !project.is_empty() || !worktree.is_empty() {
+            [project, worktree]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("/")
+        } else {
+            cwd
+        };
+        let note = run_str(run, "note");
+        let label = if note.is_empty() {
+            run_str(run, "source")
+        } else {
+            note
+        };
+        let id = run_str(run, "id");
+        println!("  {id}  {state:<12} {where_}  {label}");
+    }
+    0
+}
+
+fn run_str(run: &serde_json::Value, key: &str) -> String {
+    run.get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string()
+}

@@ -1,5 +1,6 @@
 mod commands;
 mod config;
+mod pyjson;
 mod dash;
 mod workflow;
 
@@ -14,6 +15,9 @@ fn main() {
     }
     if command == "status" {
         std::process::exit(commands::status());
+    }
+    if command == "runs" {
+        std::process::exit(commands::runs(&args[1..]));
     }
     if command == "workflow" {
         std::process::exit(commands::workflow(&args[1..]));
