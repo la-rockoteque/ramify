@@ -77,6 +77,15 @@ for a in "${@:2}"; do
   case "$a" in -h|--help) usage "$1" || { usage >&2; exit 2; }; exit 0 ;; esac
 done
 
+# The Rust port handles the commands it implements. RAMIFY_SHELL=1 forces this script, which the
+# parity tests use. A missing binary falls back here.
+RAMIFY_RS="${RAMIFY_RS:-$RAMIFY_HOME/cli/target/release/ramify}"
+if [ -z "${RAMIFY_SHELL:-}" ] && [ -x "$RAMIFY_RS" ]; then
+  case "${1:-}" in
+    dash|dash-project) exec "$RAMIFY_RS" "$@" ;;
+  esac
+fi
+
 # `RAMIFY_ROOT` wins over the working directory: hooks run from the session's project directory,
 # not from the worktree under test, and a `down` aimed at the wrong tree kills nothing and
 # reports success.

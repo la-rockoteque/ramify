@@ -1,0 +1,27 @@
+mod config;
+mod dash;
+mod workflow;
+
+use std::io::Write;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let command = args.first().map(String::as_str).unwrap_or("");
+    let json = args.iter().any(|arg| arg == "--json");
+    let result = match (command, json) {
+        ("dash-project", true) => dash::project_json().map(|text| (text, false)),
+        ("dash", true) => dash::all_json().map(|text| (text, true)),
+        ("dash-project", false) => Err("usage: ramify dash-project --json".into()),
+        (other, _) => Err(format!("ramify-rs: not ported yet: {other}")),
+    };
+    match result {
+        Ok((text, newline)) => {
+            let mut out = std::io::stdout().lock();
+            let _ = if newline { writeln!(out, "{text}") } else { write!(out, "{text}") };
+        }
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "ramify: {error}");
+            std::process::exit(1);
+        }
+    }
+}
