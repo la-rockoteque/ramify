@@ -16,6 +16,9 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "up" {
+        std::process::exit(commands::up());
+    }
     if command == "down" {
         std::process::exit(commands::down());
     }

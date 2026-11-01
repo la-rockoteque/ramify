@@ -527,7 +527,7 @@ pub(crate) fn protected(pgid: u64) -> bool {
     false
 }
 
-fn up_running(config: &Config, worktree: &str) -> bool {
+pub(crate) fn up_running(config: &Config, worktree: &str) -> bool {
     let lock = config
         .state_dir
         .join(format!("{worktree}.up.lock"));

@@ -632,3 +632,43 @@ fn down_and_shared_down_match_the_shell() {
         );
     }
 }
+
+#[test]
+fn up_starts_a_service_and_down_stops_it() {
+    let base = 47000 + (std::process::id() % 500) * 10;
+    let fixture = temp("up");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        format!(
+            "RAMIFY_SERVICES=\"web\"\nweb_port={base}\nweb_cmd='sleep 30'\nweb_optional=1\nweb_timeout=1\nweb_health=/\n"
+        ),
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let name = fixture.file_name().unwrap().to_string_lossy().into_owned();
+    let state = temp("up-state");
+    let registry = temp("up-registry").join("projects");
+    let binary = Path::new(env!("CARGO_BIN_EXE_ramify"));
+
+    let started = run_args(binary, &["up"], &fixture, &state, &registry, false);
+    assert_eq!(started.status.code(), Some(0), "up failed: {}", String::from_utf8_lossy(&started.stderr));
+    let env = state.join(&name).join(format!("{name}.env"));
+    let text = fs::read_to_string(&env).expect("env file");
+    assert!(text.contains("SLOT=1"), "{text}");
+    assert!(text.contains(&format!("WEB_PORT={}", base + 1)), "{text}");
+    let pidfile = state.join(&name).join(format!("{name}.web.pid"));
+    let pid = fs::read_to_string(&pidfile).expect("pid file");
+    let pid = pid.trim().to_string();
+    let alive = Command::new("ps").args(["-o", "pid=", "-p", &pid]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&alive.stdout).trim().is_empty(), "service not running");
+
+    let stopped = run_args(binary, &["down"], &fixture, &state, &registry, false);
+    assert_eq!(stopped.status.code(), Some(0), "down failed");
+    assert!(!env.exists(), "env file left behind");
+    assert!(!state.join(&name).join("slots").join("1").exists(), "slot not released");
+
+    let _ = Command::new("kill").args(["-9", &pid]).status();
+}

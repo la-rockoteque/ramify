@@ -325,6 +325,10 @@ fn run_str(run: &serde_json::Value, key: &str) -> String {
 const BOX_WIDTH: usize = 64;
 
 pub fn card() -> i32 {
+    card_with_smoke(true)
+}
+
+pub fn card_with_smoke(with_smoke: bool) -> i32 {
     let config = match Config::resolve() {
         Ok(config) => config,
         Err(error) => {
@@ -409,9 +413,11 @@ pub fn card() -> i32 {
             String::new()
         };
         style.row2(&left, crate::dash::probe(&config, service, parsed), &color);
-        if let Some(spec) = config.service(service, "smoke") {
-            if let Some(failure) = smoke(&config, &spec, parsed) {
-                style.row(&format!("  smoke {}", failure));
+        if with_smoke {
+            if let Some(spec) = config.service(service, "smoke") {
+                if let Some(failure) = smoke(&config, &spec, parsed) {
+                    style.row(&format!("  smoke {}", failure));
+                }
             }
         }
     }
@@ -1143,4 +1149,622 @@ fn listener_group(pid: u64) -> Option<u64> {
                 .parse()
                 .ok()
         })
+}
+
+struct UpLock {
+    path: PathBuf,
+}
+
+impl Drop for UpLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+pub fn up() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = check_services(&config) {
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    let _ = std::fs::create_dir_all(config.state_dir.join("shared"));
+    let _ = std::fs::create_dir_all(&config.slots);
+    let lock = match take_up_lock(&config) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
+    let errors = config
+        .state_dir
+        .join(format!("{}.errors", config.worktree));
+    let _ = std::fs::remove_file(&errors);
+    let env = config
+        .state_dir
+        .join(format!("{}.env", config.worktree));
+    if env.is_file() && ping_ports(&config, &env) {
+        drop(lock);
+        return card_with_smoke(true);
+    }
+    kill_worktree(&config, &config.worktree);
+    println!(
+        "Stack for {} ({})",
+        config.worktree,
+        branch_of(&config.repo_root)
+    );
+    if let Err(error) = ensure_containers(&config, &errors) {
+        drop(lock);
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    let slot = match claim_slot(&config) {
+        Some(slot) => slot,
+        None => {
+            drop(lock);
+            note_error(
+                &errors,
+                "slots",
+                "",
+                &format!(
+                    "all {} slots taken — 'ramify status' shows who holds them",
+                    config.max_slot
+                ),
+            );
+            eprintln!(
+                "ramify: all {} slots taken — 'ramify status' shows who holds them",
+                config.max_slot
+            );
+            return 1;
+        }
+    };
+    println!("  slot            {slot}");
+    let mut state = format!("SLOT={slot}\n");
+    let mut ports: Vec<(String, String)> = Vec::new();
+    let mut late: Vec<String> = Vec::new();
+    let mut failed = false;
+
+    for service in &config.services {
+        if skipped(&config, service) {
+            continue;
+        }
+        if unneeded(&config, service) {
+            println!(
+                "  {:<15} not needed — nothing changed matches {service}_when",
+                service
+            );
+            continue;
+        }
+        let upper = service.to_uppercase();
+        if is_shared(&config, service) {
+            let port = config.service(service, "shared_port").unwrap_or_default();
+            if let Err(()) = ensure_shared(&config, service, &errors) {
+                failed = true;
+                break;
+            }
+            state.push_str(&format!("{upper}_PORT={port}\n{upper}_SHARED=1\n"));
+            ports.push((format!("{upper}_PORT"), port));
+        } else {
+            let Some(base) = config.service(service, "port").and_then(|port| port.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let port = base + slot;
+            if let Some(prepare) = config.service(service, "prepare") {
+                println!("  {:<15} preparing", service);
+                let log = config
+                    .state_dir
+                    .join(format!("{}.{}.prepare.log", config.worktree, service));
+                let directory = service_dir(&config, service);
+                let status = Command::new("bash")
+                    .args(["-c", &prepare])
+                    .current_dir(&directory)
+                    .stdout(std::fs::File::create(&log).map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null()))
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                match status {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        println!(
+                            "  {:<15} prepare FAILED — see {}",
+                            service,
+                            log.display()
+                        );
+                        note_error(&errors, service, &log.to_string_lossy(), &format!("prepare failed (exit {})", status.code().unwrap_or(-1)));
+                        failed = true;
+                        break;
+                    }
+                    Err(error) => {
+                        println!("  {:<15} prepare FAILED — see {}", service, log.display());
+                        note_error(&errors, service, &log.to_string_lossy(), &format!("prepare failed: {error}"));
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            let cmd = config.service(service, "cmd").unwrap_or_default();
+            let pidfile = config
+                .state_dir
+                .join(format!("{}.{}.pid", config.worktree, service));
+            let log = config
+                .state_dir
+                .join(format!("{}.{}.log", config.worktree, service));
+            if let Err(error) = start_service(
+                &config,
+                service,
+                port,
+                &config.repo_root,
+                &pidfile,
+                &log,
+                &cmd,
+                &tag(&config, &config.worktree, service),
+                &ports,
+            ) {
+                eprintln!("ramify: {error}");
+                failed = true;
+                break;
+            }
+            state.push_str(&format!("{upper}_PORT={port}\n{upper}_SHARED=0\n"));
+            ports.push((format!("{upper}_PORT"), port.to_string()));
+            if config.service(service, "optional").is_some() {
+                late.push(service.clone());
+            } else if wait_for(&config, service, port) {
+                println!("  {:<15} http://localhost:{port}  (ready)", service);
+            } else {
+                println!(
+                    "  {:<15} http://localhost:{port}  NOT READY — see {}",
+                    service,
+                    log.display()
+                );
+                note_error(
+                    &errors,
+                    service,
+                    &log.to_string_lossy(),
+                    &format!(
+                        "did not answer http://localhost:{port}{} in time",
+                        config.service(service, "health").unwrap_or_default()
+                    ),
+                );
+            }
+        }
+    }
+
+    // The state file is written before the services are waited on, as the shell does.
+    let _ = std::fs::write(&env, state);
+
+    if !failed {
+        for service in &config.services {
+            let key = format!("{}_PORT", service.to_uppercase());
+            let Some(port) = env_get(&env, &key).and_then(|port| port.parse().ok()) else {
+                continue;
+            };
+            if let Some(spec) = config.service(service, "smoke") {
+                if let Some(failure) = smoke(&config, &spec, port) {
+                    println!(
+                        "  {:<15} smoke {}  <-- check the wiring",
+                        service, failure
+                    );
+                }
+            }
+        }
+        for service in &late {
+            let key = format!("{}_PORT", service.to_uppercase());
+            let Some(port) = env_get(&env, &key).and_then(|port| port.parse().ok()) else {
+                continue;
+            };
+            if wait_for(&config, service, port) {
+                println!("  {:<15} http://localhost:{port}  (ready)", service);
+            } else {
+                println!(
+                    "  {:<15} http://localhost:{port}  still starting — see {}",
+                    service,
+                    config
+                        .state_dir
+                        .join(format!("{}.{}.log", config.worktree, service))
+                        .display()
+                );
+            }
+        }
+        println!();
+        let code = card_with_smoke(false);
+        drop(lock);
+        return code;
+    }
+
+    kill_worktree(&config, &config.worktree);
+    drop(lock);
+    1
+}
+
+fn take_up_lock(config: &Config) -> Result<UpLock, i32> {
+    let path = config
+        .state_dir
+        .join(format!("{}.up.lock", config.worktree));
+    let mut created = std::fs::create_dir(&path).is_ok();
+    if !created {
+        if crate::dash::up_running(config, &config.worktree) {
+            let pid = std::fs::read_to_string(path.join("pid")).unwrap_or_default();
+            println!(
+                "{}: an up is already running (pid {}) — 'ramify card' shows how far it got",
+                config.worktree,
+                pid.trim()
+            );
+            return Err(0);
+        }
+        let stale = path.with_extension(format!("stale.{}", std::process::id()));
+        let _ = std::fs::rename(&path, &stale);
+        let _ = std::fs::remove_dir_all(&stale);
+        created = std::fs::create_dir(&path).is_ok();
+        if !created {
+            println!("{}: another up took the lock first", config.worktree);
+            return Err(0);
+        }
+    }
+    let _ = std::fs::write(path.join("pid"), format!("{}\n", std::process::id()));
+    Ok(UpLock { path })
+}
+
+fn claim_slot(config: &Config) -> Option<u32> {
+    for slot in 1..=config.max_slot {
+        let path = config.slots.join(slot.to_string());
+        if path.exists() {
+            if !slot_is_stale(config, slot) {
+                continue;
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        let busy = config.services.iter().any(|service| {
+            config
+                .service(service, "port")
+                .and_then(|port| port.parse::<u32>().ok())
+                .map(|base| crate::dash::listening(base + slot))
+                .unwrap_or(false)
+        });
+        if busy {
+            continue;
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{} {}", config.worktree, std::process::id());
+            return Some(slot);
+        }
+    }
+    None
+}
+
+fn slot_is_stale(config: &Config, slot: u32) -> bool {
+    let path = config.slots.join(slot.to_string());
+    let holder = std::fs::read_to_string(&path).unwrap_or_default();
+    let pid = holder.split_whitespace().nth(1).unwrap_or("");
+    if !pid.is_empty() {
+        if let Ok(status) = Command::new("kill").args(["-0", pid]).status() {
+            if status.success() {
+                return false;
+            }
+        }
+    }
+    !config.services.iter().any(|service| {
+        config
+            .service(service, "port")
+            .and_then(|port| port.parse::<u32>().ok())
+            .map(|base| crate::dash::listening(base + slot))
+            .unwrap_or(false)
+    })
+}
+
+fn ensure_containers(config: &Config, errors: &Path) -> Result<(), String> {
+    let compose = config.value("RAMIFY_COMPOSE_FILE").unwrap_or_default();
+    if config.containers.is_empty() && compose.is_empty() {
+        return Ok(());
+    }
+    if Command::new("docker").arg("info").output().map(|output| !output.status.success()).unwrap_or(true) {
+        note_error(errors, "containers", "", "Docker is not running. Start it, then run this again.");
+        return Err("Docker is not running. Start it, then run this again.".into());
+    }
+    let mut missing = false;
+    for container in &config.containers {
+        let running = Command::new("docker")
+            .args([
+                "ps",
+                "--filter",
+                &format!("name=^{container}$"),
+                "--filter",
+                "status=running",
+                "-q",
+            ])
+            .output()
+            .map(|output| !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if !running {
+            missing = true;
+        }
+    }
+    if config.containers.is_empty() {
+        let project = config
+            .value("RAMIFY_COMPOSE_PROJECT")
+            .unwrap_or_else(|| config.project.clone());
+        let file = config.primary.join(&compose);
+        let running = Command::new("docker")
+            .args(["compose", "-p", &project, "-f"])
+            .arg(&file)
+            .args(["ps", "--services", "--status", "running"])
+            .output()
+            .map(|output| output.stdout)
+            .unwrap_or_default();
+        let all = Command::new("docker")
+            .args(["compose", "-f"])
+            .arg(&file)
+            .args(["config", "--services"])
+            .output()
+            .map(|output| output.stdout)
+            .unwrap_or_default();
+        missing = sorted(&running) != sorted(&all);
+    }
+    if !missing {
+        println!("  containers      already up (shared)");
+        return Ok(());
+    }
+    if compose.is_empty() {
+        note_error(errors, "containers", "", "containers down and no RAMIFY_COMPOSE_FILE to start them");
+        return Err("containers down and no RAMIFY_COMPOSE_FILE to start them".into());
+    }
+    let project = config
+        .value("RAMIFY_COMPOSE_PROJECT")
+        .unwrap_or_else(|| config.project.clone());
+    println!("  containers      starting under project '{project}'…");
+    let log = config
+        .state_dir
+        .join(format!("{}.compose.log", config.worktree));
+    let output = Command::new("docker")
+        .args(["compose", "-p", &project, "-f"])
+        .arg(config.primary.join(&compose))
+        .args(["up", "-d"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let _ = std::fs::write(&log, &output.stdout);
+            Ok(())
+        }
+        Ok(output) => {
+            let _ = std::fs::write(&log, [output.stdout, output.stderr].concat());
+            note_error(errors, "containers", &log.to_string_lossy(), "docker compose up failed");
+            Err("docker compose up failed".into())
+        }
+        Err(error) => {
+            note_error(errors, "containers", &log.to_string_lossy(), "docker compose up failed");
+            Err(format!("docker compose up failed: {error}"))
+        }
+    }
+}
+
+fn sorted(bytes: &[u8]) -> Vec<String> {
+    let mut lines: Vec<String> = String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::to_string)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.sort();
+    lines
+}
+
+fn service_dir(config: &Config, service: &str) -> PathBuf {
+    let dir = config.service(service, "dir").unwrap_or_default();
+    config.repo_root.join(dir)
+}
+
+fn tag(config: &Config, worktree: &str, service: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(config.state_dir.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let short: String = digest[..4].iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{}@{short}/{worktree}/{service}", config.project)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_service(
+    config: &Config,
+    service: &str,
+    port: u32,
+    root: &Path,
+    pidfile: &Path,
+    log: &Path,
+    cmd: &str,
+    tag: &str,
+    ports: &[(String, String)],
+) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let directory = root.join(config.service(service, "dir").unwrap_or_default());
+    let stdout = std::fs::File::create(log).map_err(|error| format!("could not open {}: {error}", log.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|error| format!("could not open {}: {error}", log.display()))?;
+    let mut command = Command::new("bash");
+    command
+        .args(["-c", cmd])
+        .current_dir(&directory)
+        .env("PORT", port.to_string())
+        .env("RAMIFY_TAG", tag)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .process_group(0);
+    for (key, value) in ports {
+        command.env(key, value);
+    }
+    let child = command
+        .spawn()
+        .map_err(|error| format!("could not start {service}: {error}"))?;
+    std::fs::write(pidfile, format!("{}\n", child.id()))
+        .map_err(|error| format!("could not write {}: {error}", pidfile.display()))?;
+    Ok(())
+}
+
+fn wait_for(config: &Config, service: &str, port: u32) -> bool {
+    let timeout: u64 = config
+        .service(service, "timeout")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(90);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    loop {
+        if health_ok(config, service, port) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+fn ensure_shared(config: &Config, service: &str, errors: &Path) -> Result<(), ()> {
+    let port = config
+        .service(service, "shared_port")
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(0);
+    if health_ok(config, service, port) {
+        println!(
+            "  {:<15} http://localhost:{port}  (shared, already up)",
+            service
+        );
+        return Ok(());
+    }
+    println!(
+        "  {:<15} starting shared instance from {}…",
+        service,
+        config
+            .primary
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    );
+    let pidfile = config.state_dir.join("shared").join(format!("{service}.pid"));
+    let log = config.state_dir.join("shared").join(format!("{service}.log"));
+    let cmd = config.service(service, "shared_cmd").unwrap_or_default();
+    if start_service(
+        config,
+        service,
+        port,
+        &config.primary,
+        &pidfile,
+        &log,
+        &cmd,
+        &tag(config, "@shared", service),
+        &[],
+    )
+    .is_err()
+    {
+        return Err(());
+    }
+    if wait_for(config, service, port) {
+        println!(
+            "  {:<15} http://localhost:{port}  (shared, ready)",
+            service
+        );
+        Ok(())
+    } else {
+        println!(
+            "  {:<15} shared instance NOT READY — see {}",
+            service,
+            log.display()
+        );
+        note_error(
+            errors,
+            service,
+            &log.to_string_lossy(),
+            &format!("shared instance did not answer http://localhost:{port}{}", config.service(service, "health").unwrap_or_default()),
+        );
+        Err(())
+    }
+}
+
+fn changed_paths(config: &Config) -> Vec<String> {
+    let base = crate::config::git(
+        &["merge-base", "HEAD", &format!("{}/{}", config.remote, config.main)],
+        &config.repo_root,
+    )
+    .or_else(|_| crate::config::git(&["merge-base", "HEAD", &config.main], &config.repo_root));
+    let mut paths = Vec::new();
+    if let Ok(base) = base {
+        if let Ok(text) = crate::config::git(&["diff", "--name-only", &format!("{}...HEAD", base.trim())], &config.repo_root) {
+            paths.extend(text.lines().map(str::to_string));
+        }
+    }
+    if let Ok(text) = crate::config::git(&["status", "--porcelain"], &config.repo_root) {
+        for line in text.lines() {
+            let path = line.get(3..).unwrap_or("");
+            let path = path.rsplit(" -> ").next().unwrap_or(path);
+            paths.push(path.to_string());
+        }
+    }
+    paths
+}
+
+fn is_shared(config: &Config, service: &str) -> bool {
+    if config.service(service, "shared_port").is_none() {
+        return false;
+    }
+    let Some(pattern) = config.service(service, "shared_when") else {
+        return true;
+    };
+    let Ok(regex) = regex::Regex::new(&pattern) else {
+        return true;
+    };
+    !changed_paths(config)
+        .iter()
+        .any(|path| !regex.is_match(path))
+}
+
+fn unneeded(config: &Config, service: &str) -> bool {
+    let Some(pattern) = config.service(service, "when") else {
+        return false;
+    };
+    let Ok(regex) = regex::Regex::new(&pattern) else {
+        return false;
+    };
+    !changed_paths(config).iter().any(|path| regex.is_match(path))
+}
+
+fn skipped(config: &Config, service: &str) -> bool {
+    config
+        .value("RAMIFY_SKIP")
+        .map(|value| value.split_whitespace().any(|item| item == service))
+        .unwrap_or(false)
+}
+
+fn ping_ports(config: &Config, env: &Path) -> bool {
+    if !env.is_file() {
+        return false;
+    }
+    for service in &config.services {
+        if config.service(service, "optional").is_some() {
+            continue;
+        }
+        let key = format!("{}_PORT", service.to_uppercase());
+        let Some(port) = env_get(env, &key).and_then(|port| port.parse().ok()) else {
+            continue;
+        };
+        if !health_ok(config, service, port) {
+            return false;
+        }
+    }
+    true
+}
+
+fn note_error(errors: &Path, service: &str, log: &str, message: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(errors)
+    {
+        let _ = writeln!(file, "{service}\t{log}\t{message}");
+    }
 }
