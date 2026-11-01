@@ -864,3 +864,35 @@ pub fn lane(args: &[String]) -> i32 {
         }
     }
 }
+
+
+pub fn ping() -> i32 {
+    let config = match Config::resolve() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ramify: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = check_services(&config) {
+        eprintln!("ramify: {error}");
+        return 1;
+    }
+    let env = config.state_dir.join(format!("{}.env", config.worktree));
+    if !env.is_file() {
+        return 1;
+    }
+    for service in &config.services {
+        if config.service(service, "optional").is_some() {
+            continue;
+        }
+        let key = format!("{}_PORT", service.to_uppercase());
+        let Some(port) = env_get(&env, &key).and_then(|port| port.parse().ok()) else {
+            continue;
+        };
+        if !health_ok(&config, service, port) {
+            return 1;
+        }
+    }
+    0
+}

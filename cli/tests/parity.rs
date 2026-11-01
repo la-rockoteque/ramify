@@ -528,3 +528,46 @@ fn lane_matches_the_shell() {
         );
     }
 }
+
+#[test]
+fn ping_matches_the_shell() {
+    let fixture = temp("ping");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=3000\nweb_health=/health\nweb_cmd='true'\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("ping-state");
+    let registry = temp("ping-registry").join("projects");
+    let repo = repo_root();
+
+    let shell = run_args(
+        &repo.join("bin/ramify"),
+        &["ping"],
+        &fixture,
+        &state,
+        &registry,
+        true,
+    );
+    let rust = run_args(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &["ping"],
+        &fixture,
+        &state,
+        &registry,
+        false,
+    );
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stdout),
+        String::from_utf8_lossy(&rust.stdout)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&shell.stderr),
+        String::from_utf8_lossy(&rust.stderr)
+    );
+}

@@ -16,6 +16,9 @@ fn main() {
     if command == "status" {
         std::process::exit(commands::status());
     }
+    if command == "ping" {
+        std::process::exit(commands::ping());
+    }
     if command == "label" {
         std::process::exit(commands::label(&args[1..]));
     }

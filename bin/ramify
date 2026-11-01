@@ -82,7 +82,7 @@ done
 RAMIFY_RS="${RAMIFY_RS:-$RAMIFY_HOME/cli/target/release/ramify}"
 if [ -z "${RAMIFY_SHELL:-}" ] && [ -x "$RAMIFY_RS" ]; then
   case "${1:-}" in
-    config|status|card|dash|dash-project|runs|label|lane) exec "$RAMIFY_RS" "$@" ;;
+    config|status|card|dash|dash-project|runs|label|lane|ping) exec "$RAMIFY_RS" "$@" ;;
     workflow) case "${2:-list}" in list|show) exec "$RAMIFY_RS" "$@" ;; esac ;;
     gates) exec "$RAMIFY_RS" "$@" ;;
     step)
