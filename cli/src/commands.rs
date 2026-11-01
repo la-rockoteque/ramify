@@ -959,6 +959,10 @@ pub fn shared_down() -> i32 {
     0
 }
 
+pub(crate) fn kill_worktree_public(config: &Config, worktree: &str) {
+    kill_worktree(config, worktree)
+}
+
 fn kill_worktree(config: &Config, worktree: &str) {
     let env = config.state_dir.join(format!("{worktree}.env"));
     for service in &config.services {

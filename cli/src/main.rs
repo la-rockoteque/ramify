@@ -1,5 +1,6 @@
 mod commands;
 mod config;
+mod mem;
 mod pyjson;
 mod dash;
 mod workflow;
@@ -15,6 +16,9 @@ fn main() {
     }
     if command == "status" {
         std::process::exit(commands::status());
+    }
+    if command == "mem" {
+        std::process::exit(mem::mem(&args[1..]));
     }
     if command == "write-set" {
         std::process::exit(commands::write_set(&args[1..]));

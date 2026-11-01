@@ -746,3 +746,52 @@ fn write_set_matches_the_shell() {
         "self-test stdout"
     );
 }
+
+#[test]
+fn mem_stacks_match_the_shell() {
+    let fixture = temp("mem");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=47300\nweb_health=/\nweb_cmd='true'\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("mem-state");
+    let registry = temp("mem-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, format!("{}\n", fixture.display())).unwrap();
+    let repo = repo_root();
+
+    let shell = Command::new(repo.join("bin/ramify"))
+        .args(["mem"])
+        .env("RAMIFY_SHELL", "1")
+        .env("RAMIFY_STATE_DIR", &state)
+        .env("RAMIFY_REGISTRY", &registry)
+        .env("RAMIFY_HOME", &repo)
+        .output()
+        .unwrap();
+    let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+        .args(["mem"])
+        .env_remove("RAMIFY_SHELL")
+        .env("RAMIFY_STATE_DIR", &state)
+        .env("RAMIFY_REGISTRY", &registry)
+        .env("RAMIFY_HOME", &repo)
+        .output()
+        .unwrap();
+    assert_eq!(shell.status.code(), rust.status.code());
+    let shell_text = String::from_utf8_lossy(&shell.stdout).into_owned();
+    let rust_text = String::from_utf8_lossy(&rust.stdout).into_owned();
+    assert!(rust_text.starts_with("machine"), "{rust_text}");
+    assert_eq!(stacks_section(&shell_text), stacks_section(&rust_text));
+}
+
+fn stacks_section(text: &str) -> String {
+    text.lines()
+        .skip_while(|line| *line != "stacks")
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
