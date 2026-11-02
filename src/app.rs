@@ -617,8 +617,9 @@ impl App {
             return;
         }
         if self.screen == Screen::Main && self.panel.open {
-            self.panel
-                .set_worktree(self.selected_worktree().map(|worktree| worktree.path.clone()));
+            if let Some(worktree) = self.selected_worktree() {
+                self.panel.set_worktree(Some(worktree.path.clone()));
+            }
             if self.panel.on_key(key, &*self.runner, &self.root) {
                 if let Some(root) = self.panel.take_open() {
                     self.open_root(root);
@@ -774,8 +775,9 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        self.panel
-            .set_worktree(self.selected_worktree().map(|worktree| worktree.path.clone()));
+        if let Some(worktree) = self.selected_worktree() {
+            self.panel.set_worktree(Some(worktree.path.clone()));
+        }
         self.panel.tick(&*self.runner, &self.root);
     }
 

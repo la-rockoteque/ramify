@@ -133,6 +133,7 @@ fn selected_session_colour_themes_panel() {
     let mut app = app_with(runner.clone(), &root);
     app.panel.open_on(Pane::Sessions);
     app.panel.refresh(&*runner, &root);
+    app.panel.select_next();
     assert_eq!(app.panel.border_color(), Some(session_color("birch")));
 }
 
@@ -158,6 +159,7 @@ fn enter_opens_session_root() {
     let mut app = app_with(runner.clone(), &tmp("q3-start"));
     app.panel.open_on(Pane::Sessions);
     app.panel.refresh(&*runner, &app.root.clone());
+    app.panel.select_next();
     app.on_key(key(KeyCode::Enter));
     assert_eq!(app.root, other);
     assert_eq!(app.screen, Screen::Main);
