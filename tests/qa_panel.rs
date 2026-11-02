@@ -22,6 +22,8 @@ fn out(text: &str) -> CommandOutput {
     }
 }
 
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 struct FakeRunner {
     responses: Mutex<HashMap<Vec<String>, VecDeque<CommandOutput>>>,
     specs: Mutex<Vec<CommandSpec>>,
@@ -197,6 +199,7 @@ fn approvals_approve_and_reject() {
 
 #[test]
 fn scratch_lists_copies_and_removes() {
+    let _env = ENV_LOCK.lock().unwrap();
     let root = tmp("q4");
     let scratch = tmp("q4-scratch");
     std::env::set_var("RAMIFY_SCRATCH_DIR", &scratch);
@@ -292,6 +295,7 @@ fn panel_flag_opens_pane() {
 
 #[test]
 fn empty_states_name_the_command() {
+    let _env = ENV_LOCK.lock().unwrap();
     let root = tmp("q7");
     let runner = FakeRunner::new();
     let mut app = app_with(runner.clone(), &root);
