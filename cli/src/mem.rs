@@ -505,7 +505,7 @@ fn cwd_of(pid: u64) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-fn build_servers_line() {
+pub(crate) fn build_servers_line() {
     let Ok(output) = Command::new("ps")
         .args(["-axww", "-o", "rss=,command="])
         .output()

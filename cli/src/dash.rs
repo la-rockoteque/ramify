@@ -292,7 +292,7 @@ fn services(
     services
 }
 
-fn shared(config: &Config, processes: &[Process]) -> Vec<Shared> {
+pub(crate) fn shared(config: &Config, processes: &[Process]) -> Vec<Shared> {
     let mut shared = Vec::new();
     for service in &config.services {
         let Some(shared_port) = config.service(service, "shared_port") else {
@@ -317,7 +317,7 @@ fn shared(config: &Config, processes: &[Process]) -> Vec<Shared> {
     shared
 }
 
-fn containers(config: &Config) -> Vec<Container> {
+pub(crate) fn containers(config: &Config) -> Vec<Container> {
     if config.containers.is_empty() {
         return Vec::new();
     }

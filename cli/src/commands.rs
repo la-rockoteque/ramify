@@ -336,19 +336,23 @@ pub fn card_with_smoke(with_smoke: bool) -> i32 {
             return 1;
         }
     };
-    if let Err(error) = check_services(&config) {
+    render_card_for(&config, &config.worktree, with_smoke)
+}
+
+pub(crate) fn render_card_for(config: &Config, worktree: &str, with_smoke: bool) -> i32 {
+    if let Err(error) = check_services(config) {
         eprintln!("ramify: {error}");
         return 1;
     }
-    let worktree = &config.worktree;
     let env = config.state_dir.join(format!("{worktree}.env"));
     if !env.is_file() {
         println!("no stack for {worktree} — run 'ramify up'");
         return 1;
     }
-    let branch = branch_of(&config.repo_root);
+    let root = worktree_root(&config.primary, worktree).unwrap_or_else(|| config.repo_root.clone());
+    let branch = branch_of(&root);
     let mut shown_branch = branch.clone();
-    if !crate::config::git(&["status", "--porcelain"], &config.repo_root)
+    if !crate::config::git(&["status", "--porcelain"], &root)
         .unwrap_or_default()
         .trim()
         .is_empty()
@@ -367,10 +371,10 @@ pub fn card_with_smoke(with_smoke: bool) -> i32 {
         &format!("up {}", crate::dash::uptime_of(&env).unwrap_or_else(|| "—".into())),
         "",
     );
-    if let Some(text) = workflow_line(&config, &branch) {
+    if let Some(text) = workflow_line(config, &root, &branch) {
         style.row(&text);
     }
-    for text in run_lines(&config.repo_root) {
+    for text in run_lines(&root) {
         style.row(&text);
     }
     style.box_line('├', '┤');
@@ -412,10 +416,10 @@ pub fn card_with_smoke(with_smoke: bool) -> i32 {
         } else {
             String::new()
         };
-        style.row2(&left, crate::dash::probe(&config, service, parsed), &color);
+        style.row2(&left, crate::dash::probe(config, service, parsed), &color);
         if with_smoke {
             if let Some(spec) = config.service(service, "smoke") {
-                if let Some(failure) = smoke(&config, &spec, parsed) {
+                if let Some(failure) = smoke(config, &spec, parsed) {
                     style.row(&format!("  smoke {}", failure));
                 }
             }
@@ -537,7 +541,7 @@ fn color_on() -> bool {
 }
 
 /// POSIX `cksum`: CRC-32 (polynomial 0x04C11DB7) over the bytes, then over the length.
-fn cksum(bytes: &[u8]) -> u32 {
+pub(crate) fn cksum(bytes: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (index, entry) in table.iter_mut().enumerate() {
         let mut value = (index as u32) << 24;
@@ -562,8 +566,8 @@ fn cksum(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn workflow_line(config: &Config, branch: &str) -> Option<String> {
-    let progress = crate::workflow::report(config, &config.repo_root, branch)?;
+fn workflow_line(config: &Config, root: &Path, branch: &str) -> Option<String> {
+    let progress = crate::workflow::report(config, root, branch)?;
     let where_ = match &progress.next {
         Some(_) if progress.asked.is_some() => {
             format!("⏳ {} waits on you", progress.asked.clone().unwrap())
@@ -2202,6 +2206,32 @@ pub fn new(args: &[String]) -> i32 {
         config.remote, config.main
     );
     println!("ramify: worktree {}", destination.display());
+    if !config.jira_url.is_empty() && config.value("RAMIFY_JIRA_SYNC").as_deref() != Some("0") {
+        if let Some(key) = crate::dash::ticket_of(&branch, &config) {
+            let _ = key;
+            let log = config
+                .state_dir
+                .join("tickets")
+                .join(format!("{slug}.startup.log"));
+            let _ = std::fs::create_dir_all(log.parent().unwrap_or(Path::new("/tmp")));
+            if let Ok(output) = std::fs::File::create(&log) {
+                let errors = output.try_clone().ok();
+                let self_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ramify"));
+                let mut command = Command::new(self_binary);
+                command
+                    .args(["ticket", "start"])
+                    .env("RAMIFY_ROOT", &destination)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(output);
+                if let Some(errors) = errors {
+                    command.stderr(errors);
+                }
+                if command.spawn().is_ok() {
+                    println!("  Jira sync       running — {}", log.display());
+                }
+            }
+        }
+    }
     print!("{}", label_output(&config, &slug));
     0
 }
@@ -2343,10 +2373,56 @@ pub fn cleanup() -> i32 {
         );
     }
 
+    if !config.jira_url.is_empty() {
+        let branches = crate::config::git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"], &config.primary)
+            .unwrap_or_default();
+        for branch in branches.lines().filter(|branch| !branch.is_empty()) {
+            if branch == config.main {
+                continue;
+            }
+            let Some(key) = crate::dash::ticket_of(branch, &config) else {
+                continue;
+            };
+            if crate::mem::merged_reason(&config, branch).is_none() {
+                continue;
+            }
+            let note = ticket_note(&config, &key);
+            if note.starts_with("closes") {
+                match close_ticket(&config, &key) {
+                    Ok(message) => println!("  ticket         {message}"),
+                    Err(error) => println!("  ticket         {error}"),
+                }
+                found = true;
+            } else if note.contains("already") || note.contains("not found") {
+            } else {
+                println!("  ticket         {key}: {note}");
+                found = true;
+            }
+        }
+    }
+
     if !found {
         println!("nothing to clean — every claimed slot has a live stack behind it");
     }
     0
+}
+
+fn ticket_note(config: &Config, key: &str) -> String {
+    match crate::jira::ticket_status(&config.jira_url, key) {
+        Ok(Some((category, name))) => {
+            if category == "done" {
+                format!("{key} already {name}")
+            } else {
+                format!("closes {key} ({name})")
+            }
+        }
+        Ok(None) => format!("{key} not found in Jira, nothing to close"),
+        Err(error) => error,
+    }
+}
+
+fn close_ticket(config: &Config, key: &str) -> Result<String, String> {
+    crate::jira::ticket_close(&config.jira_url, key)
 }
 
 fn state_worktree(name: &str) -> Option<String> {
@@ -2487,7 +2563,11 @@ fn prune_project(config: &Config, apply: bool) {
             .unwrap_or_default();
         println!("  prune  {:<45} {reason}{worktree}", branch);
         count += 1;
+        let key = crate::dash::ticket_of(branch, config);
         if !apply {
+            if let Some(key) = &key {
+                println!("         {}", ticket_note(config, key));
+            }
             continue;
         }
         if let Some(path) = &path {
@@ -2506,6 +2586,12 @@ fn prune_project(config: &Config, apply: bool) {
         let _ = Command::new("git")
             .args(["-C", &config.primary.to_string_lossy(), "branch", "-D", "-q", branch])
             .status();
+        if let Some(key) = &key {
+            match close_ticket(config, key) {
+                Ok(message) => println!("         {message}"),
+                Err(error) => println!("         {error}"),
+            }
+        }
     }
 
     // Detached worktrees whose HEAD is already in main.
@@ -2766,13 +2852,18 @@ pub fn complete(args: &[String]) -> i32 {
         return 1;
     }
     let key = crate::dash::ticket_of(&branch, &config);
-    if let Some(key) = &key {
-        eprintln!("ramify: closing {key} needs the Jira port, not yet done");
-        return 1;
-    }
+    let note = key
+        .as_ref()
+        .map(|key| ticket_note(&config, key))
+        .unwrap_or_default();
     println!(
-        "complete {worktree} ({})",
-        if branch.is_empty() { "detached" } else { &branch }
+        "complete {worktree} ({}){}",
+        if branch.is_empty() { "detached" } else { &branch },
+        if note.is_empty() {
+            String::new()
+        } else {
+            format!(" — {note}")
+        }
     );
     if !args.iter().any(|arg| arg == "--yes") {
         if !std::io::stdin().is_terminal() {
@@ -2783,6 +2874,13 @@ pub fn complete(args: &[String]) -> i32 {
         let mut answer = String::new();
         if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
             return 0;
+        }
+    }
+    if let Some(key) = &key {
+        if let Err(error) = close_ticket(&config, key) {
+            eprintln!("ticket not closed, {worktree} kept — run it again once Jira answers");
+            let _ = error;
+            return 1;
         }
     }
     let removed = Command::new("git")
@@ -2807,4 +2905,343 @@ pub fn complete(args: &[String]) -> i32 {
         }
     );
     0
+}
+
+pub fn dash_human() -> i32 {
+    let projects: Vec<Config> = crate::dash::projects()
+        .into_iter()
+        .filter_map(|root| Config::for_root(&root).ok())
+        .filter(|config| !config.services.is_empty())
+        .collect();
+    if projects.is_empty() {
+        println!("no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'");
+        return 0;
+    }
+    crate::mem::build_servers_line();
+    let mut runs = false;
+    for line in run_lines_all() {
+        println!("{line}  (ramify run)");
+        runs = true;
+    }
+    if runs {
+        println!();
+    }
+    for config in &projects {
+        if projects.len() > 1 {
+            let style = CardStyle::new(&config.project, false, color_on());
+            let name = config
+                .primary
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            println!("{}━━ {name} ━━{}", style.bc, style.end);
+        }
+        dash_project(config);
+        if projects.len() > 1 {
+            println!();
+        }
+    }
+    0
+}
+
+fn dash_project(config: &Config) {
+    let style = CardStyle::new(&config.project, false, color_on());
+    let mut line = String::new();
+    if !config.containers.is_empty() {
+        let processes = crate::dash::processes();
+        let _ = processes;
+        for container in crate::dash::containers(config) {
+            line.push_str(&format!(
+                "{} {}{}   ",
+                container.name,
+                style.paint(if container.up { "up" } else { "DOWN" }),
+                container
+                    .mb
+                    .map(|mb| format!(" {mb} MB"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    let processes = crate::dash::processes();
+    for shared in crate::dash::shared(config, &processes) {
+        let color = style.service_color(&shared.service);
+        line.push_str(&format!(
+            "{color}shared {} :{}{} {}{}   ",
+            shared.service,
+            shared.port,
+            if color.is_empty() { "" } else { style.rc.as_str() },
+            style.paint(if shared.up { "up" } else { "not running" }),
+            shared
+                .mb
+                .map(|mb| format!(" {mb} MB"))
+                .unwrap_or_default()
+        ));
+    }
+    if !line.is_empty() {
+        println!("{line}");
+        println!();
+    }
+    let mut claimed = 0;
+    for slot in 1..=config.max_slot {
+        let path = config.slots.join(slot.to_string());
+        let Ok(holder) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let holder = holder.split_whitespace().next().unwrap_or("").to_string();
+        let held = env_get(&config.state_dir.join(format!("{holder}.env")), "SLOT")
+            .unwrap_or_default();
+        if !held.is_empty() && held != slot.to_string() {
+            println!("slot {slot:<2} ORPHAN — {holder} still runs here but its state moved to slot {held} (ramify cleanup)");
+            println!();
+            continue;
+        }
+        if render_card_for(config, &holder, false) == 0 {
+            claimed += 1;
+        }
+    }
+    for stray in crate::dash::strays(config) {
+        println!(
+            "STRAY  {} {} still runs (process group {}) with no pid file pointing at it (ramify cleanup)",
+            stray.worktree, stray.service, stray.pgid
+        );
+        println!();
+    }
+    if claimed == 0 {
+        println!("no stack running — 'ramify up' in a worktree starts one");
+    }
+}
+
+fn run_lines_all() -> Vec<String> {
+    let directory = std::env::var("RAMIFY_RUNS_DIR").unwrap_or_else(|_| {
+        let base = std::env::var("CLAUDE_CONFIG_DIR")
+            .unwrap_or_else(|_| format!("{}/.claude", std::env::var("HOME").unwrap_or_default()));
+        format!("{base}/ramify/runs")
+    });
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+        .iter()
+        .filter_map(|name| {
+            let text = std::fs::read_to_string(Path::new(&directory).join(name).join("meta.json")).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+            if meta.get("status").and_then(|value| value.as_str()) != Some("pending") {
+                return None;
+            }
+            let id = meta.get("id").and_then(|value| value.as_str()).unwrap_or(name);
+            Some(format!("▶ run {id} waits on you"))
+        })
+        .collect()
+}
+
+pub fn watch(args: &[String]) -> i32 {
+    let interval: u64 = args
+        .first()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2);
+    let color = color_on();
+    let tty = std::io::stdin().is_terminal();
+    let hint = if tty {
+        "m = menu · ctrl-c to stop"
+    } else {
+        "ctrl-c to stop"
+    };
+    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ramify"));
+    let mut previous = String::new();
+    loop {
+        let mut command = Command::new(&binary);
+        command.arg("dash");
+        if color {
+            command.env("RAMIFY_COLOR", "1");
+        }
+        let output = command.output();
+        let now = output
+            .map(|output| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+            .unwrap_or_default();
+        if now != previous {
+            if std::io::stdout().is_terminal() {
+                print!("\x1b[H\x1b[2J\x1b[3J");
+            }
+            print!("{now}");
+            println!(
+                "watching every {interval}s — {hint}   (last change {})",
+                Command::new("date")
+                    .arg("+%H:%M:%S")
+                    .output()
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .unwrap_or_default()
+            );
+            previous = now;
+        }
+        if tty {
+            use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+            if event::poll(std::time::Duration::from_secs(interval)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('m') {
+                        menu();
+                        previous.clear();
+                    }
+                }
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        }
+    }
+}
+
+pub fn menu() -> i32 {
+    use crossterm::terminal;
+    let mut projects: Vec<Config> = crate::dash::projects()
+        .into_iter()
+        .filter_map(|root| Config::for_root(&root).ok())
+        .collect();
+    projects.sort_by(|a, b| a.project.cmp(&b.project));
+    if projects.is_empty() {
+        println!("no ramify project on this machine yet — 'ramify setup' in a repo, then 'ramify up'");
+        return 0;
+    }
+    let current = Config::resolve().ok();
+    let config = match current {
+        Some(config) if projects.len() == 1 => config,
+        _ => {
+            let labels: Vec<String> = projects
+                .iter()
+                .map(|config| config.project.clone())
+                .collect();
+            let Some(index) = choose("Which project?", &labels) else {
+                return 0;
+            };
+            projects[index].clone()
+        }
+    };
+    let worktrees = crate::config::git(&["worktree", "list", "--porcelain"], &config.primary)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree ").map(PathBuf::from))
+        .collect::<Vec<_>>();
+    let mut labels: Vec<String> = worktrees
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    labels.push("Machine-wide cleanup".into());
+    labels.push("Prune merged worktrees + branches".into());
+    let Some(choice) = choose("Which worktree?", &labels) else {
+        return 0;
+    };
+    if choice == worktrees.len() {
+        return cleanup();
+    }
+    if choice == worktrees.len() + 1 {
+        prune(&[]);
+        if choose("Prune these?", &["Prune".to_string(), "Back".to_string()]) == Some(0) {
+            return prune(&["--apply".to_string()]);
+        }
+        return 0;
+    }
+    let path = worktrees[choice].clone();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let actions = [
+        "Start QA",
+        "Stop + release slot",
+        "Complete (close ticket, remove worktree)",
+        "Force delete worktree + branch",
+        "Back",
+    ];
+    let Some(action) = choose(&name, &actions.map(str::to_string)) else {
+        return 0;
+    };
+    let previous = std::env::var_os("RAMIFY_ROOT");
+    std::env::set_var("RAMIFY_ROOT", &path);
+    let _ = terminal::disable_raw_mode();
+    let code = match action {
+        0 => up(),
+        1 => down(),
+        2 => {
+            if choose("Complete it?", &["Complete".to_string(), "Back".to_string()]) == Some(0) {
+                complete(&[name.clone(), "--yes".into()])
+            } else {
+                0
+            }
+        }
+        3 => match choose(
+            "Delete it? This cannot be undone.",
+            &["Delete".to_string(), "Back".to_string()],
+        ) {
+            Some(0) => delete(&[name.clone(), "--yes".into()]),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    match previous {
+        Some(root) => std::env::set_var("RAMIFY_ROOT", root),
+        None => std::env::remove_var("RAMIFY_ROOT"),
+    }
+    code
+}
+
+fn choose(title: &str, options: &[String]) -> Option<usize> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use crossterm::terminal;
+    if options.is_empty() {
+        return None;
+    }
+    terminal::enable_raw_mode().ok()?;
+    let mut selected = 0;
+    let mut drawn = 0;
+    let result = loop {
+        if drawn > 0 {
+            print!("\x1b[{drawn}A");
+        }
+        let mut text = String::new();
+        text.push_str(&format!("\x1b[2K{title}\n"));
+        for (index, option) in options.iter().enumerate() {
+            if index == selected {
+                text.push_str(&format!("\x1b[2K\x1b[36m❯ {option}\x1b[0m\n"));
+            } else {
+                text.push_str(&format!("\x1b[2K  {option}\n"));
+            }
+        }
+        text.push_str("\x1b[2K\x1b[2m↑/↓ move · enter select · esc back\x1b[0m\n");
+        print!("{text}");
+        drawn = options.len() + 2;
+        {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => selected = (selected + 1) % options.len(),
+                KeyCode::Char('k') | KeyCode::Up => {
+                    selected = (selected + options.len() - 1) % options.len()
+                }
+                KeyCode::Enter => break Some(selected),
+                KeyCode::Char('q') | KeyCode::Esc => break None,
+                _ => {}
+            },
+            _ => {}
+        }
+    };
+    let _ = terminal::disable_raw_mode();
+    print!("\x1b[?25h");
+    result
 }

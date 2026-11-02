@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -27,6 +28,14 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("repo root")
         .to_path_buf()
+}
+
+fn reference_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reference")
+}
+
+fn reference_bin() -> PathBuf {
+    reference_root().join("bin/ramify")
 }
 
 fn run(binary: &Path, fixture: &Path, state: &Path, registry: &Path, shell_mode: bool) -> Output {
@@ -76,7 +85,7 @@ fn dash_project_json_matches_the_shell() {
     let registry = temp("registry").join("projects");
     let repo = repo_root();
 
-    let shell = run(&repo.join("bin/ramify"), &fixture, &state, &registry, true);
+    let shell = run(&reference_bin(), &fixture, &state, &registry, true);
     let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &fixture, &state, &registry, false);
 
     assert_eq!(shell.status.code(), rust.status.code());
@@ -96,7 +105,7 @@ fn a_missing_config_matches_the_shell() {
     let registry = temp("no-config-registry").join("projects");
     let repo = repo_root();
 
-    let shell = run(&repo.join("bin/ramify"), &fixture, &state, &registry, true);
+    let shell = run(&reference_bin(), &fixture, &state, &registry, true);
     let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &fixture, &state, &registry, false);
 
     assert_eq!(shell.status.code(), rust.status.code());
@@ -131,7 +140,7 @@ fn dash_project_with_services_matches_the_shell() {
     let registry = temp("services-registry").join("projects");
     let repo = repo_root();
 
-    let shell = run(&repo.join("bin/ramify"), &fixture, &state, &registry, true);
+    let shell = run(&reference_bin(), &fixture, &state, &registry, true);
     let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &fixture, &state, &registry, false);
 
     assert_eq!(shell.status.code(), rust.status.code());
@@ -155,7 +164,7 @@ fn config_matches_the_shell() {
     let repo = repo_root();
 
     for args in [vec!["config"], vec!["config", "get", "RAMIFY_PROJECT"]] {
-        let shell = run_args(&repo.join("bin/ramify"), &args, &fixture, &state, &registry, true);
+        let shell = run_args(&reference_bin(), &args, &fixture, &state, &registry, true);
         let rust = run_args(
             Path::new(env!("CARGO_BIN_EXE_ramify")),
             &args,
@@ -197,7 +206,7 @@ fn status_matches_the_shell() {
     let repo = repo_root();
 
     let shell = run_args(
-        &repo.join("bin/ramify"),
+        &reference_bin(),
         &["status"],
         &fixture,
         &state,
@@ -237,7 +246,7 @@ fn workflow_list_and_show_match_the_shell() {
         vec!["workflow", "show", "feature"],
         vec!["workflow", "show", "bug"],
     ] {
-        let shell = run_args(&repo.join("bin/ramify"), &args, &fixture, &state, &registry, true);
+        let shell = run_args(&reference_bin(), &args, &fixture, &state, &registry, true);
         let rust = run_args(
             Path::new(env!("CARGO_BIN_EXE_ramify")),
             &args,
@@ -274,7 +283,7 @@ fn step_display_matches_the_shell() {
     let repo = repo_root();
 
     let shell = run_args(
-        &repo.join("bin/ramify"),
+        &reference_bin(),
         &["step"],
         &fixture,
         &state,
@@ -316,7 +325,7 @@ fn runs_match_the_shell() {
     let repo = repo_root();
 
     for args in [vec!["runs"], vec!["runs", "--json"]] {
-        let shell = Command::new(repo.join("bin/ramify"))
+        let shell = Command::new(reference_bin())
             .args(&args)
             .env("RAMIFY_SHELL", "1")
             .env("RAMIFY_RUNS_DIR", &runs)
@@ -363,7 +372,7 @@ fn card_matches_the_shell() {
     let repo = repo_root();
 
     let shell = run_args(
-        &repo.join("bin/ramify"),
+        &reference_bin(),
         &["card"],
         &fixture,
         &state,
@@ -409,7 +418,7 @@ fn gates_match_the_shell() {
     let shell_state = temp("gates-shell-state");
     let rust_state = temp("gates-rust-state");
     let shell = |args: &[&str]| {
-        Command::new(repo.join("bin/ramify"))
+        Command::new(reference_bin())
             .args(args)
             .env("RAMIFY_SHELL", "1")
             .env("RAMIFY_STATE_DIR", &shell_state)
@@ -456,7 +465,7 @@ fn label_matches_the_shell() {
     let repo = repo_root();
 
     for args in [vec!["label"], vec!["label", "my-slug"]] {
-        let shell = run_args(&repo.join("bin/ramify"), &args, &fixture, &state, &registry, true);
+        let shell = run_args(&reference_bin(), &args, &fixture, &state, &registry, true);
         let rust = run_args(
             Path::new(env!("CARGO_BIN_EXE_ramify")),
             &args,
@@ -500,7 +509,7 @@ fn lane_matches_the_shell() {
 
     for args in [vec!["lane", "standard"], vec!["lane", "light"], vec!["step"]] {
         let shell = run_args(
-            &repo.join("bin/ramify"),
+            &reference_bin(),
             &args,
             &shell_fixture,
             &shell_state,
@@ -546,7 +555,7 @@ fn ping_matches_the_shell() {
     let repo = repo_root();
 
     let shell = run_args(
-        &repo.join("bin/ramify"),
+        &reference_bin(),
         &["ping"],
         &fixture,
         &state,
@@ -604,7 +613,7 @@ fn down_and_shared_down_match_the_shell() {
         let (rust_fixture, rust_state, rust_registry, _) = make(&format!("{args:?}-rust"));
         let repo = repo_root();
         let shell = run_args(
-            &repo.join("bin/ramify"),
+            &reference_bin(),
             &args,
             &shell_fixture,
             &shell_state,
@@ -698,7 +707,7 @@ fn write_set_matches_the_shell() {
     let repo = repo_root();
     for name in ["pass.txt", "omit.txt", "immutable.txt", "missing.txt"] {
         let path = fixture.join(name);
-        let shell = Command::new(repo.join("bin/ramify"))
+        let shell = Command::new(reference_bin())
             .args(["write-set", &path.to_string_lossy()])
             .current_dir(&fixture)
             .env("BASE_REF", "HEAD")
@@ -727,7 +736,7 @@ fn write_set_matches_the_shell() {
         );
     }
 
-    let shell = Command::new(repo.join("bin/ramify"))
+    let shell = Command::new(reference_bin())
         .args(["write-set", "--self-test"])
         .env("RAMIFY_SHELL", "1")
         .env("RAMIFY_HOME", &repo)
@@ -765,7 +774,7 @@ fn mem_stacks_match_the_shell() {
     fs::write(&registry, format!("{}\n", fixture.display())).unwrap();
     let repo = repo_root();
 
-    let shell = Command::new(repo.join("bin/ramify"))
+    let shell = Command::new(reference_bin())
         .args(["mem"])
         .env("RAMIFY_SHELL", "1")
         .env("RAMIFY_STATE_DIR", &state)
@@ -836,7 +845,7 @@ fn reap_matches_the_shell() {
     let shell_state = make_state("reap-shell-state");
     let rust_state = make_state("reap-rust-state");
 
-    let shell = Command::new(repo.join("bin/ramify"))
+    let shell = Command::new(reference_bin())
         .args(["reap"])
         .env("RAMIFY_SHELL", "1")
         .env("RAMIFY_STATE_DIR", &shell_state)
@@ -919,7 +928,7 @@ fn new_matches_the_shell() {
         command.output().unwrap()
     };
     let shell = run(
-        &repo.join("bin/ramify"),
+        &reference_bin(),
         &shell_fixture,
         &shell_wt,
         &shell_state,
@@ -1017,7 +1026,7 @@ fn cleanup_matches_the_shell() {
         command.output().unwrap()
     };
     let shell = run(
-        &repo.join("bin/ramify"),
+        &reference_bin(),
         &shell_fixture,
         &shell_state,
         &shell_registry,
@@ -1094,7 +1103,7 @@ fn prune_and_delete_match_the_shell() {
         }
         command.output().unwrap()
     };
-    let shell = run(&repo.join("bin/ramify"), &shell_fixture, &shell_state, &shell_registry, true);
+    let shell = run(&reference_bin(), &shell_fixture, &shell_state, &shell_registry, true);
     let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_fixture, &rust_state, &rust_registry, false);
     assert_eq!(shell.status.code(), rust.status.code());
     let normalize = |text: &str, worktrees: &Path| {
@@ -1125,7 +1134,7 @@ fn prune_and_delete_match_the_shell() {
     }
 
     let shell_delete = {
-        let mut command = Command::new(repo.join("bin/ramify"));
+        let mut command = Command::new(reference_bin());
         command
             .args(["delete", "old", "--yes"])
             .env("RAMIFY_ROOT", &shell_fixture)
@@ -1199,7 +1208,7 @@ fn complete_matches_the_shell() {
         }
         command.output().unwrap()
     };
-    let shell = run(&repo.join("bin/ramify"), &shell_fixture, &shell_state, &shell_registry, true);
+    let shell = run(&reference_bin(), &shell_fixture, &shell_state, &shell_registry, true);
     let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_fixture, &rust_state, &rust_registry, false);
     assert_eq!(shell.status.code(), rust.status.code());
     assert_eq!(
@@ -1260,7 +1269,7 @@ fn statusline_matches_the_shell() {
         child.wait_with_output().unwrap()
     };
     for args in [vec!["statusline"], vec!["statusline", "--json"]] {
-        let shell = run(&repo.join("bin/ramify"), &args, true);
+        let shell = run(&reference_bin(), &args, true);
         let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), &args, false);
         assert_eq!(shell.status.code(), rust.status.code(), "{args:?} exit");
         let shell_text = String::from_utf8_lossy(&shell.stdout)
@@ -1268,5 +1277,356 @@ fn statusline_matches_the_shell() {
         let rust_text = String::from_utf8_lossy(&rust.stdout)
             .replace(&fixture.to_string_lossy().into_owned(), "<F>");
         assert_eq!(shell_text, rust_text, "{args:?} stdout differs");
+    }
+}
+
+fn normalize_run(text: &str, directory: &Path) -> String {
+    let regex = regex::Regex::new(r"[0-9]{8}-[0-9]{6}-[0-9]+").unwrap();
+    let text = regex.replace_all(text, "<ID>").into_owned();
+    let canonical = directory.canonicalize().unwrap_or_else(|_| directory.to_path_buf());
+    text.replace(&canonical.to_string_lossy().into_owned(), "<DIR>")
+        .replace(&directory.to_string_lossy().into_owned(), "<DIR>")
+}
+
+#[test]
+fn scratch_matches_the_shell() {
+    let repo = repo_root();
+    let shell_dir = temp("scratch-shell");
+    let rust_dir = temp("scratch-rust");
+    let text = temp("scratch-text").join("note.txt");
+    fs::write(&text, "a message to copy\n").unwrap();
+
+    for args in [
+        vec!["scratch".to_string(), "--title".into(), "Note".into(), text.to_string_lossy().into_owned()],
+        vec!["scratch".into(), "--list".into()],
+        vec!["scratch".into(), "--clear".into()],
+        vec!["scratch".into(), "--list".into()],
+    ] {
+        let shell = Command::new(reference_bin())
+            .args(&args)
+            .env("RAMIFY_SCRATCH_DIR", &shell_dir)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(&args)
+            .env("RAMIFY_SCRATCH_DIR", &rust_dir)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{args:?} exit");
+        assert_eq!(
+            normalize_run(&String::from_utf8_lossy(&shell.stdout), &shell_dir),
+            normalize_run(&String::from_utf8_lossy(&rust.stdout), &rust_dir),
+            "{args:?} stdout differs"
+        );
+    }
+}
+
+#[test]
+fn run_matches_the_shell() {
+    let repo = repo_root();
+    let shell_dir = temp("run-shell");
+    let rust_dir = temp("run-rust");
+    let script = temp("run-script").join("task.sh");
+    fs::write(&script, "echo hello\n").unwrap();
+
+    let ask = |binary: &Path, directory: &Path, shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["run", "ask", &script.to_string_lossy(), "--note", "try it"])
+            .env("RAMIFY_RUNS_DIR", directory)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let id_of = |output: &std::process::Output| {
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let regex = regex::Regex::new(r"[0-9]{8}-[0-9]{6}-[0-9]+").unwrap();
+        regex.find(&text).map(|found| found.as_str().to_string())
+    };
+    let shell = ask(&reference_bin(), &shell_dir, true);
+    let rust = ask(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_dir, false);
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        normalize_run(&String::from_utf8_lossy(&shell.stdout), &shell_dir),
+        normalize_run(&String::from_utf8_lossy(&rust.stdout), &rust_dir)
+    );
+    let shell_id = id_of(&shell).expect("shell id");
+    let rust_id = id_of(&rust).expect("rust id");
+
+    let sub = |binary: &Path,
+               directory: &Path,
+               id: &str,
+               args: &[&str],
+               shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(args)
+            .arg(id)
+            .env("RAMIFY_RUNS_DIR", directory)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    for args in [vec!["run", "go"], vec!["run", "wait"]] {
+        let shell_out = sub(
+            &reference_bin(),
+            &shell_dir,
+            &shell_id,
+            &args,
+            true,
+        );
+        let rust_out = sub(
+            Path::new(env!("CARGO_BIN_EXE_ramify")),
+            &rust_dir,
+            &rust_id,
+            &args,
+            false,
+        );
+        assert_eq!(shell_out.status.code(), rust_out.status.code(), "{args:?} exit");
+        assert_eq!(
+            normalize_run(&String::from_utf8_lossy(&shell_out.stdout), &shell_dir),
+            normalize_run(&String::from_utf8_lossy(&rust_out.stdout), &rust_dir),
+            "{args:?} stdout differs"
+        );
+    }
+
+    let shell = ask(&reference_bin(), &shell_dir, true);
+    let rust = ask(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_dir, false);
+    let shell_id = id_of(&shell).expect("shell id");
+    let rust_id = id_of(&rust).expect("rust id");
+    let shell_out = sub(
+        &reference_bin(),
+        &shell_dir,
+        &shell_id,
+        &["run", "block", "--note", "not now"],
+        true,
+    );
+    let rust_out = sub(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &rust_dir,
+        &rust_id,
+        &["run", "block", "--note", "not now"],
+        false,
+    );
+    assert_eq!(shell_out.status.code(), rust_out.status.code());
+    assert_eq!(
+        normalize_run(&String::from_utf8_lossy(&shell_out.stdout), &shell_dir),
+        normalize_run(&String::from_utf8_lossy(&rust_out.stdout), &rust_dir),
+        "block stdout differs"
+    );
+}
+
+#[test]
+fn dash_human_matches_the_shell() {
+    let fixture = temp("dash-human");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=47600\nweb_health=/\nweb_cmd='true'\nweb_shared_port=47610\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("dash-human-state");
+    let registry = temp("dash-human-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, format!("{}\n", fixture.display())).unwrap();
+    let repo = repo_root();
+    let run = |binary: &Path, shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["dash"])
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let shell = run(&reference_bin(), true);
+    let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), false);
+    assert_eq!(shell.status.code(), rust.status.code());
+    let mask = |text: &str| {
+        text.lines()
+            .filter(|line| !line.starts_with("build servers"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        mask(&String::from_utf8_lossy(&shell.stdout)),
+        mask(&String::from_utf8_lossy(&rust.stdout)),
+        "stdout differs"
+    );
+}
+
+#[test]
+fn jira_errors_match_the_shell() {
+    let fixture = temp("jira");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let repo = repo_root();
+    for url in [None, Some("https://example.atlassian.net")] {
+        let mut shell = Command::new(reference_bin());
+        shell
+            .args(["jira", "check"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .env_remove("RAMIFY_JIRA_URL")
+            .env_remove("RAMIFY_JIRA_EMAIL")
+            .env_remove("RAMIFY_JIRA_TOKEN");
+        let mut rust = Command::new(env!("CARGO_BIN_EXE_ramify"));
+        rust.args(["jira", "check"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .env_remove("RAMIFY_JIRA_URL")
+            .env_remove("RAMIFY_JIRA_EMAIL")
+            .env_remove("RAMIFY_JIRA_TOKEN");
+        if let Some(url) = url {
+            shell.env("RAMIFY_JIRA_URL", url);
+            rust.env("RAMIFY_JIRA_URL", url);
+        }
+        let shell = shell.output().unwrap();
+        let rust = rust.output().unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{url:?} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{url:?} stderr"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{url:?} stdout"
+        );
+    }
+}
+
+#[test]
+fn ticket_without_jira_exits_three() {
+    let fixture = temp("ticket");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let repo = repo_root();
+    for action in ["start", "sync"] {
+        let shell = Command::new(reference_bin())
+            .args(["ticket", action])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .env_remove("RAMIFY_JIRA_URL")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(["ticket", action])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .env_remove("RAMIFY_JIRA_URL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{action} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{action} stdout"
+        );
+    }
+}
+
+#[test]
+fn setup_draft_matches_the_shell() {
+    let repo = repo_root();
+    let registry = temp("setup-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, "").unwrap();
+
+    let make_plain = |name: &str| {
+        let base = temp(name);
+        let fixture = base.join("plain-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(fixture.join(".gitignore"), ".env\n").unwrap();
+        fs::write(fixture.join(".env"), "SECRET=1\n").unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        fixture.canonicalize().unwrap()
+    };
+    let make_vite = |name: &str| {
+        let base = temp(name);
+        let fixture = base.join("vite-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(
+            fixture.join("package.json"),
+            "{\"scripts\":{\"dev\":\"vite\"},\"devDependencies\":{\"vite\":\"5.0.0\"}}\n",
+        )
+        .unwrap();
+        fs::write(fixture.join("package-lock.json"), "").unwrap();
+        fs::write(fixture.join(".gitignore"), ".env\n").unwrap();
+        fs::write(fixture.join(".env"), "SECRET=1\n").unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        git(&["branch", "feat/foo"], &fixture);
+        fixture.canonicalize().unwrap()
+    };
+
+    for fixture in [make_plain("setup-plain"), make_vite("setup-vite")] {
+        let shell = Command::new(reference_bin())
+            .args(["setup", "--print"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(["setup", "--print"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{} exit", fixture.display());
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{} stdout differs",
+            fixture.display()
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{} stderr differs",
+            fixture.display()
+        );
     }
 }
