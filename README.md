@@ -28,6 +28,15 @@ Run it from a configured checkout:
 cargo run
 ```
 
+Or launch it like `claude` or `codex`, from any directory:
+
+```bash
+ln -s ~/dev/rocko/ramify/bin/ram ~/.local/bin/ram   # once
+ram
+```
+
+`bin/ram` builds the release binary on first use and execs it.
+
 Press any key to leave the splash. The interface is a chat:
 
 - `Enter` sends the message, `Tab` opens the worktree picker, `i` inspects the selected
@@ -60,6 +69,7 @@ The tests are `cargo test`; they cover the acceptance criteria in
 
 ```bash
 ln -s ~/dev/Perso/ramify/bin/ramify ~/.local/bin/ramify     # the CLI, for you and the agent
+ln -s ~/dev/Perso/ramify/bin/ram ~/.local/bin/ram           # Ram Code, the terminal harness
 ```
 
 In Claude Code:
