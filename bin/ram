@@ -7,9 +7,11 @@ while [ -L "$src" ]; do
   case "$src" in /*) ;; *) src="$d/$src" ;; esac
 done
 RAM_CODE_HOME="$(cd "$(dirname "$src")/.." && pwd)"
-bin="$RAM_CODE_HOME/target/release/ram-code"
-if [ ! -x "$bin" ] && [ -x "$RAM_CODE_HOME/target/debug/ram-code" ]; then
-  bin="$RAM_CODE_HOME/target/debug/ram-code"
+release="$RAM_CODE_HOME/target/release/ram-code"
+debug="$RAM_CODE_HOME/target/debug/ram-code"
+bin="$release"
+if [ -x "$debug" ] && { [ ! -x "$release" ] || [ "$debug" -nt "$release" ]; }; then
+  bin="$debug"
 fi
 if [ ! -x "$bin" ]; then
   command -v cargo >/dev/null 2>&1 \
