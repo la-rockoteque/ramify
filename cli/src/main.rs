@@ -38,6 +38,15 @@ fn main() {
     if command == "reap" {
         std::process::exit(mem::reap());
     }
+    if command == "dash" && !json {
+        std::process::exit(commands::dash_human());
+    }
+    if command == "watch" {
+        std::process::exit(commands::watch(&args[1..]));
+    }
+    if command == "menu" {
+        std::process::exit(commands::menu());
+    }
     if command == "scratch" {
         std::process::exit(run::scratch(&args[1..]));
     }

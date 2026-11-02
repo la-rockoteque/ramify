@@ -1422,3 +1422,50 @@ fn run_matches_the_shell() {
         "block stdout differs"
     );
 }
+
+#[test]
+fn dash_human_matches_the_shell() {
+    let fixture = temp("dash-human");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(
+        fixture.join(".ramify.conf"),
+        "RAMIFY_SERVICES=\"web\"\nweb_port=47600\nweb_health=/\nweb_cmd='true'\nweb_shared_port=47610\n",
+    )
+    .unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let state = temp("dash-human-state");
+    let registry = temp("dash-human-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, format!("{}\n", fixture.display())).unwrap();
+    let repo = repo_root();
+    let run = |binary: &Path, shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["dash"])
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let shell = run(&repo.join("bin/ramify"), true);
+    let rust = run(Path::new(env!("CARGO_BIN_EXE_ramify")), false);
+    assert_eq!(shell.status.code(), rust.status.code());
+    let mask = |text: &str| {
+        text.lines()
+            .filter(|line| !line.starts_with("build servers"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        mask(&String::from_utf8_lossy(&shell.stdout)),
+        mask(&String::from_utf8_lossy(&rust.stdout)),
+        "stdout differs"
+    );
+}

@@ -17,3 +17,4 @@ sha2 = "0.10"
 md-5 = "0.10"
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
+crossterm = "0.29"
