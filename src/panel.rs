@@ -17,11 +17,22 @@ pub enum Pane {
     Approvals,
     Scratch,
     Run,
+    Sessions,
+    Agents,
+    Artifacts,
 }
 
 impl Pane {
-    fn all() -> [Pane; 4] {
-        [Pane::Dashboard, Pane::Approvals, Pane::Scratch, Pane::Run]
+    fn all() -> [Pane; 7] {
+        [
+            Pane::Dashboard,
+            Pane::Approvals,
+            Pane::Scratch,
+            Pane::Run,
+            Pane::Sessions,
+            Pane::Agents,
+            Pane::Artifacts,
+        ]
     }
 
     fn title(self) -> &'static str {
@@ -30,6 +41,9 @@ impl Pane {
             Pane::Approvals => "approvals",
             Pane::Scratch => "scratch",
             Pane::Run => "run",
+            Pane::Sessions => "sessions",
+            Pane::Agents => "agents",
+            Pane::Artifacts => "artifacts",
         }
     }
 
@@ -39,6 +53,9 @@ impl Pane {
             "approvals" => Some(Pane::Approvals),
             "scratch" => Some(Pane::Scratch),
             "run" => Some(Pane::Run),
+            "sessions" => Some(Pane::Sessions),
+            "agents" => Some(Pane::Agents),
+            "artifacts" => Some(Pane::Artifacts),
             _ => None,
         }
     }
@@ -77,6 +94,26 @@ enum PromptKind {
     Block(usize),
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionEntry {
+    pub id: String,
+    pub name: String,
+    pub root: Option<PathBuf>,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    pub service: String,
+    pub pid: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactEntry {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 pub struct Panel {
     pub open: bool,
     pub pane: Pane,
@@ -85,6 +122,11 @@ pub struct Panel {
     gates: Vec<Gate>,
     scratch: Vec<ScratchItem>,
     runs: Vec<RunEntry>,
+    sessions: Vec<SessionEntry>,
+    agents: Vec<AgentEntry>,
+    artifacts: Vec<ArtifactEntry>,
+    worktree: Option<PathBuf>,
+    pending_open: Option<PathBuf>,
     prompt: Option<(PromptKind, String)>,
     pub message: String,
     last_refresh: Option<Instant>,
@@ -106,6 +148,11 @@ impl Panel {
             gates: Vec::new(),
             scratch: Vec::new(),
             runs: Vec::new(),
+            sessions: Vec::new(),
+            agents: Vec::new(),
+            artifacts: Vec::new(),
+            worktree: None,
+            pending_open: None,
             prompt: None,
             message: String::new(),
             last_refresh: None,
@@ -144,6 +191,17 @@ impl Panel {
         }
     }
 
+    pub fn set_worktree(&mut self, worktree: Option<PathBuf>) {
+        if self.worktree != worktree {
+            self.worktree = worktree;
+            self.last_refresh = None;
+        }
+    }
+
+    pub fn take_open(&mut self) -> Option<PathBuf> {
+        self.pending_open.take()
+    }
+
     pub fn refresh(&mut self, runner: &dyn Runner, root: &Path) {
         self.last_refresh = Some(Instant::now());
         match self.pane {
@@ -151,6 +209,21 @@ impl Panel {
             Pane::Approvals => self.gates = gates(self.json(runner, root, &["gates", "--json"])),
             Pane::Scratch => self.scratch = scratch_items(&scratch_dir()),
             Pane::Run => self.runs = runs(self.json(runner, root, &["runs", "--json"])),
+            Pane::Sessions => self.sessions = sessions(),
+            Pane::Agents => {
+                self.agents = self
+                    .worktree
+                    .as_deref()
+                    .map(agent_entries)
+                    .unwrap_or_default()
+            }
+            Pane::Artifacts => {
+                self.artifacts = self
+                    .worktree
+                    .as_deref()
+                    .map(artifact_entries)
+                    .unwrap_or_default()
+            }
         }
         self.clamp();
     }
@@ -175,6 +248,9 @@ impl Panel {
             Pane::Approvals => self.gates.len(),
             Pane::Scratch => self.scratch.len(),
             Pane::Run => self.runs.len(),
+            Pane::Sessions => self.sessions.len(),
+            Pane::Agents => self.agents.len(),
+            Pane::Artifacts => self.artifacts.len(),
         }
     }
 
@@ -243,6 +319,18 @@ impl Panel {
                 self.switch(Pane::Run, runner, root);
                 true
             }
+            KeyCode::Char('5') => {
+                self.switch(Pane::Sessions, runner, root);
+                true
+            }
+            KeyCode::Char('6') => {
+                self.switch(Pane::Agents, runner, root);
+                true
+            }
+            KeyCode::Char('7') => {
+                self.switch(Pane::Artifacts, runner, root);
+                true
+            }
             KeyCode::Char(']') => {
                 let all = Pane::all();
                 let index = all.iter().position(|pane| *pane == self.pane).unwrap_or(0);
@@ -285,6 +373,12 @@ impl Panel {
             }
             KeyCode::Char('b') if self.pane == Pane::Run => {
                 self.prompt = Some((PromptKind::Block(self.selected), String::new()));
+                true
+            }
+            KeyCode::Enter if self.pane == Pane::Sessions => {
+                if let Some(session) = self.sessions.get(self.selected) {
+                    self.pending_open = session.root.clone();
+                }
                 true
             }
             _ => false,
@@ -408,10 +502,22 @@ impl Panel {
         self.refresh(runner, root);
     }
 
+    pub fn border_color(&self) -> Option<Color> {
+        if self.pane != Pane::Sessions {
+            return None;
+        }
+        self.sessions
+            .get(self.selected)
+            .map(|session| session_color(&session.name))
+    }
+
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        let block = Block::bordered()
+        let mut block = Block::bordered()
             .title(self.title())
-            .title_bottom(Line::from(" ^P close · 1-4 panes · j/k · esc "));
+            .title_bottom(Line::from(" ^P close · 1-7 panes · j/k · esc "));
+        if let Some(color) = self.border_color() {
+            block = block.border_style(Style::default().fg(color));
+        }
         let inner = block.inner(area);
         block.render(area, buf);
         let lines = self.lines();
@@ -501,6 +607,66 @@ impl Panel {
                     }
                 }
             }
+            Pane::Sessions => {
+                if self.sessions.is_empty() {
+                    lines.push(Line::from("no session — start one in Claude Code or Codex"));
+                }
+                for (index, session) in self.sessions.iter().enumerate() {
+                    let selected = index == self.selected;
+                    let color = session_color(&session.name);
+                    let style = if selected {
+                        Style::default()
+                            .fg(color)
+                            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(color)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "{} {} {} {}",
+                            if selected { ">" } else { " " },
+                            session.name,
+                            session.branch,
+                            session
+                                .root
+                                .as_ref()
+                                .map(|root| root.display().to_string())
+                                .unwrap_or_default()
+                        ),
+                        style,
+                    )));
+                    if selected {
+                        lines.push(Line::from(format!("    id {}", session.id)));
+                    }
+                }
+            }
+            Pane::Agents => {
+                if self.agents.is_empty() {
+                    lines.push(Line::from("no agent work here — 'ramify up' starts a stack"));
+                }
+                for (index, agent) in self.agents.iter().enumerate() {
+                    let selected = index == self.selected;
+                    lines.push(self.row(selected, &format!("{}  pid {}", agent.service, agent.pid)));
+                }
+            }
+            Pane::Artifacts => {
+                if self.artifacts.is_empty() {
+                    lines.push(Line::from(
+                        "no work order — 'ramify new <slug> --workflow <name>' writes one",
+                    ));
+                }
+                for (index, artifact) in self.artifacts.iter().enumerate() {
+                    let selected = index == self.selected;
+                    lines.push(self.row(selected, &artifact.name));
+                    if selected {
+                        if let Ok(text) = std::fs::read_to_string(&artifact.path) {
+                            for line in text.lines().take(20) {
+                                lines.push(Line::from(format!("    {line}")));
+                            }
+                        }
+                    }
+                }
+            }
             Pane::Run => {
                 if self.runs.is_empty() {
                     lines.push(Line::from("no run yet — 'ramify run ask <script>' starts one"));
@@ -549,6 +715,149 @@ impl Panel {
         };
         Line::from(Span::styled(format!("{} {text}", if selected { ">" } else { " " }), style))
     }
+}
+
+pub fn session_color(name: &str) -> Color {
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let index = u32::from_str_radix(&hash[..8], 16).unwrap_or(0) % 8;
+    const COLORS: [Color; 8] = [
+        Color::Red,
+        Color::Blue,
+        Color::Green,
+        Color::Yellow,
+        Color::Magenta,
+        Color::Rgb(255, 165, 0),
+        Color::Rgb(255, 105, 180),
+        Color::Cyan,
+    ];
+    COLORS[index as usize]
+}
+
+fn git_branch(path: &Path) -> Option<String> {
+    Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|branch| !branch.is_empty())
+}
+
+fn state_root() -> PathBuf {
+    PathBuf::from(std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into()))
+}
+
+fn sessions() -> Vec<SessionEntry> {
+    let directory = state_root().join("sessions");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<SessionEntry> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().map(|ext| ext == "root").unwrap_or(false))
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_stem()?.to_string_lossy().into_owned();
+            let root = std::fs::read_to_string(&path)
+                .ok()
+                .map(|text| PathBuf::from(text.trim()))
+                .filter(|path| path.is_dir());
+            let name = std::fs::read_to_string(directory.join(format!("{id}.name")))
+                .ok()
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .unwrap_or_default();
+            let branch = root
+                .as_deref()
+                .and_then(git_branch)
+                .unwrap_or_default();
+            Some(SessionEntry {
+                id,
+                name,
+                root,
+                branch,
+            })
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.id.cmp(&a.id));
+    sessions
+}
+
+fn agent_entries(worktree: &Path) -> Vec<AgentEntry> {
+    let Some(name) = worktree.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    let root = state_root();
+    let Ok(directories) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut agents = Vec::new();
+    for directory in directories.flatten() {
+        if !directory.path().is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(directory.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let Some(rest) = file.strip_prefix(&format!("{name}.")) else {
+                continue;
+            };
+            let Some(service) = rest.strip_suffix(".pid") else {
+                continue;
+            };
+            if service.contains('.') {
+                continue;
+            }
+            let pid = std::fs::read_to_string(entry.path())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            agents.push(AgentEntry {
+                service: service.to_string(),
+                pid,
+            });
+        }
+    }
+    agents.sort_by(|a, b| a.service.cmp(&b.service));
+    agents
+}
+
+fn artifact_entries(worktree: &Path) -> Vec<ArtifactEntry> {
+    let branch = git_branch(worktree).unwrap_or_default();
+    let directory = worktree.join(".ramify/work");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut order_folder = None;
+    for entry in entries.flatten() {
+        let path = entry.path().join("order.md");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let recorded = text.lines().find_map(|line| line.strip_prefix("branch:")).map(str::trim);
+        if recorded == Some(branch.as_str()) {
+            order_folder = Some(entry.path());
+            break;
+        }
+    }
+    let Some(folder) = order_folder else {
+        return Vec::new();
+    };
+    ["spec.md", "qa-plan.md", "audit.md", "qa-results.md", "review.md"]
+        .iter()
+        .filter_map(|name| {
+            let path = folder.join(name);
+            path.is_file().then(|| ArtifactEntry {
+                name: name.to_string(),
+                path,
+            })
+        })
+        .collect()
 }
 
 fn gates(values: Vec<Value>) -> Vec<Gate> {
