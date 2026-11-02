@@ -824,14 +824,11 @@ fn detect_packages(root: &Path) -> Vec<String> {
         let manager = manager_for(&root_dir);
         let (cmd, ready): (String, String) = match manager.as_str() {
             "bun" => {
-                let first = members
-                    .get(&root_dir)
-                    .map(|list| {
-                        let mut keys: Vec<String> = list.iter().flat_map(|deps| deps.keys().cloned()).collect();
-                        keys.sort();
-                        keys.first().cloned()
-                    })
-                    .flatten();
+                let first = members.get(&root_dir).and_then(|list| {
+                    let mut keys: Vec<String> = list.iter().flat_map(|deps| deps.keys().cloned()).collect();
+                    keys.sort();
+                    keys.first().cloned()
+                });
                 let ready = if let Some(binary) = bins.get(&root_dir) {
                     format!("node_modules/.bin/{binary}")
                 } else {
