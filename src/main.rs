@@ -13,6 +13,22 @@ use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().skip(1).any(|arg| arg == "-h" || arg == "--help") {
+        println!(
+            "Ram Code — a terminal coding harness for Ramify worktrees\n\n\
+             usage: ram [--panel <pane>] [--task <text>]\n\n  \
+             no flags     open the chat\n  \
+             --panel P    open the side panel on dashboard, approvals, scratch, run,\n               \
+             sessions, agents or artifacts\n  \
+             --task T     run one task without the interface\n\n\
+             keys: enter send · tab worktrees · ctrl+p panel · ctrl+c quit"
+        );
+        return Ok(());
+    }
+    if args.iter().skip(1).any(|arg| arg == "-V" || arg == "--version") {
+        println!("ram-code {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let root = std::env::var_os("RAMIFY_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
