@@ -1469,3 +1469,85 @@ fn dash_human_matches_the_shell() {
         "stdout differs"
     );
 }
+
+#[test]
+fn jira_errors_match_the_shell() {
+    let fixture = temp("jira");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let repo = repo_root();
+    for url in [None, Some("https://example.atlassian.net")] {
+        let mut shell = Command::new(repo.join("bin/ramify"));
+        shell
+            .args(["jira", "check"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .env_remove("RAMIFY_JIRA_URL")
+            .env_remove("RAMIFY_JIRA_EMAIL")
+            .env_remove("RAMIFY_JIRA_TOKEN");
+        let mut rust = Command::new(env!("CARGO_BIN_EXE_ramify"));
+        rust.args(["jira", "check"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .env_remove("RAMIFY_JIRA_URL")
+            .env_remove("RAMIFY_JIRA_EMAIL")
+            .env_remove("RAMIFY_JIRA_TOKEN");
+        if let Some(url) = url {
+            shell.env("RAMIFY_JIRA_URL", url);
+            rust.env("RAMIFY_JIRA_URL", url);
+        }
+        let shell = shell.output().unwrap();
+        let rust = rust.output().unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{url:?} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{url:?} stderr"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{url:?} stdout"
+        );
+    }
+}
+
+#[test]
+fn ticket_without_jira_exits_three() {
+    let fixture = temp("ticket");
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    let fixture = fixture.canonicalize().unwrap();
+    let repo = repo_root();
+    for action in ["start", "sync"] {
+        let shell = Command::new(repo.join("bin/ramify"))
+            .args(["ticket", action])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .env_remove("RAMIFY_JIRA_URL")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(["ticket", action])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .env_remove("RAMIFY_JIRA_URL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{action} exit");
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{action} stdout"
+        );
+    }
+}

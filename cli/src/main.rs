@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod mem;
+mod jira;
 mod launch;
 mod pyjson;
 mod run;
@@ -46,6 +47,12 @@ fn main() {
     }
     if command == "menu" {
         std::process::exit(commands::menu());
+    }
+    if command == "ticket" {
+        std::process::exit(jira::ticket_command(&args[1..]));
+    }
+    if command == "jira" {
+        std::process::exit(jira::jira_command(&args[1..]));
     }
     if command == "scratch" {
         std::process::exit(run::scratch(&args[1..]));

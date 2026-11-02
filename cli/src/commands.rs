@@ -541,7 +541,7 @@ fn color_on() -> bool {
 }
 
 /// POSIX `cksum`: CRC-32 (polynomial 0x04C11DB7) over the bytes, then over the length.
-fn cksum(bytes: &[u8]) -> u32 {
+pub(crate) fn cksum(bytes: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (index, entry) in table.iter_mut().enumerate() {
         let mut value = (index as u32) << 24;
@@ -2206,6 +2206,32 @@ pub fn new(args: &[String]) -> i32 {
         config.remote, config.main
     );
     println!("ramify: worktree {}", destination.display());
+    if !config.jira_url.is_empty() && config.value("RAMIFY_JIRA_SYNC").as_deref() != Some("0") {
+        if let Some(key) = crate::dash::ticket_of(&branch, &config) {
+            let _ = key;
+            let log = config
+                .state_dir
+                .join("tickets")
+                .join(format!("{slug}.startup.log"));
+            let _ = std::fs::create_dir_all(log.parent().unwrap_or(Path::new("/tmp")));
+            if let Ok(output) = std::fs::File::create(&log) {
+                let errors = output.try_clone().ok();
+                let self_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ramify"));
+                let mut command = Command::new(self_binary);
+                command
+                    .args(["ticket", "start"])
+                    .env("RAMIFY_ROOT", &destination)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(output);
+                if let Some(errors) = errors {
+                    command.stderr(errors);
+                }
+                if command.spawn().is_ok() {
+                    println!("  Jira sync       running — {}", log.display());
+                }
+            }
+        }
+    }
     print!("{}", label_output(&config, &slug));
     0
 }
@@ -2347,10 +2373,56 @@ pub fn cleanup() -> i32 {
         );
     }
 
+    if !config.jira_url.is_empty() {
+        let branches = crate::config::git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"], &config.primary)
+            .unwrap_or_default();
+        for branch in branches.lines().filter(|branch| !branch.is_empty()) {
+            if branch == config.main {
+                continue;
+            }
+            let Some(key) = crate::dash::ticket_of(branch, &config) else {
+                continue;
+            };
+            if crate::mem::merged_reason(&config, branch).is_none() {
+                continue;
+            }
+            let note = ticket_note(&config, &key);
+            if note.starts_with("closes") {
+                match close_ticket(&config, &key) {
+                    Ok(message) => println!("  ticket         {message}"),
+                    Err(error) => println!("  ticket         {error}"),
+                }
+                found = true;
+            } else if note.contains("already") || note.contains("not found") {
+            } else {
+                println!("  ticket         {key}: {note}");
+                found = true;
+            }
+        }
+    }
+
     if !found {
         println!("nothing to clean — every claimed slot has a live stack behind it");
     }
     0
+}
+
+fn ticket_note(config: &Config, key: &str) -> String {
+    match crate::jira::ticket_status(&config.jira_url, key) {
+        Ok(Some((category, name))) => {
+            if category == "done" {
+                format!("{key} already {name}")
+            } else {
+                format!("closes {key} ({name})")
+            }
+        }
+        Ok(None) => format!("{key} not found in Jira, nothing to close"),
+        Err(error) => error,
+    }
+}
+
+fn close_ticket(config: &Config, key: &str) -> Result<String, String> {
+    crate::jira::ticket_close(&config.jira_url, key)
 }
 
 fn state_worktree(name: &str) -> Option<String> {
@@ -2491,7 +2563,11 @@ fn prune_project(config: &Config, apply: bool) {
             .unwrap_or_default();
         println!("  prune  {:<45} {reason}{worktree}", branch);
         count += 1;
+        let key = crate::dash::ticket_of(branch, config);
         if !apply {
+            if let Some(key) = &key {
+                println!("         {}", ticket_note(config, key));
+            }
             continue;
         }
         if let Some(path) = &path {
@@ -2510,6 +2586,12 @@ fn prune_project(config: &Config, apply: bool) {
         let _ = Command::new("git")
             .args(["-C", &config.primary.to_string_lossy(), "branch", "-D", "-q", branch])
             .status();
+        if let Some(key) = &key {
+            match close_ticket(config, key) {
+                Ok(message) => println!("         {message}"),
+                Err(error) => println!("         {error}"),
+            }
+        }
     }
 
     // Detached worktrees whose HEAD is already in main.
@@ -2770,13 +2852,18 @@ pub fn complete(args: &[String]) -> i32 {
         return 1;
     }
     let key = crate::dash::ticket_of(&branch, &config);
-    if let Some(key) = &key {
-        eprintln!("ramify: closing {key} needs the Jira port, not yet done");
-        return 1;
-    }
+    let note = key
+        .as_ref()
+        .map(|key| ticket_note(&config, key))
+        .unwrap_or_default();
     println!(
-        "complete {worktree} ({})",
-        if branch.is_empty() { "detached" } else { &branch }
+        "complete {worktree} ({}){}",
+        if branch.is_empty() { "detached" } else { &branch },
+        if note.is_empty() {
+            String::new()
+        } else {
+            format!(" — {note}")
+        }
     );
     if !args.iter().any(|arg| arg == "--yes") {
         if !std::io::stdin().is_terminal() {
@@ -2787,6 +2874,13 @@ pub fn complete(args: &[String]) -> i32 {
         let mut answer = String::new();
         if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != "yes" {
             return 0;
+        }
+    }
+    if let Some(key) = &key {
+        if let Err(error) = close_ticket(&config, key) {
+            eprintln!("ticket not closed, {worktree} kept — run it again once Jira answers");
+            let _ = error;
+            return 1;
         }
     }
     let removed = Command::new("git")
