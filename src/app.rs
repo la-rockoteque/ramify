@@ -1,4 +1,5 @@
 use crate::agent::AgentConfig;
+use crate::panel::Panel;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use crate::state::{parse_project, project_for_root, Project, Worktree};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -99,6 +100,7 @@ pub struct App {
     pub scroll_up: usize,
     pub history: Vec<Value>,
     pub quit: bool,
+    pub panel: Panel,
     pub ramify_bin: Option<PathBuf>,
     pub worker_binary: Option<PathBuf>,
     worker: Option<Worker>,
@@ -124,6 +126,7 @@ impl App {
             scroll_up: 0,
             history: Vec::new(),
             quit: false,
+            panel: Panel::new(),
             ramify_bin: None,
             worker_binary: None,
             worker: None,
@@ -606,6 +609,19 @@ impl App {
             self.quit = true;
             return;
         }
+        if self.screen == Screen::Main
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('p'))
+        {
+            self.panel.toggle();
+            return;
+        }
+        if self.screen == Screen::Main
+            && self.panel.open
+            && self.panel.on_key(key, &*self.runner, &self.root)
+        {
+            return;
+        }
         match self.screen {
             Screen::Main => self.key_chat(key),
             Screen::Picker => self.key_picker(key),
@@ -753,9 +769,22 @@ impl App {
         }
     }
 
+    pub fn tick(&mut self) {
+        self.panel.tick(&*self.runner, &self.root);
+    }
+
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         match self.screen {
             Screen::Splash => self.render_splash(area, buf),
+            Screen::Main if self.panel.open => {
+                let chunks = Layout::horizontal([
+                    Constraint::Min(1),
+                    Constraint::Length(40),
+                ])
+                .split(area);
+                self.render_chat(chunks[0], buf);
+                self.panel.render(chunks[1], buf);
+            }
             Screen::Main => self.render_chat(area, buf),
             Screen::Picker => self.render_picker(area, buf),
             _ => self.render_panel(area, buf),

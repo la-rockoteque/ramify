@@ -1,6 +1,7 @@
 use crossterm::event::{self, Event, KeyEventKind};
 use ram_code::agent::{run_task, run_turn, AgentConfig, AgentEvent, AnthropicLlm};
 use ram_code::app::{App, Screen};
+use ram_code::panel::Pane;
 use ram_code::ramify::RealRunner;
 use ratatui::DefaultTerminal;
 use serde_json::{json, Value};
@@ -31,6 +32,17 @@ fn main() -> std::io::Result<()> {
 
     let runner = Arc::new(RealRunner::default());
     let mut app = App::new(runner, root);
+    if let Some(position) = args.iter().position(|arg| arg == "--panel") {
+        let name = args.get(position + 1).map(String::as_str).unwrap_or("dashboard");
+        let pane = Pane::from_name(name).unwrap_or(Pane::Dashboard);
+        app.panel.open_on(pane);
+    } else if let Some(name) = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--panel="))
+    {
+        let pane = Pane::from_name(name).unwrap_or(Pane::Dashboard);
+        app.panel.open_on(pane);
+    }
 
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app);
@@ -128,6 +140,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
     loop {
         terminal.draw(|frame| frame.render_widget(&*app, frame.area()))?;
         app.poll_events();
+        app.tick();
         if app.quit {
             break;
         }
