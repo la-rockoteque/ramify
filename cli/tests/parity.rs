@@ -1551,3 +1551,73 @@ fn ticket_without_jira_exits_three() {
         );
     }
 }
+
+#[test]
+fn setup_draft_matches_the_shell() {
+    let repo = repo_root();
+    let registry = temp("setup-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, "").unwrap();
+
+    let make_plain = |name: &str| {
+        let base = temp(name);
+        let fixture = base.join("plain-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(fixture.join(".gitignore"), ".env\n").unwrap();
+        fs::write(fixture.join(".env"), "SECRET=1\n").unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        fixture.canonicalize().unwrap()
+    };
+    let make_vite = |name: &str| {
+        let base = temp(name);
+        let fixture = base.join("vite-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(
+            fixture.join("package.json"),
+            "{\"scripts\":{\"dev\":\"vite\"},\"devDependencies\":{\"vite\":\"5.0.0\"}}\n",
+        )
+        .unwrap();
+        fs::write(fixture.join("package-lock.json"), "").unwrap();
+        fs::write(fixture.join(".gitignore"), ".env\n").unwrap();
+        fs::write(fixture.join(".env"), "SECRET=1\n").unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        git(&["branch", "feat/foo"], &fixture);
+        fixture.canonicalize().unwrap()
+    };
+
+    for fixture in [make_plain("setup-plain"), make_vite("setup-vite")] {
+        let shell = Command::new(repo.join("bin/ramify"))
+            .args(["setup", "--print"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(["setup", "--print"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{} exit", fixture.display());
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{} stdout differs",
+            fixture.display()
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stderr),
+            String::from_utf8_lossy(&rust.stderr),
+            "{} stderr differs",
+            fixture.display()
+        );
+    }
+}

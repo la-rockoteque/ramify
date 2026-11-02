@@ -5,6 +5,7 @@ mod jira;
 mod launch;
 mod pyjson;
 mod run;
+mod setup;
 mod statusline;
 mod dash;
 mod workflow;
@@ -47,6 +48,9 @@ fn main() {
     }
     if command == "menu" {
         std::process::exit(commands::menu());
+    }
+    if command == "setup" {
+        std::process::exit(setup::setup(&args[1..]));
     }
     if command == "ticket" {
         std::process::exit(jira::ticket_command(&args[1..]));
