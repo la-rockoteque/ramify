@@ -616,11 +616,15 @@ impl App {
             self.panel.toggle();
             return;
         }
-        if self.screen == Screen::Main
-            && self.panel.open
-            && self.panel.on_key(key, &*self.runner, &self.root)
-        {
-            return;
+        if self.screen == Screen::Main && self.panel.open {
+            self.panel
+                .set_worktree(self.selected_worktree().map(|worktree| worktree.path.clone()));
+            if self.panel.on_key(key, &*self.runner, &self.root) {
+                if let Some(root) = self.panel.take_open() {
+                    self.open_root(root);
+                }
+                return;
+            }
         }
         match self.screen {
             Screen::Main => self.key_chat(key),
@@ -770,7 +774,18 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        self.panel
+            .set_worktree(self.selected_worktree().map(|worktree| worktree.path.clone()));
         self.panel.tick(&*self.runner, &self.root);
+    }
+
+    pub fn open_root(&mut self, root: PathBuf) {
+        self.root = root;
+        self.history.clear();
+        self.entries.clear();
+        self.project = None;
+        self.selected = 0;
+        self.load();
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
