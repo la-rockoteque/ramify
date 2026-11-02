@@ -39,6 +39,11 @@ The first message starts a task in the selected worktree. The transcript stays, 
 messages carry the earlier turns to the model. Each task runs in a worker process, so the
 interface keeps drawing while the model works.
 
+`Ctrl+P` opens a 40-column side panel beside the chat. It has seven panes: dashboard,
+approvals, scratch, run, sessions, agents and artifacts. `1`–`7` or `[`/`]` switch panes.
+`ram-code --panel approvals` starts with that pane open. The panel is for people in a terminal;
+the Electron windows below stay for Claude Code and Codex sessions.
+
 Ram Code reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. It stores no key. The model is
 `RAM_CODE_MODEL`, else `ANTHROPIC_DEFAULT_SONNET_MODEL`, else `deepseek-v4.1-flash`.
 
@@ -70,6 +75,11 @@ A teammate installs from the remote instead:
 /plugin marketplace add https://github.com/la-rockoteque/ramify.git
 /plugin install ramify@ramify
 ```
+
+`bin/ramify` is a launcher. It runs `cli/target/release/ramify`, builds it with cargo once when
+it is missing, and uses a debug build when that is all that exists. The command implementations
+live in `cli/`. The shell implementation is kept only in `cli/tests/reference/`, where the
+parity tests compare against it; the CLI does not use it.
 
 The plugin is installed once per machine. Each repo needs only its config, see [Usage](#usage).
 
@@ -599,6 +609,10 @@ starts that file afresh, and `down` clears it.
 In Claude Code, ask for `/ramify:app`. In a terminal, run `ramify app`. The first run installs
 Electron into `~/.cache/ramify/electron` (Node.js ≥ 22.12 and npm needed, once per Electron
 version). Plugin updates reuse it. The window runs detached from the shell that opened it.
+
+The Electron windows serve Claude Code and Codex sessions, and the terminal. A terminal user can
+also use the Ram Code panel (`Ctrl+P`), which shows the same dashboard, approvals, scratch and
+run views without Electron.
 
 ### The plugins
 
