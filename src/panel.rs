@@ -100,6 +100,12 @@ pub struct SessionEntry {
     pub name: String,
     pub root: Option<PathBuf>,
     pub branch: String,
+    pub project: String,
+}
+
+enum Visible {
+    Header { project: String, count: usize },
+    Session { index: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +129,7 @@ pub struct Panel {
     scratch: Vec<ScratchItem>,
     runs: Vec<RunEntry>,
     sessions: Vec<SessionEntry>,
+    open_group: Option<String>,
     agents: Vec<AgentEntry>,
     artifacts: Vec<ArtifactEntry>,
     worktree: Option<PathBuf>,
@@ -149,6 +156,7 @@ impl Panel {
             scratch: Vec::new(),
             runs: Vec::new(),
             sessions: Vec::new(),
+            open_group: None,
             agents: Vec::new(),
             artifacts: Vec::new(),
             worktree: None,
@@ -209,7 +217,27 @@ impl Panel {
             Pane::Approvals => self.gates = gates(self.json(runner, root, &["gates", "--json"])),
             Pane::Scratch => self.scratch = scratch_items(&scratch_dir()),
             Pane::Run => self.runs = runs(self.json(runner, root, &["runs", "--json"])),
-            Pane::Sessions => self.sessions = sessions(),
+            Pane::Sessions => {
+                self.sessions = sessions();
+                let projects: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .map(|session| session.project.clone())
+                    .collect();
+                let current = self
+                    .worktree
+                    .as_deref()
+                    .and_then(primary_of)
+                    .filter(|project| projects.contains(project));
+                if self
+                    .open_group
+                    .as_ref()
+                    .map(|group| !projects.contains(group))
+                    .unwrap_or(true)
+                {
+                    self.open_group = current.or_else(|| projects.first().cloned());
+                }
+            }
             Pane::Agents => {
                 self.agents = self
                     .worktree
@@ -248,10 +276,41 @@ impl Panel {
             Pane::Approvals => self.gates.len(),
             Pane::Scratch => self.scratch.len(),
             Pane::Run => self.runs.len(),
-            Pane::Sessions => self.sessions.len(),
+            Pane::Sessions => self.visible_rows().len(),
             Pane::Agents => self.agents.len(),
             Pane::Artifacts => self.artifacts.len(),
         }
+    }
+
+    fn visible_rows(&self) -> Vec<Visible> {
+        let mut rows = Vec::new();
+        let mut groups: Vec<String> = Vec::new();
+        for session in &self.sessions {
+            if !groups.contains(&session.project) {
+                groups.push(session.project.clone());
+            }
+        }
+        for group in groups {
+            let indexes: Vec<usize> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, session)| session.project == group)
+                .map(|(index, _)| index)
+                .collect();
+            let count = indexes.len();
+            let open = self.open_group.as_deref() == Some(group.as_str());
+            rows.push(Visible::Header {
+                project: if group.is_empty() { "other".into() } else { group },
+                count,
+            });
+            if open {
+                for index in indexes {
+                    rows.push(Visible::Session { index });
+                }
+            }
+        }
+        rows
     }
 
     fn clamp(&mut self) {
@@ -375,10 +434,23 @@ impl Panel {
                 self.prompt = Some((PromptKind::Block(self.selected), String::new()));
                 true
             }
-            KeyCode::Enter if self.pane == Pane::Sessions => {
-                if let Some(session) = self.sessions.get(self.selected) {
-                    self.pending_open = session.root.clone();
+            KeyCode::Enter | KeyCode::Char(' ') if self.pane == Pane::Sessions => {
+                match self.visible_rows().get(self.selected) {
+                    Some(Visible::Header { project, .. }) => {
+                        self.open_group = Some(project.clone());
+                        self.selected = 0;
+                    }
+                    Some(Visible::Session { index }) => {
+                        if let Some(session) = self.sessions.get(*index) {
+                            self.pending_open = session.root.clone();
+                        }
+                    }
+                    None => {}
                 }
+                true
+            }
+            KeyCode::Char('x') if self.pane == Pane::Agents => {
+                self.stop_agents(runner, root);
                 true
             }
             _ => false,
@@ -506,9 +578,30 @@ impl Panel {
         if self.pane != Pane::Sessions {
             return None;
         }
-        self.sessions
-            .get(self.selected)
-            .map(|session| session_color(&session.name))
+        match self.visible_rows().get(self.selected) {
+            Some(Visible::Header { project, .. }) => Some(session_color(project)),
+            Some(Visible::Session { index }) => self
+                .sessions
+                .get(*index)
+                .map(|session| session_color(&session.name)),
+            None => None,
+        }
+    }
+
+    fn stop_agents(&mut self, runner: &dyn Runner, root: &Path) {
+        let Some(worktree) = self.worktree.clone() else {
+            self.message = "no worktree selected".into();
+            return;
+        };
+        let spec = CommandSpec {
+            root: worktree,
+            args: vec!["down".into()],
+        };
+        self.message = match runner.run(&spec) {
+            Ok(output) => output.text(),
+            Err(error) => error,
+        };
+        self.refresh(runner, root);
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -611,32 +704,56 @@ impl Panel {
                 if self.sessions.is_empty() {
                     lines.push(Line::from("no session — start one in Claude Code or Codex"));
                 }
-                for (index, session) in self.sessions.iter().enumerate() {
-                    let selected = index == self.selected;
-                    let color = session_color(&session.name);
-                    let style = if selected {
-                        Style::default()
-                            .fg(color)
-                            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                    } else {
-                        Style::default().fg(color)
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "{} {} {} {}",
-                            if selected { ">" } else { " " },
-                            session.name,
-                            session.branch,
-                            session
-                                .root
-                                .as_ref()
-                                .map(|root| root.display().to_string())
-                                .unwrap_or_default()
-                        ),
-                        style,
-                    )));
-                    if selected {
-                        lines.push(Line::from(format!("    id {}", session.id)));
+                for (row_index, row) in self.visible_rows().iter().enumerate() {
+                    let selected = row_index == self.selected;
+                    match row {
+                        Visible::Header { project, count } => {
+                            let open = self.open_group.as_deref() == Some(project.as_str());
+                            let color = session_color(project);
+                            let style = if selected {
+                                Style::default()
+                                    .fg(color)
+                                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                            } else {
+                                Style::default().fg(color).add_modifier(Modifier::BOLD)
+                            };
+                            lines.push(Line::from(Span::styled(
+                                format!(
+                                    "{} {} {} ({count})",
+                                    if selected { ">" } else { " " },
+                                    if open { "▾" } else { "▸" },
+                                    project
+                                ),
+                                style,
+                            )));
+                        }
+                        Visible::Session { index } => {
+                            let Some(session) = self.sessions.get(*index) else {
+                                continue;
+                            };
+                            let color = session_color(&session.name);
+                            let style = if selected {
+                                Style::default()
+                                    .fg(color)
+                                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                            } else {
+                                Style::default().fg(color)
+                            };
+                            lines.push(Line::from(Span::styled(
+                                format!(
+                                    "  {} {} {} {}",
+                                    session.id,
+                                    session.name,
+                                    session.branch,
+                                    session
+                                        .root
+                                        .as_ref()
+                                        .map(|root| root.display().to_string())
+                                        .unwrap_or_default()
+                                ),
+                                style,
+                            )));
+                        }
                     }
                 }
             }
@@ -737,6 +854,24 @@ pub fn session_color(name: &str) -> Color {
     COLORS[index as usize]
 }
 
+fn primary_of(path: &Path) -> Option<String> {
+    Command::new("git")
+        .args(["-C", &path.to_string_lossy(), "worktree", "list", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix("worktree ").map(PathBuf::from))
+        })
+        .and_then(|primary| {
+            primary
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+}
+
 fn git_branch(path: &Path) -> Option<String> {
     Command::new("git")
         .args(["-C", &path.to_string_lossy(), "rev-parse", "--abbrev-ref", "HEAD"])
@@ -774,15 +909,20 @@ fn sessions() -> Vec<SessionEntry> {
                 .as_deref()
                 .and_then(git_branch)
                 .unwrap_or_default();
+            let project = root
+                .as_deref()
+                .and_then(primary_of)
+                .unwrap_or_default();
             Some(SessionEntry {
                 id,
                 name,
                 root,
                 branch,
+                project,
             })
         })
         .collect();
-    sessions.sort_by(|a, b| b.id.cmp(&a.id));
+    sessions.sort_by(|a, b| a.project.cmp(&b.project).then(b.id.cmp(&a.id)));
     sessions
 }
 
