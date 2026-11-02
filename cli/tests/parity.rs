@@ -1630,3 +1630,96 @@ fn setup_draft_matches_the_shell() {
         );
     }
 }
+
+#[test]
+fn setup_ecosystems_match_the_shell() {
+    let registry = temp("setup-eco-registry").join("projects");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, "").unwrap();
+    let repo = repo_root();
+
+    let make = |name: &str, populate: &dyn Fn(&Path)| {
+        let base = temp(name);
+        let fixture = base.join("demo-repo");
+        fs::create_dir_all(&fixture).unwrap();
+        git(&["init", "-q", "-b", "main"], &fixture);
+        populate(&fixture);
+        git(&["add", "-A"], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        fixture.canonicalize().unwrap()
+    };
+
+    let pnpm = make("setup-pnpm", &|fixture: &Path| {
+        fs::write(fixture.join("pnpm-lock.yaml"), "").unwrap();
+        fs::write(fixture.join("pnpm-workspace.yaml"), "packages:\n  - apps/*\n  - packages/*\n").unwrap();
+        fs::write(
+            fixture.join("package.json"),
+            "{\"private\":true,\"workspaces\":[\"apps/*\",\"packages/*\"]}\n",
+        )
+        .unwrap();
+        fs::write(fixture.join("docker-compose.yml"), "services:\n  db:\n    image: postgres\n    container_name: demo-db-1\n").unwrap();
+        fs::create_dir_all(fixture.join("apps/web")).unwrap();
+        fs::write(
+            fixture.join("apps/web/package.json"),
+            "{\"scripts\":{\"dev\":\"vite\",\"storybook\":\"storybook dev\"},\"devDependencies\":{\"vite\":\"5\"}}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(fixture.join("packages/api/src")).unwrap();
+        fs::write(
+            fixture.join("packages/api/package.json"),
+            "{\"scripts\":{\"dev\":\"nest start\"},\"dependencies\":{\"@nestjs/core\":\"10\"}}\n",
+        )
+        .unwrap();
+        fs::write(fixture.join("packages/api/src/main.ts"), "app.listen(3000);\n").unwrap();
+    });
+    let bun = make("setup-bun", &|fixture: &Path| {
+        fs::write(fixture.join("bun.lock"), "").unwrap();
+        fs::write(
+            fixture.join("package.json"),
+            "{\"packageManager\":\"bun@1.2.0\",\"scripts\":{\"dev\":\"astro dev\"},\"devDependencies\":{\"astro\":\"4\"}}\n",
+        )
+        .unwrap();
+    });
+    let aspnet = make("setup-aspnet", &|fixture: &Path| {
+        fs::write(
+            fixture.join("package.json"),
+            "{\"scripts\":{\"dev\":\"vite\"},\"devDependencies\":{\"vite\":\"5\"}}\n",
+        )
+        .unwrap();
+        fs::write(fixture.join("package-lock.json"), "").unwrap();
+        fs::write(
+            fixture.join("api.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>\n",
+        )
+        .unwrap();
+    });
+    let uv = make("setup-uv", &|fixture: &Path| {
+        fs::write(fixture.join("uv.lock"), "").unwrap();
+    });
+
+    for fixture in [pnpm, bun, aspnet, uv] {
+        let shell = Command::new(reference_bin())
+            .args(["setup", "--print"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(["setup", "--print"])
+            .env("RAMIFY_ROOT", &fixture)
+            .env("RAMIFY_REGISTRY", &registry)
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{} exit", fixture.display());
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            String::from_utf8_lossy(&rust.stdout),
+            "{} stdout differs",
+            fixture.display()
+        );
+    }
+}
