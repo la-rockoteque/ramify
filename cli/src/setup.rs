@@ -174,11 +174,11 @@ fn draft(root: &Path, primary: &Path) -> Result<String, String> {
                     dir,
                     "/index.json",
                     cmd,
-                    "# Boots last and nothing waits on it; RAMIFY_SKIP=$service leaves it out.\n",
+                    "",
                 );
-                let last = parts.body.len();
-                let _ = last;
-                parts.body.push_str(&format!("{service}_optional=1\n"));
+                parts.body.push_str(&format!(
+                    "# Boots last and nothing waits on it; RAMIFY_SKIP={service} leaves it out.\n{service}_optional=1\n"
+                ));
             }
             "fixed" => {
                 let dir = fields.get(1).copied().unwrap_or("");
@@ -213,13 +213,7 @@ fn draft(root: &Path, primary: &Path) -> Result<String, String> {
             _ => {}
         }
     }
-    services.sort();
-    services.dedup();
-    // The shell prints "api first"; add_service appends, so move api to the front.
-    if let Some(index) = services.iter().position(|service| service == "api") {
-        let api = services.remove(index);
-        services.insert(0, api);
-    }
+    let mut services = dedupe(services);
     parts.services = services.join(" ");
     for install in installs {
         let mut fields = install.split(SEP);
@@ -276,33 +270,31 @@ fn draft(root: &Path, primary: &Path) -> Result<String, String> {
         if !text.contains("Sdk=\"Microsoft.NET.Sdk.Web\"") {
             continue;
         }
-        let project = Path::new(cs).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let project = Path::new(cs)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| ".".into());
         let mut names: Vec<String> = webdirs
             .iter()
             .filter(|dir| !dir.is_empty())
             .cloned()
             .collect();
         names.push("docs/".into());
-        let escaped: Vec<String> = names
-            .iter()
-            .map(|name| name.trim_end_matches('/').replace('.', "\\."))
-            .collect();
+        let escaped: Vec<String> = names.iter().map(|name| name.replace('.', "\\.")).collect();
         let shared_when = format!("^({})", escaped.join("|"));
         let api_port = pick_port(&mut held, 5000, span);
         let api_shared = pick_port(&mut held, 5100, 0);
         parts.body.push('\n');
         parts.body.push_str(&format!(
-            "# Slot N → {api_port}+N. Slot 0 is never used, and a port someone else holds skips the slot.\napi_port={api_port}\n# Check it: the path that answers once the API really serves, not once it logs « listening ».\napi_health=/health\napi_timeout=180\n# --urls, not ASPNETCORE_URLS: the launch profile overrides the environment variable.\napi_cmd='DOTNET_WATCH_RESTART_ON_RUDE_EDIT=1 dotnet watch --project {project} --non-interactive run --urls http://localhost:\\$PORT'\napi_shared_port={api_shared}\napi_shared_cmd='dotnet run --project {project} --urls http://localhost:\\$PORT'\n# While every changed path matches, the branch reuses the shared API and skips api_prepare.\napi_shared_when='{shared_when}'\n# api_prepare='dotnet ef database update --project <Infrastructure> --startup-project {project}'\n"
+            "# Slot N → {api_port}+N. Slot 0 is never used, and a port someone else holds skips the slot.\napi_port={api_port}\n# Check it: the path that answers once the API really serves, not once it logs « listening ».\napi_health=/health\napi_timeout=180\n# --urls, not ASPNETCORE_URLS: the launch profile overrides the environment variable.\napi_cmd='DOTNET_WATCH_RESTART_ON_RUDE_EDIT=1 dotnet watch --project {project} --non-interactive run --urls http://localhost:$PORT'\napi_shared_port={api_shared}\napi_shared_cmd='dotnet run --project {project} --urls http://localhost:$PORT'\n# While every changed path matches, the branch reuses the shared API and skips api_prepare.\napi_shared_when='{shared_when}'\n# api_prepare='dotnet ef database update --project <Infrastructure> --startup-project {project}'\n"
         ));
         // Prefix every service command but storybook with the API target.
         parts.body = parts
             .body
             .lines()
             .map(|line| {
-                if line.ends_with("_cmd='") {
-                    let _ = line;
-                    line.to_string()
-                } else if line.contains("_cmd='") && !line.starts_with("storybook_cmd") && !line.starts_with("api_cmd") && !line.starts_with("api_shared_cmd") {
+                if line.contains("_cmd='") && !line.starts_with("storybook_cmd") {
                     line.replacen("_cmd='", "_cmd='VITE_API_TARGET=http://localhost:$API_PORT ", 1)
                 } else {
                     line.to_string()
@@ -310,16 +302,12 @@ fn draft(root: &Path, primary: &Path) -> Result<String, String> {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        parts.body.push('\n');
         parts.body.push_str("# web_smoke='/api/health 200|401'\n");
         services.insert(0, "api".into());
         break;
     }
-    services.sort();
-    services.dedup();
-    if let Some(index) = services.iter().position(|service| service == "api") {
-        let api = services.remove(index);
-        services.insert(0, api);
-    }
+    let services = dedupe(services);
     parts.services = services.join(" ");
     let _ = compose;
 
@@ -364,6 +352,16 @@ fn add_service(
         sq(cmd)
     ));
     services.push(service.to_string());
+}
+
+fn dedupe(services: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for service in services {
+        if !out.contains(&service) {
+            out.push(service);
+        }
+    }
+    out
 }
 
 fn sq(text: &str) -> String {
@@ -813,6 +811,17 @@ fn detect_packages(root: &Path) -> Vec<String> {
         }
         names.insert(name.clone());
         out.push(format!("svc{SEP}{name}{SEP}{rel}{SEP}{kind}{SEP}{base}{SEP}{cmd}"));
+        if scripts.contains_key("storybook") {
+            let sb = if name == "web" {
+                "storybook".to_string()
+            } else {
+                format!("{name}_storybook")
+            };
+            out.push(format!(
+                "sb{SEP}{sb}{SEP}{rel}{SEP}{}",
+                run(&manager, "storybook", "-p $PORT --no-open")
+            ));
+        }
         service_dirs.push(rel);
     }
     for root_dir in roots {
