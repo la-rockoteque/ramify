@@ -345,6 +345,7 @@ fn draft(root: &Path, primary: &Path) -> Result<String, String> {
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_service(
     parts: &mut Parts,
     services: &mut Vec<String>,
@@ -500,7 +501,7 @@ fn held_ranges(root: &Path, registry: &Path, span: u32) -> Vec<(u32, u32)> {
             if let Some(port) = value.parse::<u32>().ok().filter(|_| key.ends_with("_shared_port")) {
                 held.push((port, port));
             } else if key.ends_with("_port") && !key.ends_with("_shared_port") {
-                if let Some(port) = value.parse::<u32>().ok() {
+                if let Ok(port) = value.parse::<u32>() {
                     held.push((port, port + max));
                 }
             }
@@ -678,11 +679,12 @@ fn glob(root: &Path, pattern: &str) -> Vec<PathBuf> {
 fn matches_glob(name: &str, pattern: &str) -> bool {
     let regex = regex::Regex::new(&format!(
         "^{}$",
-        regex::escape(pattern).replace("\\*", ".*").replace("y.*ml", "y.*ml")
+        regex::escape(pattern).replace("\\*", ".*")
     ));
     regex.map(|regex| regex.is_match(name)).unwrap_or(false)
 }
 
+#[allow(clippy::regex_creation_in_loops)]
 fn detect_packages(root: &Path) -> Vec<String> {
     let root = root.to_path_buf();
     let top = subdirs(&root);
