@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# ram — launch Ram Code like `claude` or `codex`. Builds the binary once if it is missing.
+set -uo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$d/$src" ;; esac
+done
+RAM_CODE_HOME="$(cd "$(dirname "$src")/.." && pwd)"
+bin="$RAM_CODE_HOME/target/release/ram-code"
+if [ ! -x "$bin" ] && [ -x "$RAM_CODE_HOME/target/debug/ram-code" ]; then
+  bin="$RAM_CODE_HOME/target/debug/ram-code"
+fi
+if [ ! -x "$bin" ]; then
+  command -v cargo >/dev/null 2>&1 \
+    || { echo "ram: the Ram Code binary is not built — run: cargo build --release" >&2; exit 1; }
+  cargo build --release --quiet --manifest-path "$RAM_CODE_HOME/Cargo.toml" >&2 || exit 1
+  bin="$RAM_CODE_HOME/target/release/ram-code"
+fi
+exec "$bin" "$@"
