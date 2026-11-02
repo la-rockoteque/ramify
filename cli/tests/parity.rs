@@ -1270,3 +1270,155 @@ fn statusline_matches_the_shell() {
         assert_eq!(shell_text, rust_text, "{args:?} stdout differs");
     }
 }
+
+fn normalize_run(text: &str, directory: &Path) -> String {
+    let regex = regex::Regex::new(r"[0-9]{8}-[0-9]{6}-[0-9]+").unwrap();
+    let text = regex.replace_all(text, "<ID>").into_owned();
+    let canonical = directory.canonicalize().unwrap_or_else(|_| directory.to_path_buf());
+    text.replace(&canonical.to_string_lossy().into_owned(), "<DIR>")
+        .replace(&directory.to_string_lossy().into_owned(), "<DIR>")
+}
+
+#[test]
+fn scratch_matches_the_shell() {
+    let repo = repo_root();
+    let shell_dir = temp("scratch-shell");
+    let rust_dir = temp("scratch-rust");
+    let text = temp("scratch-text").join("note.txt");
+    fs::write(&text, "a message to copy\n").unwrap();
+
+    for args in [
+        vec!["scratch".to_string(), "--title".into(), "Note".into(), text.to_string_lossy().into_owned()],
+        vec!["scratch".into(), "--list".into()],
+        vec!["scratch".into(), "--clear".into()],
+        vec!["scratch".into(), "--list".into()],
+    ] {
+        let shell = Command::new(repo.join("bin/ramify"))
+            .args(&args)
+            .env("RAMIFY_SCRATCH_DIR", &shell_dir)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_SHELL", "1")
+            .output()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_ramify"))
+            .args(&args)
+            .env("RAMIFY_SCRATCH_DIR", &rust_dir)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo)
+            .env_remove("RAMIFY_SHELL")
+            .output()
+            .unwrap();
+        assert_eq!(shell.status.code(), rust.status.code(), "{args:?} exit");
+        assert_eq!(
+            normalize_run(&String::from_utf8_lossy(&shell.stdout), &shell_dir),
+            normalize_run(&String::from_utf8_lossy(&rust.stdout), &rust_dir),
+            "{args:?} stdout differs"
+        );
+    }
+}
+
+#[test]
+fn run_matches_the_shell() {
+    let repo = repo_root();
+    let shell_dir = temp("run-shell");
+    let rust_dir = temp("run-rust");
+    let script = temp("run-script").join("task.sh");
+    fs::write(&script, "echo hello\n").unwrap();
+
+    let ask = |binary: &Path, directory: &Path, shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(["run", "ask", &script.to_string_lossy(), "--note", "try it"])
+            .env("RAMIFY_RUNS_DIR", directory)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    let id_of = |output: &std::process::Output| {
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let regex = regex::Regex::new(r"[0-9]{8}-[0-9]{6}-[0-9]+").unwrap();
+        regex.find(&text).map(|found| found.as_str().to_string())
+    };
+    let shell = ask(&repo.join("bin/ramify"), &shell_dir, true);
+    let rust = ask(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_dir, false);
+    assert_eq!(shell.status.code(), rust.status.code());
+    assert_eq!(
+        normalize_run(&String::from_utf8_lossy(&shell.stdout), &shell_dir),
+        normalize_run(&String::from_utf8_lossy(&rust.stdout), &rust_dir)
+    );
+    let shell_id = id_of(&shell).expect("shell id");
+    let rust_id = id_of(&rust).expect("rust id");
+
+    let sub = |binary: &Path,
+               directory: &Path,
+               id: &str,
+               args: &[&str],
+               shell_mode: bool| {
+        let mut command = Command::new(binary);
+        command
+            .args(args)
+            .arg(id)
+            .env("RAMIFY_RUNS_DIR", directory)
+            .env("RAMIFY_POPUP", "0")
+            .env("RAMIFY_HOME", &repo);
+        if shell_mode {
+            command.env("RAMIFY_SHELL", "1");
+        } else {
+            command.env_remove("RAMIFY_SHELL");
+        }
+        command.output().unwrap()
+    };
+    for args in [vec!["run", "go"], vec!["run", "wait"]] {
+        let shell_out = sub(
+            &repo.join("bin/ramify"),
+            &shell_dir,
+            &shell_id,
+            &args,
+            true,
+        );
+        let rust_out = sub(
+            Path::new(env!("CARGO_BIN_EXE_ramify")),
+            &rust_dir,
+            &rust_id,
+            &args,
+            false,
+        );
+        assert_eq!(shell_out.status.code(), rust_out.status.code(), "{args:?} exit");
+        assert_eq!(
+            normalize_run(&String::from_utf8_lossy(&shell_out.stdout), &shell_dir),
+            normalize_run(&String::from_utf8_lossy(&rust_out.stdout), &rust_dir),
+            "{args:?} stdout differs"
+        );
+    }
+
+    let shell = ask(&repo.join("bin/ramify"), &shell_dir, true);
+    let rust = ask(Path::new(env!("CARGO_BIN_EXE_ramify")), &rust_dir, false);
+    let shell_id = id_of(&shell).expect("shell id");
+    let rust_id = id_of(&rust).expect("rust id");
+    let shell_out = sub(
+        &repo.join("bin/ramify"),
+        &shell_dir,
+        &shell_id,
+        &["run", "block", "--note", "not now"],
+        true,
+    );
+    let rust_out = sub(
+        Path::new(env!("CARGO_BIN_EXE_ramify")),
+        &rust_dir,
+        &rust_id,
+        &["run", "block", "--note", "not now"],
+        false,
+    );
+    assert_eq!(shell_out.status.code(), rust_out.status.code());
+    assert_eq!(
+        normalize_run(&String::from_utf8_lossy(&shell_out.stdout), &shell_dir),
+        normalize_run(&String::from_utf8_lossy(&rust_out.stdout), &rust_dir),
+        "block stdout differs"
+    );
+}

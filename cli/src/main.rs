@@ -1,7 +1,9 @@
 mod commands;
 mod config;
 mod mem;
+mod launch;
 mod pyjson;
+mod run;
 mod statusline;
 mod dash;
 mod workflow;
@@ -35,6 +37,25 @@ fn main() {
     }
     if command == "reap" {
         std::process::exit(mem::reap());
+    }
+    if command == "scratch" {
+        std::process::exit(run::scratch(&args[1..]));
+    }
+    if command == "run" {
+        std::process::exit(run::run(&args[1..]));
+    }
+    if command == "app" || command == "approvals" {
+        let kind = if command == "app" {
+            args.get(1).map(String::as_str).unwrap_or("")
+        } else {
+            "approvals"
+        };
+        let kind_args: Vec<String> = if kind.is_empty() {
+            Vec::new()
+        } else {
+            vec![kind.to_string()]
+        };
+        std::process::exit(launch::app(&kind_args));
     }
     if command == "statusline" {
         std::process::exit(statusline::statusline(&args[1..]));
