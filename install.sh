@@ -20,8 +20,9 @@ usage() {
 Usage: install.sh [--bin-dir DIR] [--home DIR] [--no-build] [--force] [--uninstall]
 
   --bin-dir DIR  Where to link ram and ramify (default: ~/.local/bin, or \$RAMIFY_BIN_DIR)
-  --home DIR     The ramify checkout to install from. Default: this script's checkout, else a
-                 clone at ~/.local/share/ramify (or \$RAMIFY_HOME)
+  --home DIR     The ramify checkout to install from, cloned there when DIR is missing.
+                 Default: this script's checkout, else a clone at ~/.local/share/ramify.
+                 Also \$RAMIFY_HOME
   --no-build     Link only. The launchers build the binaries on first use
   --force        Replace a file at the link path that is not a symlink
   --uninstall    Remove the links that point into the checkout
@@ -60,6 +61,10 @@ if [ -z "$HOME_DIR" ]; then
   if [ -n "$here" ] && is_checkout "$here"; then HOME_DIR="$here"
   else HOME_DIR="$HOME/.local/share/ramify"; clone=1
   fi
+# An explicit home that does not exist yet gets a clone. One that exists is used as it is: it
+# may be a working checkout, and the installer must not pull into it.
+elif [ ! -e "$HOME_DIR" ]; then
+  clone=1
 fi
 
 if [ "$UNINSTALL" = 1 ]; then
