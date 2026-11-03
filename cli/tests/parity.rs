@@ -1488,12 +1488,16 @@ fn jira_errors_match_the_shell() {
     git(&["commit", "-qm", "init"], &fixture);
     let fixture = fixture.canonicalize().unwrap();
     let repo = repo_root();
+    let state = temp("jira-state");
+    let registry = temp("jira-registry").join("projects");
     for url in [None, Some("https://example.atlassian.net")] {
         let mut shell = Command::new(reference_bin());
         shell
             .args(["jira", "check"])
             .env("RAMIFY_ROOT", &fixture)
             .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_REGISTRY", &registry)
             .env("RAMIFY_SHELL", "1")
             .env_remove("RAMIFY_JIRA_URL")
             .env_remove("RAMIFY_JIRA_EMAIL")
@@ -1502,6 +1506,8 @@ fn jira_errors_match_the_shell() {
         rust.args(["jira", "check"])
             .env("RAMIFY_ROOT", &fixture)
             .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_REGISTRY", &registry)
             .env_remove("RAMIFY_SHELL")
             .env_remove("RAMIFY_JIRA_URL")
             .env_remove("RAMIFY_JIRA_EMAIL")
@@ -1535,11 +1541,15 @@ fn ticket_without_jira_exits_three() {
     git(&["commit", "-qm", "init"], &fixture);
     let fixture = fixture.canonicalize().unwrap();
     let repo = repo_root();
+    let state = temp("ticket-state");
+    let registry = temp("ticket-registry").join("projects");
     for action in ["start", "sync"] {
         let shell = Command::new(reference_bin())
             .args(["ticket", action])
             .env("RAMIFY_ROOT", &fixture)
             .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_REGISTRY", &registry)
             .env("RAMIFY_SHELL", "1")
             .env_remove("RAMIFY_JIRA_URL")
             .output()
@@ -1548,6 +1558,8 @@ fn ticket_without_jira_exits_three() {
             .args(["ticket", action])
             .env("RAMIFY_ROOT", &fixture)
             .env("RAMIFY_HOME", &repo)
+            .env("RAMIFY_STATE_DIR", &state)
+            .env("RAMIFY_REGISTRY", &registry)
             .env_remove("RAMIFY_SHELL")
             .env_remove("RAMIFY_JIRA_URL")
             .output()
