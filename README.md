@@ -68,9 +68,23 @@ The tests are `cargo test`; they cover the acceptance criteria in
 ## Install
 
 ```bash
-ln -s ~/dev/Perso/ramify/bin/ramify ~/.local/bin/ramify     # the CLI, for you and the agent
-ln -s ~/dev/Perso/ramify/bin/ram ~/.local/bin/ram           # Ram Code, the terminal harness
+curl -fsSL https://raw.githubusercontent.com/la-rockoteque/ramify/main/install.sh | bash
 ```
+
+The installer clones ramify into `~/.local/share/ramify` and builds both release binaries.
+It links `ram` (Ram Code) and `ramify` (the CLI) into `~/.local/bin`. Ram Code calls
+`ramify`, so it installs both. From a checkout, run `./install.sh` to install from that checkout.
+Run the installer again to update.
+
+| Option | What it does |
+|---|---|
+| `--bin-dir DIR` | Link into `DIR` (also `RAMIFY_BIN_DIR`) |
+| `--home DIR` | Install from the checkout at `DIR` (also `RAMIFY_HOME`) |
+| `--no-build` | Link only. The launchers build on first use |
+| `--force` | Replace a file at the link path that is not a symlink |
+| `--uninstall` | Remove the links that point into the checkout |
+
+The installer needs git and cargo ([rustup.rs](https://rustup.rs)). The tests are `python3 test/install.py`.
 
 In Claude Code:
 
