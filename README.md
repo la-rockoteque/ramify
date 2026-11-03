@@ -71,20 +71,29 @@ The tests are `cargo test`; they cover the acceptance criteria in
 curl -fsSL https://raw.githubusercontent.com/la-rockoteque/ramify/main/install.sh | bash
 ```
 
-The installer clones ramify into `~/.local/share/ramify` and builds both release binaries.
-It links `ram` (Ram Code) and `ramify` (the CLI) into `~/.local/bin`. Ram Code calls
-`ramify`, so it installs both. From a checkout, run `./install.sh` to install from that checkout.
-Run the installer again to update.
+The installer downloads the latest [GitHub Release](https://github.com/la-rockoteque/ramify/releases)
+for your machine into `~/.local/share/ramify`. It checks the archive's SHA-256 and links `ram`
+(Ram Code) and `ramify` (the CLI) into `~/.local/bin`. Ram Code calls `ramify`, so it installs
+both. Rust is not needed. Run the installer again to update.
+
+Releases exist for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). On another
+machine, pass `--from-source`: the installer then clones the repo and builds it with cargo
+([rustup.rs](https://rustup.rs)). From a checkout, `./install.sh` builds and links that checkout.
 
 | Option | What it does |
 |---|---|
+| `--version TAG` | Install that release, such as `v0.2.0` (also `RAMIFY_VERSION`) |
+| `--from-source` | Clone and build with cargo instead of downloading a release |
 | `--bin-dir DIR` | Link into `DIR` (also `RAMIFY_BIN_DIR`) |
-| `--home DIR` | Install from the checkout at `DIR`, cloned there when `DIR` is missing (also `RAMIFY_HOME`) |
-| `--no-build` | Link only. The launchers build on first use |
+| `--home DIR` | Install into `DIR` when it is missing. Use an existing checkout as it is (also `RAMIFY_HOME`) |
+| `--no-build` | With a checkout, link only. The launchers build on first use |
 | `--force` | Replace a file at the link path that is not a symlink |
-| `--uninstall` | Remove the links that point into the checkout |
+| `--uninstall` | Remove the links that point into the install |
 
-The installer needs git and cargo ([rustup.rs](https://rustup.rs)). The tests are `python3 test/install.py`.
+To publish a release, push a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+`.github/workflows/release.yml` builds the four platforms and attaches their archives to the
+release. Each archive is the repo tree with both binaries prebuilt. The tests are
+`python3 test/install.py`.
 
 In Claude Code:
 

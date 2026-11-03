@@ -1,0 +1,81 @@
+# Build ram and ramify for each platform and publish them as a GitHub Release.
+# Push a tag to run it: git tag v0.2.0 && git push origin v0.2.0
+#
+# Each archive is the repo tree at the tag, with the two binaries where the launchers look:
+# target/release/ram-code and cli/target/release/ramify. ramify finds its home by walking up
+# from its binary, so the tree must ship with it. install.sh downloads the archive.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            cli -> target
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: |
+          cargo build --release --locked --manifest-path cli/Cargo.toml
+          cargo build --release --locked
+
+      - name: Check the binaries run
+        run: |
+          ./bin/ram --version
+          ./bin/ramify --help >/dev/null
+
+      - name: Pack
+        run: |
+          name="ramify-${{ matrix.target }}"
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage"
+          git archive HEAD | tar -x -C "$stage"
+          mkdir -p "$stage/target/release" "$stage/cli/target/release"
+          cp target/release/ram-code "$stage/target/release/"
+          cp cli/target/release/ramify "$stage/cli/target/release/"
+          echo "$GITHUB_REF_NAME" >"$stage/RELEASE"
+          tar -C "$stage" -czf "$name.tar.gz" .
+          shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ramify-${{ matrix.target }}
+          path: ramify-${{ matrix.target }}.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

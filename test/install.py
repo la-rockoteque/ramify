@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Run install.sh from a checkout and from a clone, with a fake cargo, and check the links."""
+import hashlib
 import os
+import platform
+import tarfile
 from pathlib import Path
 import subprocess
 import tempfile
@@ -85,11 +88,11 @@ class Install(unittest.TestCase):
     def test_piped_install_clones_then_updates(self):
         self.source_repo()
         clone = self.root / "home" / ".local" / "share" / "ramify"
-        out = self.run_install("--no-build", stdin=SCRIPT.read_text())
+        out = self.run_install("--from-source", "--no-build", stdin=SCRIPT.read_text())
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("cloning", out.stdout)
         self.assertEqual(os.readlink(self.bin / "ram"), str(clone / "bin" / "ram"))
-        out = self.run_install("--no-build", stdin=SCRIPT.read_text())
+        out = self.run_install("--from-source", "--no-build", stdin=SCRIPT.read_text())
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("updating", out.stdout)
 
@@ -97,7 +100,7 @@ class Install(unittest.TestCase):
         self.source_repo()
         home = self.root / "elsewhere" / "ramify"
         self.env["RAMIFY_HOME"] = str(home)
-        out = self.run_install("--no-build", stdin=SCRIPT.read_text())
+        out = self.run_install("--from-source", "--no-build", stdin=SCRIPT.read_text())
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("cloning", out.stdout)
         self.assertEqual(os.readlink(self.bin / "ram"), str(home / "bin" / "ram"))
@@ -108,6 +111,87 @@ class Install(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertNotIn("updating", out.stdout)
         self.assertEqual(os.readlink(self.bin / "ram"), str(HOME / "bin" / "ram"))
+
+    def release(self, tag, *, latest=True):
+        """Publish a fake release archive for this machine under file://, as the workflow would."""
+        arch = {"arm64": "aarch64", "aarch64": "aarch64"}.get(platform.machine(), "x86_64")
+        os_name = "apple-darwin" if platform.system() == "Darwin" else "unknown-linux-gnu"
+        asset = f"ramify-{arch}-{os_name}.tar.gz"
+        stage = self.root / "stage" / tag
+        for rel in ("Cargo.toml", "workflows.yml", "bin/ram", "bin/ramify"):
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            (stage / rel).write_bytes((HOME / rel).read_bytes())
+            (stage / rel).chmod((HOME / rel).stat().st_mode)
+        for rel in ("target/release/ram-code", "cli/target/release/ramify"):
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            (stage / rel).write_text(f'#!/bin/sh\necho "{tag} $(basename "$0")"\n')
+            (stage / rel).chmod(0o755)
+        (stage / "RELEASE").write_text(tag + "\n")
+        releases = self.root / "releases"
+        dirs = [releases / "download" / tag] + ([releases / "latest" / "download"] if latest else [])
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(d / asset, "w:gz") as tar:
+                for item in stage.iterdir():
+                    tar.add(item, arcname=item.name)
+            digest = hashlib.sha256((d / asset).read_bytes()).hexdigest()
+            (d / f"{asset}.sha256").write_text(f"{digest}  {asset}\n")
+        self.env["RAMIFY_RELEASES"] = f"file://{releases}"
+        return dirs[-1] / asset
+
+    def default_home(self):
+        return self.root / "home" / ".local" / "share" / "ramify"
+
+    def run_bin(self, name):
+        return subprocess.run([str(self.bin / name), "--version"], capture_output=True, text=True,
+                              env=self.env).stdout.strip()
+
+    def test_piped_install_downloads_the_latest_release_without_cargo(self):
+        self.release("v1.0.0")
+        out = self.run_install(stdin=SCRIPT.read_text())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("installed v1.0.0", out.stdout)
+        self.assertNotIn("unbound variable", out.stderr)
+        self.assertEqual(os.readlink(self.bin / "ram"), str(self.default_home() / "bin" / "ram"))
+        self.assertEqual(self.run_bin("ram"), "v1.0.0 ram-code")
+        self.assertEqual(self.run_bin("ramify"), "v1.0.0 ramify")
+        self.assertFalse(self.cargo_log.exists())
+
+    def test_a_second_run_replaces_the_release(self):
+        self.release("v1.0.0")
+        self.run_install(stdin=SCRIPT.read_text())
+        self.release("v1.1.0")
+        out = self.run_install(stdin=SCRIPT.read_text())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.run_bin("ram"), "v1.1.0 ram-code")
+        leftovers = [p.name for p in self.default_home().parent.iterdir() if p.name != "ramify"]
+        self.assertEqual(leftovers, [])
+
+    def test_version_pins_a_release(self):
+        self.release("v1.0.0", latest=False)
+        self.release("v2.0.0")
+        out = self.run_install("--version", "v1.0.0", stdin=SCRIPT.read_text())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.run_bin("ram"), "v1.0.0 ram-code")
+
+    def test_a_bad_checksum_installs_nothing(self):
+        asset = self.release("v1.0.0")
+        Path(f"{asset}.sha256").write_text("0" * 64 + "  x\n")
+        out = self.run_install(stdin=SCRIPT.read_text())
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("checksum", out.stderr)
+        self.assertFalse(self.default_home().exists())
+        self.assertFalse((self.bin / "ram").exists())
+
+    def test_a_release_replaces_an_earlier_source_install(self):
+        self.source_repo()
+        self.run_install("--from-source", "--no-build", stdin=SCRIPT.read_text())
+        self.assertTrue((self.default_home() / ".git").is_dir())
+        self.release("v1.0.0")
+        out = self.run_install(stdin=SCRIPT.read_text())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse((self.default_home() / ".git").exists())
+        self.assertEqual(self.run_bin("ram"), "v1.0.0 ram-code")
 
     def test_parses_on_macos_bash_3(self):
         if Path("/bin/bash").exists():
