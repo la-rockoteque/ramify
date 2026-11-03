@@ -70,7 +70,7 @@ class Install(unittest.TestCase):
         self.assertFalse((self.bin / "ram").exists() or (self.bin / "ram").is_symlink())
         self.assertEqual(os.readlink(self.bin / "ramify"), "/elsewhere/ramify")
 
-    def test_piped_install_clones_then_updates(self):
+    def source_repo(self):
         source = self.root / "source"
         subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(HOME), str(source)], check=True)
         # The clone must carry this branch's install.sh and launchers, committed or not.
@@ -81,6 +81,9 @@ class Install(unittest.TestCase):
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
         self.env["RAMIFY_REPO"] = str(source)
+
+    def test_piped_install_clones_then_updates(self):
+        self.source_repo()
         clone = self.root / "home" / ".local" / "share" / "ramify"
         out = self.run_install("--no-build", stdin=SCRIPT.read_text())
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -89,6 +92,22 @@ class Install(unittest.TestCase):
         out = self.run_install("--no-build", stdin=SCRIPT.read_text())
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("updating", out.stdout)
+
+    def test_piped_install_clones_into_a_missing_explicit_home(self):
+        self.source_repo()
+        home = self.root / "elsewhere" / "ramify"
+        self.env["RAMIFY_HOME"] = str(home)
+        out = self.run_install("--no-build", stdin=SCRIPT.read_text())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("cloning", out.stdout)
+        self.assertEqual(os.readlink(self.bin / "ram"), str(home / "bin" / "ram"))
+
+    def test_an_existing_explicit_home_is_not_pulled(self):
+        self.env["RAMIFY_HOME"] = str(HOME)
+        out = self.run_install("--no-build", stdin=SCRIPT.read_text())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("updating", out.stdout)
+        self.assertEqual(os.readlink(self.bin / "ram"), str(HOME / "bin" / "ram"))
 
     def test_parses_on_macos_bash_3(self):
         if Path("/bin/bash").exists():

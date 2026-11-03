@@ -79,7 +79,7 @@ Run the installer again to update.
 | Option | What it does |
 |---|---|
 | `--bin-dir DIR` | Link into `DIR` (also `RAMIFY_BIN_DIR`) |
-| `--home DIR` | Install from the checkout at `DIR` (also `RAMIFY_HOME`) |
+| `--home DIR` | Install from the checkout at `DIR`, cloned there when `DIR` is missing (also `RAMIFY_HOME`) |
 | `--no-build` | Link only. The launchers build on first use |
 | `--force` | Replace a file at the link path that is not a symlink |
 | `--uninstall` | Remove the links that point into the checkout |
