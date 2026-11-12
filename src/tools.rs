@@ -98,7 +98,8 @@ impl Tools {
             }),
             json!({
                 "name": "write_file",
-                "description": "Write a UTF-8 file inside the worktree. Creates parent folders.",
+                "description": "Write a whole UTF-8 file inside the worktree. Creates parent folders. \
+Use it to create a file or to replace all of it. To change part of a file, use edit_file.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -106,6 +107,22 @@ impl Tools {
                         "content": {"type": "string", "description": "Full file content"}
                     },
                     "required": ["path", "content"]
+                }
+            }),
+            json!({
+                "name": "edit_file",
+                "description": "Replace an exact string in a UTF-8 file inside the worktree. \
+old_string must occur once, unless replace_all is true. Copy it exactly from read_file output, \
+with enough context to make it unique. Prefer this tool to write_file for changes.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Relative path"},
+                        "old_string": {"type": "string", "description": "The exact text to replace"},
+                        "new_string": {"type": "string", "description": "The text to put in its place"},
+                        "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)"}
+                    },
+                    "required": ["path", "old_string", "new_string"]
                 }
             }),
             json!({
@@ -199,6 +216,25 @@ the human reads the command and decides whether it runs.",
                 let content = std::fs::read_to_string(&path)
                     .map_err(|e| format!("could not read {}: {e}", path.display()))?;
                 Ok(truncate(content, MAX_READ))
+            }
+            "edit_file" => {
+                let relative = required(input, "path")?;
+                let path = self.resolve(relative)?;
+                let new = input
+                    .get("new_string")
+                    .and_then(Value::as_str)
+                    .ok_or("missing string field: new_string")?;
+                let replace_all = input
+                    .get("replace_all")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                crate::edit::edit_file(
+                    &path,
+                    relative,
+                    required(input, "old_string")?,
+                    new,
+                    replace_all,
+                )
             }
             "write_file" => {
                 let path = self.resolve(required(input, "path")?)?;
