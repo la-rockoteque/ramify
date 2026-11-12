@@ -238,10 +238,12 @@ Ram Code reads two files in Claude Code's format:
   than 64 characters, is changed so that it stays valid and unique.
 - A call waits at most `timeout_seconds`: 120 by default, 600 at most.
 - A result is cut at 40,000 characters. An image becomes `[image: <type>, <size> bytes]`.
+  Control characters show as text, such as `^[`, so a server cannot drive the terminal.
 - `PreToolUse` and `PostToolUse` hooks see MCP calls by their `mcp__…` name.
 
 A project server does not start until you approve it. Before the first task, Ram Code shows
-the server's command line and the names of its `env` keys. Answer with one key:
+the server's command line and its `env` as written, with each `${VAR}` visible. Answer with
+one key:
 
 - `a`: run it in the sandbox, with no network.
 - `n`: run it in the sandbox, with network. Ram Code suggests this for `npx` and `uvx`, which
@@ -251,9 +253,14 @@ the server's command line and the names of its `env` keys. Answer with one key:
 - `Esc`: do not start the task now.
 
 Ram Code stores the decision in `~/.config/ram-code/mcp-approvals.json`, by project and by a
-SHA-256 of the entry. The file holds no `env` value. A changed entry asks again. A headless run
+SHA-256 of the entry and of what it expands to. The file holds no `env` value. A changed
+entry, or a changed variable in it, asks again. A headless run
 (`--task`) never asks: it skips an unapproved server and prints one line. User servers need no
 approval and run in the sandbox with no network.
+
+A project's `.mcp.json` comes with the repository, so it may not read a secret variable: a
+provider key, a `key_env`, or a name that ends in `_KEY`, `_TOKEN` or `_SECRET`. Such an entry
+fails with a note. Put a server that needs a secret in `~/.config/ram-code/mcp.json`.
 
 `/mcp` lists the servers, with their source, approval and state. `/mcp approve <name> [a|n|u]`
 and `/mcp deny <name>` change a decision.
