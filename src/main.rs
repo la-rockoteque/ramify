@@ -1,5 +1,5 @@
 use crossterm::event::{self, Event, KeyEventKind};
-use ram_code::agent::{run_turn_hooked, AgentEvent, Llm};
+use ram_code::agent::{run_turn_with, AgentEvent, Llm};
 use ram_code::hooked::Hooked;
 use ram_code::providers::resolve_from_env;
 use ram_code::app::{App, Screen};
@@ -191,7 +191,13 @@ fn run_worker(
             }
         }
     }
-    let result = run_turn_hooked(llm.as_ref(), root, &previous, task, &hooks, &mut |event| {
+    // The task's MCP servers start here and stop when the task ends.
+    let mut servers = ram_code::mcp::Session::start(root, std::env::vars().collect());
+    for note in servers.notes() {
+        let _ = writeln!(out, "{}", json!({"type": "hook", "text": note}));
+    }
+    let _ = out.flush();
+    let result = run_turn_with(llm.as_ref(), root, &previous, task, &hooks, &servers, &mut |event| {
         let value = match event {
             AgentEvent::Text(text) => json!({"type": "text", "text": text}),
             AgentEvent::ToolCall { name, input } => {
@@ -205,6 +211,7 @@ fn run_worker(
         let _ = writeln!(out, "{value}");
         let _ = out.flush();
     });
+    servers.shutdown();
     match result {
         Ok((answer, new_history)) => {
             if let Ok(text) = serde_json::to_string(&new_history) {
@@ -263,5 +270,12 @@ fn run_headless_task(
     on_event: &mut dyn FnMut(AgentEvent),
     hooks: &Hooked,
 ) -> Result<String, String> {
-    run_turn_hooked(llm, root, &[], task, hooks, on_event).map(|(answer, _)| answer)
+    // A headless run never prompts: an unapproved project server is skipped with one line.
+    let mut servers = ram_code::mcp::Session::start(root, std::env::vars().collect());
+    for note in servers.notes() {
+        eprintln!("{note}");
+    }
+    let result = run_turn_with(llm, root, &[], task, hooks, &servers, on_event);
+    servers.shutdown();
+    result.map(|(answer, _)| answer)
 }

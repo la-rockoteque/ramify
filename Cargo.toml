@@ -30,3 +30,6 @@ tree-sitter-typescript = "0.23.2"
 tree-sitter-javascript = "0.25.0"
 tree-sitter-python = "0.25.0"
 tree-sitter-java = "0.23.5"
+rmcp = { version = "3.9.0", default-features = false, features = ["client", "transport-async-rw"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "process", "time", "io-util", "sync"] }
+sha2 = "0.11.1"

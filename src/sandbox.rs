@@ -40,11 +40,25 @@ impl Sandbox {
         home: Option<&Path>,
         command: &str,
     ) -> Option<Command> {
+        self.command_with_network(root, temp, home, command, false)
+    }
+
+    /// `command`, with IP network access when `network` is true. Every other rule stays,
+    /// Unix sockets included, so Docker and other daemons stay out of reach.
+    pub fn command_with_network(
+        &self,
+        root: &Path,
+        temp: &Path,
+        home: Option<&Path>,
+        command: &str,
+        network: bool,
+    ) -> Option<Command> {
         let secrets = secret_paths(home);
         match self {
             Sandbox::Seatbelt(program) => {
                 let mut cmd = Command::new(program);
-                cmd.arg("-p").arg(seatbelt_profile(root, temp, &secrets));
+                cmd.arg("-p")
+                    .arg(seatbelt_profile_with(root, temp, &secrets, network));
                 cmd.args(["sh", "-c", command]);
                 Some(cmd)
             }
@@ -56,7 +70,7 @@ impl Sandbox {
                 };
                 let (dirs, files) = linux_hidden(&secrets, uid, &exists);
                 let mut cmd = Command::new(program);
-                cmd.args(bwrap_args(root, temp, &dirs, &files, command));
+                cmd.args(bwrap_args_with(root, temp, &dirs, &files, command, network));
                 Some(cmd)
             }
             Sandbox::None => None,
@@ -145,6 +159,18 @@ pub fn bwrap_args(
     hidden_files: &[PathBuf],
     command: &str,
 ) -> Vec<std::ffi::OsString> {
+    bwrap_args_with(root, temp, hidden_dirs, hidden_files, command, false)
+}
+
+/// `bwrap_args`, sharing the host network when `network` is true.
+pub fn bwrap_args_with(
+    root: &Path,
+    temp: &Path,
+    hidden_dirs: &[PathBuf],
+    hidden_files: &[PathBuf],
+    command: &str,
+    network: bool,
+) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = Vec::new();
     let mut push = |items: &[&std::ffi::OsStr]| args.extend(items.iter().map(|i| i.to_os_string()));
     push(&["--ro-bind".as_ref(), "/".as_ref(), "/".as_ref()]);
@@ -157,8 +183,10 @@ pub fn bwrap_args(
     for file in hidden_files {
         push(&["--ro-bind".as_ref(), "/dev/null".as_ref(), file.as_os_str()]);
     }
+    if !network {
+        push(&["--unshare-net".as_ref()]);
+    }
     push(&[
-        "--unshare-net".as_ref(),
         "--unshare-pid".as_ref(),
         "--unshare-ipc".as_ref(),
         "--new-session".as_ref(),
@@ -185,6 +213,25 @@ pub fn secret_paths(home: Option<&Path>) -> Vec<PathBuf> {
 /// ioctl, so a command cannot type into the TUI. No way to start a program outside the sandbox
 /// through Launch Services, Apple events or launchd. Seatbelt applies the last matching rule.
 pub fn seatbelt_profile(root: &Path, temp: &Path, secrets: &[PathBuf]) -> String {
+    seatbelt_profile_with(root, temp, secrets, false)
+}
+
+/// The profile, with IP traffic and name lookups allowed when `network` is true. Unix sockets
+/// other than the name lookup daemon's stay denied.
+pub fn seatbelt_profile_with(
+    root: &Path,
+    temp: &Path,
+    secrets: &[PathBuf],
+    network: bool,
+) -> String {
+    let network = if network {
+        "(allow network-outbound (remote ip))\n\
+         (allow network-inbound (local ip))\n\
+         (allow network-bind (local ip))\n\
+         (allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n"
+    } else {
+        ""
+    };
     let hidden = if secrets.is_empty() {
         String::new()
     } else {
@@ -199,13 +246,22 @@ pub fn seatbelt_profile(root: &Path, temp: &Path, secrets: &[PathBuf]) -> String
 (allow default)
 (deny appleevent-send)
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
+(deny mach-lookup
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.secd")
+  (global-name "com.apple.security.agent")
+  (global-name "com.apple.security.agent.login")
+  (global-name "com.apple.security.keychain-circle-notification")
+  (global-name "com.apple.security.cloudkeychainproxy3"))
 (deny process-exec
   (literal "/usr/bin/open")
   (literal "/usr/bin/osascript")
   (literal "/usr/bin/osacompile")
   (literal "/bin/launchctl"))
 {hidden}(deny network*)
-(deny file-ioctl (regex #"^/dev/tty"))
+{network}(deny file-ioctl (regex #"^/dev/tty"))
 (deny file-write*)
 (allow file-write*
   (subpath "{root}")
@@ -255,7 +311,7 @@ fn has_userinfo(value: &str) -> bool {
 }
 
 /// True for a variable that holds a key, a token, a password, or a way to reach one.
-fn is_secret(name: &str, value: &str, key_envs: &[String]) -> bool {
+pub(crate) fn is_secret(name: &str, value: &str, key_envs: &[String]) -> bool {
     let upper = name.to_ascii_uppercase();
     upper.starts_with("ANTHROPIC_")
         || upper.starts_with("RAM_CODE_")
