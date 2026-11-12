@@ -596,3 +596,19 @@ fn shared_clang_cache_is_not_writable() {
     let temp = tmp.lines().nth(1).unwrap_or("").to_string();
     assert!(!cache.is_empty() && cache.starts_with(&temp), "module cache is not per task: {env} / {tmp}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn xcrun_cache_warning_gets_no_hint() {
+    let b = base("r6");
+    let tools = tools(&b, &b.join("wt"));
+    let out = run(
+        &tools,
+        "printf 'all:\\n\\t@echo made\\n' > \"$TMPDIR/Makefile\" && make -f \"$TMPDIR/Makefile\"",
+    );
+    assert!(ok(&out) && out.contains("made"), "{out}");
+    assert!(
+        !out.contains(ram_code::sandbox::DENIED_HINT),
+        "a successful build got the sandbox hint: {out}"
+    );
+}

@@ -327,7 +327,12 @@ the human reads the command and decides whether it runs.",
             // outside the sandbox, so a planted module there could change them.
             .env("CLANG_MODULE_CACHE_PATH", temp.join("clang-module-cache"));
         let mut output = run_with_timeout(cmd, timeout)?;
-        if output.contains("Operation not permitted") {
+        // `xcrun` cannot write its cache in the sandbox and says so on every call. That warning
+        // is expected, so it does not earn the hint.
+        let denied = output
+            .lines()
+            .any(|line| line.contains("Operation not permitted") && !line.contains("xcrun_db"));
+        if denied {
             if !output.ends_with('\n') {
                 output.push('\n');
             }
