@@ -20,6 +20,24 @@ pub fn statusline(args: &[String]) -> i32 {
         .or_else(|| value.get("cwd").and_then(Value::as_str))
         .unwrap_or(".")
         .to_string();
+    if let Some(text) = render(&session, &cwd, json_out, Mode::Statusline) {
+        println!("{text}");
+    }
+    0
+}
+
+/// `Statusline` probes each service over HTTP and caches the result. `Prompt` runs before every
+/// shell prompt, so it reads that cache instead, and adds the agent sessions of the worktree.
+#[derive(PartialEq, Clone, Copy)]
+pub(crate) enum Mode {
+    Statusline,
+    Prompt,
+}
+
+/// A health result older than this is not shown: the stack may have changed since.
+const HEALTH_TTL: u64 = 60;
+
+pub(crate) fn render(session: &str, cwd: &str, json_out: bool, mode: Mode) -> Option<String> {
     let state_root = std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into());
     let sessions = Path::new(&state_root).join("sessions");
     let pin = sessions.join(format!("{session}.root"));
@@ -42,22 +60,15 @@ pub fn statusline(args: &[String]) -> i32 {
             root = Some(PathBuf::from(text.trim()));
         }
     }
-    let Some(root) = root else {
-        return 0;
-    };
-    let Some(primary) = git(&["worktree", "list", "--porcelain"], &root)
+    let root = root?;
+    let primary = git(&["worktree", "list", "--porcelain"], &root)
         .ok()
         .and_then(|text| {
             text.lines()
                 .find_map(|line| line.strip_prefix("worktree "))
                 .map(PathBuf::from)
-        })
-    else {
-        return 0;
-    };
-    let Some(conf) = config_file(&root, &primary) else {
-        return 0;
-    };
+        })?;
+    let conf = config_file(&root, &primary)?;
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"], &root)
         .map(|text| text.trim().to_string())
         .unwrap_or_else(|_| "?".into());
@@ -94,14 +105,23 @@ pub fn statusline(args: &[String]) -> i32 {
     let mut total = 0;
     if services {
         stack = Some("stopped");
-        if env.is_file() {
-            let ports: Vec<u32> = env
-                .lines_ports();
-            total = ports.len();
-            answering = ports
-                .iter()
-                .filter(|port| crate::dash::http_status_path(**port, "/").is_some())
-                .count();
+        let cache = directory.join(format!("{worktree}.health"));
+        let measured = match mode {
+            Mode::Statusline if env.is_file() => {
+                let ports: Vec<u32> = env.lines_ports();
+                let answered = ports
+                    .iter()
+                    .filter(|port| crate::dash::http_status_path(**port, "/").is_some())
+                    .count();
+                let _ = std::fs::write(&cache, format!("{answered} {} {}\n", ports.len(), epoch()));
+                Some((answered, ports.len()))
+            }
+            Mode::Prompt if env.is_file() => cached_health(&cache),
+            _ => None,
+        };
+        if let Some((answered, ports)) = measured {
+            answering = answered;
+            total = ports;
             stack = Some(if total == 0 || answering == 0 {
                 "down"
             } else if answering == total {
@@ -165,9 +185,16 @@ pub fn statusline(args: &[String]) -> i32 {
             "ports": ports,
             "run": if runs.is_empty() { Value::Null } else { Value::String(runs) },
         });
-        let text = ascii_json(&crate::pyjson::to_string(&value));
-        println!("{text}");
-        return 0;
+        let mut value = value;
+        if mode == Mode::Prompt {
+            value["sessions"] = Value::Array(
+                agents(&state_root, &root)
+                    .into_iter()
+                    .map(|agent| json!({"name": agent.name, "agent": agent.agent, "state": agent.state, "since": agent.since}))
+                    .collect(),
+            );
+        }
+        return Some(ascii_json(&crate::pyjson::to_string(&value)));
     }
     let prefix = if name.is_empty() {
         String::new()
@@ -184,12 +211,109 @@ pub fn statusline(args: &[String]) -> i32 {
     } else {
         format!(" · {runs}")
     };
-    if root == primary {
-        println!("{icon} {prefix}{branch}{health}{flow_part}{run_part}");
+    let agents_part = match mode {
+        Mode::Prompt => agents_line(&agents(&state_root, &root)),
+        Mode::Statusline => String::new(),
+    };
+    Some(if root == primary {
+        format!("{icon} {prefix}{branch}{health}{flow_part}{run_part}{agents_part}")
     } else {
-        println!("{icon} {prefix}{worktree} ⎇ {branch}{health}{flow_part}{run_part}");
+        format!("{icon} {prefix}{worktree} ⎇ {branch}{health}{flow_part}{run_part}{agents_part}")
+    })
+}
+
+fn epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// `<answering> <total> <epoch>`, as `statusline` wrote it, while it is fresh.
+fn cached_health(cache: &Path) -> Option<(usize, usize)> {
+    let text = std::fs::read_to_string(cache).ok()?;
+    let mut fields = text.split_whitespace().map(|field| field.parse::<u64>().ok());
+    let (answering, total, at) = (fields.next()??, fields.next()??, fields.next()??);
+    (epoch().saturating_sub(at) <= HEALTH_TTL).then_some((answering as usize, total as usize))
+}
+
+/// A live agent session: its record, as the session hooks wrote it.
+pub(crate) struct Agent {
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
+    pub(crate) agent: String,
+    pub(crate) state: String,
+    pub(crate) since: u64,
+    pub(crate) root: PathBuf,
+    pub(crate) pid: i32,
+}
+
+/// Every session record in the state folder, live or not. A record that does not parse is skipped.
+pub(crate) fn records(state_root: &str) -> Vec<Agent> {
+    let folder = Path::new(state_root).join("sessions");
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let id = file.strip_suffix(".session")?.to_string();
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(entry.path()).ok()?).ok()?;
+            let name = std::fs::read_to_string(folder.join(format!("{id}.name")))
+                .ok()
+                .and_then(|text| text.lines().next().map(str::to_string))
+                .filter(|name| !name.is_empty());
+            Some(Agent {
+                id,
+                name,
+                agent: value.get("agent")?.as_str()?.to_string(),
+                state: value.get("state").and_then(Value::as_str).unwrap_or("idle").to_string(),
+                since: value.get("since").and_then(Value::as_u64).unwrap_or(0),
+                root: PathBuf::from(value.get("root")?.as_str()?),
+                pid: i32::try_from(value.get("pid")?.as_u64()?).ok()?,
+            })
+        })
+        .collect()
+}
+
+/// Whether the process runs. EPERM means it runs under another user.
+pub(crate) fn running(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
     }
-    0
+    // SAFETY: signal 0 checks that the process exists and sends nothing.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The live sessions of the worktree at `root`, oldest first.
+fn agents(state_root: &str, root: &Path) -> Vec<Agent> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut found: Vec<Agent> = records(state_root)
+        .into_iter()
+        .filter(|agent| agent.root.canonicalize().unwrap_or_else(|_| agent.root.clone()) == root)
+        .filter(|agent| running(agent.pid))
+        .collect();
+    found.sort_by(|a, b| a.since.cmp(&b.since).then_with(|| a.id.cmp(&b.id)));
+    found
+}
+
+/// ` · ✻ birch, ◇ ash ⏸`: Claude Code is ✻, Codex is ◇, and ⏸ follows an idle session.
+fn agents_line(agents: &[Agent]) -> String {
+    if agents.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = agents
+        .iter()
+        .map(|agent| {
+            let mark = if agent.agent == "codex" { "◇" } else { "✻" };
+            let label = agent.name.clone().unwrap_or_else(|| agent.agent.clone());
+            let idle = if agent.state == "idle" { " ⏸" } else { "" };
+            format!("{mark} {label}{idle}")
+        })
+        .collect();
+    format!(" · {}", parts.join(", "))
 }
 
 fn config_file(root: &Path, primary: &Path) -> Option<PathBuf> {
