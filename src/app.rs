@@ -138,8 +138,8 @@ pub struct App {
     /// `ram-<pid>`: the session id every hook of this Ram Code gets.
     session_id: String,
     session_started: bool,
-    /// The notes of SessionStart, for the transcript. It runs on a thread, so the slot fills
-    /// when it is done.
+    /// Lines for the transcript from work on other threads: the notes of SessionStart and the
+    /// listing of `/instructions`. The slot fills when that work is done.
     start_slot: Arc<Mutex<Vec<String>>>,
     /// Where SessionStart leaves the hook snapshot and its context for the tasks.
     start_dir: Option<PathBuf>,
@@ -1049,7 +1049,7 @@ impl App {
                 Role::Info,
                 "enter send · tab worktrees · i inspect · ↑/↓ scroll · ^C quit\n\
                  /up /down /step /status /workflow /new <slug> /refresh /worktrees\n\
-                 /provider [name] /model <id> /clear /quit",
+                 /provider [name] /model <id> /instructions /clear /quit",
             ),
             "/up" => self.run_action_inline(Action::Up),
             "/down" => self.run_action_inline(Action::Down),
@@ -1065,6 +1065,16 @@ impl App {
             }
             "/refresh" => self.load_async(),
             "/worktrees" => self.screen = Screen::Picker,
+            "/instructions" => {
+                // It runs `git` and reads files: off the interface thread, like SessionStart.
+                let (root, slot) = (self.hooks_cwd(), self.start_slot.clone());
+                std::thread::spawn(move || {
+                    let found = crate::instructions::load(&root, crate::instructions::home().as_deref());
+                    if let Ok(mut slot) = slot.lock() {
+                        slot.extend(found.listing().into_iter().chain(found.notes));
+                    }
+                });
+            }
             "/clear" => {
                 self.entries.clear();
                 self.history.clear();

@@ -1,0 +1,20 @@
+---
+workflow: feature
+lane: standard
+branch: feat/ram-instructions
+tags: []
+created: 2026-11-12
+steps:
+- {step: spec, date: '2026-11-12'}
+- {step: qa-plan, date: '2026-11-12'}
+- {step: build, date: '2026-11-12'}
+- {step: audit, date: '2026-11-12'}
+- {step: qa, date: '2026-11-12', note: 'Q19 waived: no provider'}
+- {step: review, date: '2026-11-12'}
+- {step: pr, date: '2026-11-12', note: '#60'}
+---
+
+# ram-instructions
+
+Ram Code reads `AGENTS.md` and `CLAUDE.md`, the user's and the project's, into its system prompt,
+as Codex and Claude Code do. The ramify repository gets an `AGENTS.md`. See [spec.md](spec.md).
