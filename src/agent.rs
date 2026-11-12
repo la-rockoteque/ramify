@@ -1,5 +1,5 @@
-use crate::hooked::{absorb, Hooked};
-use crate::hooks::Outcome;
+use crate::hooked::Hooked;
+use crate::hooks::{workflow_fields, Outcome};
 use crate::tools::Tools;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -278,6 +278,8 @@ pub fn run_turn_hooked(
 
         messages.push(json!({"role": "assistant", "content": assistant_blocks}));
         messages.push(json!({"role": "user", "content": tool_results}));
+        // The limit is on Stop blocks in a row: a turn with tool calls starts the count again.
+        stop_blocks = 0;
     }
 
     Err(format!("the task did not finish within {MAX_TURNS} turns"))
@@ -293,6 +295,7 @@ fn call_tool(
     on_event: &mut dyn FnMut(AgentEvent),
 ) -> String {
     let actions = hooks.actions(name, input);
+    let tool = json!(name);
     let mut before = hooks.fire(
         "PreToolUse",
         name,
@@ -300,45 +303,34 @@ fn call_tool(
     );
     for found in &actions {
         let action = found["action"].as_str().unwrap_or("");
-        absorb(
-            &mut before,
-            hooks.fire(
-                "PreWorkflow",
-                action,
-                json!({"action": action, "tool_name": name, "tool_input": input, "details": found["details"]}),
-            ),
-        );
+        before.absorb(hooks.fire("PreWorkflow", action, workflow_fields(found, &tool, input, None)));
     }
     notes(&before, on_event);
-    if let Some(reason) = before.stop {
-        *ended = Some(reason);
-    }
     if let Some(reason) = before.deny {
         return format!("blocked by a hook: {reason}");
+    }
+    // `continue: false` before the tool: the tool does not run, and the task ends.
+    if let Some(reason) = before.stop {
+        *ended = Some(reason.clone());
+        return format!("stopped by a hook: {reason}");
     }
     let mut result = match tools.call(name, input) {
         Ok(output) => output,
         Err(error) => format!("error: {error}"),
     };
+    let response = json!(result);
     let mut after = hooks.fire(
         "PostToolUse",
         name,
-        json!({"tool_name": name, "tool_input": input, "tool_response": result}),
+        json!({"tool_name": name, "tool_input": input, "tool_response": response}),
     );
-    let succeeded = result.strip_prefix("exit ").map(|rest| rest.starts_with("0\n") || rest == "0");
     for found in &actions {
         let action = found["action"].as_str().unwrap_or("");
-        absorb(
-            &mut after,
-            hooks.fire(
-                "PostWorkflow",
-                action,
-                json!({
-                    "action": action, "tool_name": name, "tool_input": input,
-                    "details": found["details"], "tool_response": result, "succeeded": succeeded,
-                }),
-            ),
-        );
+        after.absorb(hooks.fire(
+            "PostWorkflow",
+            action,
+            workflow_fields(found, &tool, input, Some(&response)),
+        ));
     }
     notes(&after, on_event);
     for context in after.contexts {

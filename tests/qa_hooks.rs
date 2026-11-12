@@ -3,7 +3,7 @@
 
 use ram_code::agent::{run_turn_hooked, AgentEvent, Llm};
 use ram_code::hooked::Hooked;
-use ram_code::hooks::{HookSet, Sources};
+use ram_code::hooks::{trust, HookSet, Sources};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -323,7 +323,9 @@ fn stop_blocks_at_most_three_times() {
 #[test]
 fn a_hook_past_its_timeout_is_killed() {
     let fixture = Fixture::new("timeout");
-    let hooks = json!([{"hooks": [{"type": "command", "command": fixture.script("slow", "sleep 30"), "timeout": 1}]}]);
+    let pid = fixture.base.join("child.pid");
+    let body = format!("sleep 30 & echo $! > '{}'; wait", pid.display());
+    let hooks = json!([{"hooks": [{"type": "command", "command": fixture.script("slow", &body), "timeout": 1}]}]);
     fixture.ram(json!({"PreToolUse": hooks}));
     let started = Instant::now();
     let (_, notes) = turn(
@@ -348,6 +350,12 @@ fn a_hook_past_its_timeout_is_killed() {
         1,
         "{notes:?}"
     );
+    let child = std::fs::read_to_string(&pid).unwrap();
+    assert!(!alive(child.trim()), "the hook's child outlives the timeout");
+}
+
+fn alive(pid: &str) -> bool {
+    Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().unwrap().success()
 }
 
 #[test]
@@ -440,6 +448,7 @@ fn every_source_runs_in_order() {
         &ramify.join("hooks/ram.json"),
         json!({"Stop": mark("ramify")}),
     );
+    trust(&fixture.home, &fixture.project, true).unwrap();
     let set = HookSet::load(&fixture.home, &fixture.project, Some(&ramify), Sources::All);
     let order: Vec<&str> = set
         .matching("Stop", "")
@@ -566,25 +575,42 @@ fn a_deny_wins_over_an_allow() {
 #[test]
 fn no_hooks_no_process() {
     let fixture = Fixture::new("none");
+    // An `sh` that logs each start: hooks run through `sh -c`.
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let starts = fixture.base.join("sh-starts");
+    std::fs::write(
+        bin.join("sh"),
+        format!("#!/bin/bash\necho x >> '{}'\nexec /bin/sh \"$@\"\n", starts.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bin.join("sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(fixture.project.join("a.txt"), "x").unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{path}", bin.display()));
     let hooks = fixture.hooked();
-    turn(
-        &fixture,
-        &hooks,
-        vec![tool("run_command", json!({"command": "true"}))],
-    );
+    turn(&fixture, &hooks, vec![tool("read_file", json!({"path": "a.txt"}))]);
+    // The probe works: with one hook, `sh` starts.
+    fixture.ram(json!({"Stop": group("", "true")}));
+    turn(&fixture, &fixture.hooked(), vec![text("ok")]);
+    std::env::set_var("PATH", path);
     assert_eq!(hooks.spawned.get(), 0);
+    let count = std::fs::read_to_string(&starts).unwrap_or_default().lines().count();
+    assert_eq!(count, 1, "only the turn with a hook starts a process");
 }
 
-/// The ramify CLI from this repository, built once.
+/// The ramify CLI from this repository. The hooks run it through `bin/ramify`, which prefers
+/// the release build: build that one, so that a stale build cannot answer.
 fn ramify_cli() -> PathBuf {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let status = Command::new("cargo")
-        .args(["build", "--quiet", "--manifest-path"])
+        .args(["build", "--release", "--quiet", "--manifest-path"])
         .arg(repo.join("cli/Cargo.toml"))
         .status()
         .unwrap();
     assert!(status.success(), "the ramify CLI did not build");
-    repo.join("cli/target/debug/ramify")
+    repo.join("cli/target/release/ramify")
 }
 
 /// A configured project on `feat/demo` with a work order whose steps before `pr` are missing.
@@ -815,4 +841,140 @@ fn an_old_ramify_plugin_gives_way_to_ram_codes_own_hooks() {
     let commands: Vec<&str> = set.matching("Stop", "").iter().map(|hook| hook.command.as_str()).collect();
     assert_eq!(commands, ["echo ram-hook"]);
     assert_eq!(set.matching("Stop", "")[0].plugin_root.as_deref(), Some(ramify.as_path()));
+}
+
+#[test]
+fn an_untrusted_project_runs_no_hook_of_its_own() {
+    let fixture = Fixture::new("untrusted");
+    fixture.ram(json!({"Stop": group("", "echo home")}));
+    fixture.settings(&fixture.project.join(".ram/settings.json"), json!({"Stop": group("", "echo ram")}));
+    fixture.settings(&fixture.project.join(".claude/settings.json"), json!({"Stop": group("", "echo claude")}));
+    let commands = |set: &HookSet| set.matching("Stop", "").iter().map(|hook| hook.command.clone()).collect::<Vec<_>>();
+    let set = HookSet::load(&fixture.home, &fixture.project, None, Sources::All);
+    assert_eq!(commands(&set), ["echo home"]);
+    assert_eq!(set.warnings.len(), 2, "{:?}", set.warnings);
+    assert!(set.warnings[0].contains("ramify hooks trust"), "{:?}", set.warnings);
+    trust(&fixture.home, &fixture.project, true).unwrap();
+    let set = HookSet::load(&fixture.home, &fixture.project, None, Sources::All);
+    assert_eq!(commands(&set), ["echo home", "echo ram", "echo claude"]);
+    assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+    trust(&fixture.home, &fixture.project, false).unwrap();
+    let set = HookSet::load(&fixture.home, &fixture.project, None, Sources::All);
+    assert_eq!(commands(&set), ["echo home"]);
+}
+
+#[test]
+fn a_hook_that_leaves_a_child_answers_in_time() {
+    let fixture = Fixture::new("child");
+    let body = format!("sleep 6 &\n{DENY}");
+    let hooks = json!([{"hooks": [{"type": "command", "command": fixture.script("pre", &body), "timeout": 5}]}]);
+    fixture.ram(json!({"PreToolUse": hooks}));
+    let started = Instant::now();
+    let (requests, _) = turn(&fixture, &fixture.hooked(), vec![tool("run_command", json!({"command": "touch made"}))]);
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert_eq!(tool_result(&requests), "blocked by a hook: not now");
+}
+
+#[test]
+fn a_hook_that_does_not_read_a_large_input_times_out() {
+    let fixture = Fixture::new("large");
+    std::fs::write(fixture.project.join("big.txt"), "x".repeat(200_000)).unwrap();
+    let slow = json!({"type": "command", "command": "sleep 6", "timeout": 1});
+    let fast = json!({"type": "command", "command": fixture.script("fast", "echo seen"), "timeout": 1});
+    fixture.ram(json!({"PostToolUse": [{"hooks": [slow, fast]}]}));
+    let started = Instant::now();
+    let (_, notes) = turn(&fixture, &fixture.hooked(), vec![tool("read_file", json!({"path": "big.txt"}))]);
+    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    assert_eq!(notes.iter().filter(|note| note.contains("timed out")).count(), 1, "{notes:?}");
+    assert_eq!(fixture.logged("fast").len(), 1, "the other hook did not run");
+}
+
+#[test]
+fn pre_tool_continue_false_stops_before_the_tool() {
+    let fixture = Fixture::new("pre-continue");
+    let halt = r#"echo '{"continue":false,"stopReason":"halt"}'"#;
+    fixture.ram(json!({"PreToolUse": group("", &fixture.script("pre", halt))}));
+    let (requests, notes) = turn(
+        &fixture,
+        &fixture.hooked(),
+        vec![tool("run_command", json!({"command": "touch made"})), text("never")],
+    );
+    assert!(!fixture.project.join("made").exists(), "the command ran");
+    assert_eq!(requests.len(), 1, "the task went on");
+    assert!(notes.iter().any(|note| note.contains("the task was stopped: halt")), "{notes:?}");
+}
+
+#[test]
+fn a_matcher_on_an_event_with_no_subject_is_ignored() {
+    let fixture = Fixture::new("stop-matcher");
+    fixture.ram(json!({"Stop": group("anything", &fixture.script("stop", ""))}));
+    turn(&fixture, &fixture.hooked(), vec![text("ok")]);
+    assert_eq!(fixture.logged("stop").len(), 1);
+}
+
+#[test]
+fn stop_blocks_count_in_a_row() {
+    let fixture = Fixture::new("stop-row");
+    let block = r#"echo '{"decision":"block","reason":"go on"}'"#;
+    fixture.ram(json!({"Stop": group("", &fixture.script("stop", block))}));
+    let responses = vec![
+        text("a"),
+        tool("run_command", json!({"command": "true"})),
+        text("b"),
+        text("c"),
+        text("d"),
+        text("e"),
+    ];
+    let (requests, _) = turn(&fixture, &fixture.hooked(), responses);
+    // a: block 1; the tool call starts the count again; b, c, d: blocks 1 to 3; e ends.
+    assert_eq!(requests.len(), 6);
+}
+
+#[test]
+fn a_task_waits_for_the_snapshot_of_session_start() {
+    let fixture = Fixture::new("snapshot");
+    fixture.ram(json!({"Stop": group("", "echo at-start")}));
+    let start = fixture.hooked();
+    // The model writes a hook file after the session starts: it must not run in this session.
+    fixture.ram(json!({"Stop": group("", "echo written-later")}));
+    let dir = fixture.base.join("start");
+    let writer = {
+        let dir = dir.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            start.leave_start(&dir, &["the context".to_string()]).unwrap();
+        })
+    };
+    let task = Hooked::for_task_from(&fixture.project, "ram-test", Some(&dir), &fixture.home);
+    writer.join().unwrap();
+    let commands: Vec<_> = task.set.matching("Stop", "").iter().map(|hook| hook.command.clone()).collect();
+    assert_eq!(commands, ["echo at-start"]);
+    assert_eq!(std::fs::read_to_string(dir.join("context.txt")).unwrap(), "the context");
+}
+
+#[test]
+fn a_plugin_installed_for_another_project_is_left_out() {
+    let fixture = Fixture::new("plugin-scope");
+    let root = plugin(&fixture, "p", true, json!({"Stop": group("", "echo plugin")}));
+    let installed_path = fixture.home.join(".claude/plugins/installed_plugins.json");
+    let install = |project: &Path| {
+        let entry = json!([{"scope": "project", "projectPath": project, "installPath": root}]);
+        std::fs::write(&installed_path, json!({"version": 2, "plugins": {"p@m": entry}}).to_string()).unwrap();
+        HookSet::load(&fixture.home, &fixture.project, None, Sources::All).matching("Stop", "").len()
+    };
+    assert_eq!(install(Path::new("/elsewhere")), 0);
+    assert_eq!(install(&fixture.project), 1);
+}
+
+#[test]
+fn a_task_that_ends_without_stop_leaves_the_record_idle() {
+    let fixture = Fixture::new("idle");
+    let sessions = fixture.base.join("state/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let record = sessions.join("ram-9.session");
+    std::fs::write(&record, r#"{"agent":"ram","state":"working","since":1,"pid":9}"#).unwrap();
+    ram_code::hooked::idle_record(&fixture.base.join("state"), "ram-9");
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!((value["state"].as_str(), value["agent"].as_str()), (Some("idle"), Some("ram")));
+    assert!(value["since"].as_u64().unwrap() > 1);
 }

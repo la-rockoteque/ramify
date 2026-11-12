@@ -207,10 +207,8 @@ reading and updating a work item, opening and merging a pull request, and the re
       an unknown event, so the workflow hooks live there.
     - It prints the merged decision in Claude Code's format.
     - A bridge with no workflow hook configured exits at once, without running the classifier.
-23. `ramify hooks run <Event>` is the one hook runner. It reads the event JSON on stdin, loads the
-    sources, runs the matching hooks and prints the merged decision. Ram Code and the bridge
-    both use it, so the two agree. Ram Code runs its core events (5) in process, with the same
-    code.
+23. Ram Code and the bridge share one hook engine, `cli/src/hooks.rs`, so the two agree. The
+    review removed `ramify hooks run <Event>`: nothing called it (see the review amendment).
 
 ### Acceptance criteria
 
@@ -231,8 +229,7 @@ reading and updating a work item, opening and merging a pull request, and the re
   bridge runs the classifier.
 - AC25: Given a `read_file` of `.ramify/work/x/spec.md`, then the action is `workitem.read`
   with `work_item` set to that path.
-- AC26: The README documents the actions, their details, `ramify classify`, `ramify hooks run`
-  and the bridge.
+- AC26: The README documents the actions, their details, `ramify classify` and the bridge.
 
 ### Out of scope
 
@@ -244,6 +241,37 @@ reading and updating a work item, opening and merging a pull request, and the re
 
 Still standard. The bridge adds hooks to the Claude Code and Codex manifests. Their write set
 grows by `.claude-plugin/plugin.json`, `hooks/codex.json` and `cli/**`.
+
+## Amendment: review (2026-11-12)
+
+The review found gaps in the engine and a security risk. The user chose a trust list and a
+snapshot of the hook files.
+
+24. A project's own hook files (1.2 and 1.4) run only when `~/.ram/trusted.json` lists the
+    project. `ramify hooks trust [dir]` adds it, and `ramify hooks untrust [dir]` takes it out.
+    An untrusted project with hook files gives one warning. The bridge obeys the same list.
+25. Ram Code reads the sources once per session, at SessionStart and on `/clear`, and its tasks
+    use that snapshot. The bridge keeps a snapshot per Claude Code or Codex session:
+    `ramify hooks snapshot` writes it at SessionStart, and SessionEnd removes it. A hook file
+    that the model writes later runs in the next session.
+26. The first task waits for SessionStart at most 10 s, then gets its context.
+27. Each hook runs in its own process group. Its timeout counts from its start. A timeout kills
+    the group. The input goes to stdin on a thread. A hook that exits and leaves a process
+    running is not waited for.
+28. `continue: false` on PreToolUse or PreWorkflow stops the tool before it runs.
+29. Events with no subject (UserPromptSubmit, Stop, SessionEnd) ignore matchers.
+30. The 3 Stop blocks of 8 count in a row: a turn with a tool call starts the count again.
+31. `details` names the base of a new PR `base`, not `branch`. `succeeded` is null for a tool
+    with no exit code.
+32. The bridge caps each hook at 25 s, below its own 30 s timeout.
+33. A task that ends with no Stop (an error, the turn limit, a cancel) sets the record to `idle`.
+
+- AC27: Given an untrusted project with hooks in `.ram` and `.claude`, then none of them runs,
+  and one warning names `ramify hooks trust`. After `trust`, they run.
+- AC28: Given a hook that starts `sleep 30` in the background and times out, then the `sleep`
+  is killed.
+- AC29: Given a hook file written after SessionStart, then a task of that session does not run
+  it, in Ram Code and in the bridge.
 
 ## Out of scope
 

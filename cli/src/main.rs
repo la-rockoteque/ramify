@@ -52,7 +52,7 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ("ticket", "ticket start | sync | watch", "assign the story, synchronize its Jira status, or resume automatic synchronization"),
     ("statusline", "statusline [--json]", "status line for Claude Code, from its JSON on stdin"),
     ("classify", "classify", "the workflow actions of a tool call: reads {tool_name, tool_input, cwd} on stdin, prints a JSON array"),
-    ("hooks", "hooks run <Event> | hooks list | hooks bridge pre|post", "run the configured hooks of an event, list every hook the sources hold, or run the PreWorkflow/PostWorkflow bridge for Claude Code and Codex"),
+    ("hooks", "hooks list | trust [dir] | untrust [dir] | snapshot | bridge pre|post", "list every hook the sources hold, trust or untrust the hook files of a project, keep the bridge's hook files at session start, or run the PreWorkflow/PostWorkflow bridge for Claude Code and Codex"),
     ("prompt", "prompt [--json | install [--force]]", "the status line and the agent sessions of the current directory, for a zsh prompt; install links the oh-my-zsh plugin"),
     ("app", "app", "open the desktop dashboard"),
     ("write-set", "write-set <file> | --self-test", "check a branch's diff against the write set its QA plan declared"),

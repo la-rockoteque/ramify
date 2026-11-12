@@ -225,7 +225,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |
 | `shared-down` | Stop the shared service instances |
 | `classify` | The workflow actions of a tool call, from JSON on stdin |
-| `hooks run <Event> \| list \| bridge pre\|post` | Run the hooks of one event, list every hook, or run the workflow bridge for Claude Code and Codex |
+| `hooks list \| trust [dir] \| untrust [dir] \| snapshot \| bridge pre\|post` | List every hook, trust or untrust the hook files of a project, keep the bridge's hook files at session start, or run the workflow bridge for Claude Code and Codex |
 | `statusline [--json]` | A status line segment: the session's worktree and branch |
 | `prompt [--json \| install [--force]]` | The status line of the current directory, with the agent sessions that work in it, for a zsh prompt. `install` links the oh-my-zsh plugin |
 | `write-set <file>` | Check the branch's diff against allowed and immutable path globs |
@@ -749,6 +749,18 @@ command that two sources register runs once.
 `<project>` is the primary checkout. `RAMIFY_HOOKS_HOME` replaces `~` for these files.
 `ramify hooks list` prints every hook the sources hold for the current directory.
 
+> **Warning:** a hook is a shell command. Trust a project only when you trust everyone who can
+> write to it, the model included.
+
+The project's own files (2 and 4) run only when the project is trusted. `ramify hooks trust`
+adds the project of the current directory to `~/.ram/trusted.json`, and `ramify hooks untrust`
+takes it out. An untrusted project with hook files gives one transcript line. A plugin installed
+for another project is not read.
+
+Ram Code reads the sources once, when the session starts or on `/clear`. A hook file that the
+model writes later runs in the next session, not in this one. The first task waits for
+SessionStart at most 10 seconds, and gets its context.
+
 | Event | When | Fields | Matcher tested against |
 |---|---|---|---|
 | SessionStart | Ram Code starts, and on `/clear` | `source` | `source` |
@@ -774,14 +786,17 @@ The decisions are Claude Code's:
   - `decision: "block"` with a `reason`:
     - On UserPromptSubmit, the message is not sent.
     - On PostToolUse, the reason joins the tool result.
-    - On Stop, the model takes another turn, at most 3 times in a row.
-  - `continue: false` ends the task.
+    - On Stop, the model takes another turn, at most 3 times in a row. A turn with a tool call
+      starts the count again.
+  - `continue: false` ends the task. On PreToolUse and PreWorkflow, the tool does not run.
   - `systemMessage` shows in the transcript.
 - Exit 2 blocks, with stderr as the reason.
 - Any other exit code shows one transcript line, and the turn goes on.
 
-The hooks of an event run in parallel. A deny or a block wins over an allow. A hook past its
-`timeout` is killed.
+The hooks of an event run in parallel. A deny or a block wins over an allow. Each `timeout`
+counts from the start of its hook. A hook past its `timeout` is killed, with every process it
+started. A hook that exits and leaves a process running is not waited for. UserPromptSubmit,
+Stop and SessionEnd have no subject, so their matchers are ignored, as in Claude Code.
 
 #### Workflow events
 
@@ -799,15 +814,19 @@ The matcher is tested against the action:
 | `test.run`, `build.run` | `cargo`, `npm`, `pnpm`, `yarn`, `go`, `dotnet` test and build; `pytest` |
 | `stack.up`, `stack.down` | `ramify up`, `ramify down` |
 
-`details` holds what the command says: `step`, `pr`, `branch`, `draft` and `work_item`.
+`details` holds what the command says: `step`, `pr`, `branch` (the branch created or pushed),
+`base` (the base of a new PR), `draft` and `work_item`. The classifier reads through `cd`,
+`env`, `sudo`, `xargs`, `bash -c` and `bash -lc`, and past the global flags of `git` and `gh`.
+`succeeded` is true when the command exited 0. It is null for a tool with no exit code.
 `ramify classify` prints the actions of a tool call: it reads `{tool_name, tool_input, cwd}` on
-stdin. `ramify hooks run <Event>` runs the hooks of one event from stdin, and prints the
-decision in Claude Code's format.
+stdin.
 
 Claude Code and Codex have no workflow events. The bridge hook (`ramify-hook workflow-pre` and
-`workflow-post`) gives them PreWorkflow and PostWorkflow from `~/.ram` and `.ram`: Claude Code's
-own settings cannot hold an event it does not know. For them, `succeeded` is null, because
-their Bash response has no exit code.
+`workflow-post`) gives them PreWorkflow and PostWorkflow from `~/.ram`, and from `.ram` in a
+trusted project: Claude Code's own settings cannot hold an event it does not know. The bridge
+reads these files as they were at SessionStart (`ramify hooks snapshot`). It has 30 seconds, so
+each hook it runs gets 25 seconds at most. For Claude Code and Codex, `succeeded` is null,
+because their Bash response has no exit code.
 
 #### Commands that run without a prompt
 

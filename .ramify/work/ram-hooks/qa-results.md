@@ -37,12 +37,26 @@ The build cases ran with `cargo test` at commit 114b726: `tests/qa_hooks.rs` 27 
 | Q30 | pass | `post_workflow_gets_details_and_output` |
 | Q31 | pass | `bridge_denies_for_claude_code` |
 | Q32 | pass | `no_workflow_hooks_no_classifier` |
-| Q33 | pass | audit: the README has the actions, the details, `ramify classify`, `ramify hooks run` and the bridge |
+| Q33 | pass | audit: the README has the actions, the details, `ramify classify` and the bridge |
 | Q34 | waived | The user has no model provider set up for Ram Code and said to assume it works. PR #52 stayed open after the merge request. Q29 and Q31 cover the deny in Ram Code and in the bridge. |
+| Q35 | pass | `an_untrusted_project_runs_no_hook_of_its_own`, `bridge_runs_project_hooks_only_when_trusted` |
+| Q36 | pass | `a_task_waits_for_the_snapshot_of_session_start`, `bridge_reads_the_hooks_of_session_start` |
+| Q37 | pass | `a_hook_past_its_timeout_is_killed` |
+| Q38 | pass | `a_hook_that_leaves_a_child_answers_in_time` |
+| Q39 | pass | `a_hook_that_does_not_read_a_large_input_times_out` |
+| Q40 | pass | `pre_tool_continue_false_stops_before_the_tool` |
+| Q41 | pass | `a_matcher_on_an_event_with_no_subject_is_ignored` |
+| Q42 | pass | `stop_blocks_count_in_a_row` |
+| Q43 | pass | `a_plugin_installed_for_another_project_is_left_out` |
+| Q44 | pass | `a_task_that_ends_without_stop_leaves_the_record_idle` |
+| Q45 | pass | `classify_each_action`, `classify_pr_details` |
+
+Q35 to Q45 come from the review. After the review fixes, `tests/qa_hooks.rs` has 36 tests and
+`cli/tests/hooks.rs` has 8. All pass.
 
 Fixed during QA: the installed ramify 0.10.2 plugin has no `hooks/ram.json`. Ram Code loaded its
 Claude Code hooks and skipped the branch's `hooks/ram.json`. Commit 114b726 fixes it, with the
 test `an_old_ramify_plugin_gives_way_to_ram_codes_own_hooks`.
 
-**Yield:** 34 cases. 32 passed, 0 failed, 1 fixed during QA. The user waived Q34 and the
+**Yield:** 45 cases. 43 passed, 0 failed, 1 fixed during QA. The user waived Q34 and the
 transcript half of Q22.

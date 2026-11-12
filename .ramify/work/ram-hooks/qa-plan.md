@@ -41,8 +41,24 @@ The ramify cases (AC15, AC16) run the real `hooks/ramify-hook` on a fixture repo
 | Q30 | AC22 | high | `post_workflow_gets_details_and_output`: `ramify step done build` through `run_command`; the hook log has `details.step`, `succeeded` and the output | build |
 | Q31 | AC23 | high | `bridge_denies_for_claude_code` in `cli/tests/hooks.rs`: `hooks/ramify-hook workflow-pre` with Claude Code's PreToolUse JSON for `gh pr create`, and a `pr.open` deny in `.ram/settings.json`, prints a PreToolUse deny | build |
 | Q32 | AC24 | medium | `no_workflow_hooks_no_classifier`: in Ram Code and in the bridge, with no PreWorkflow or PostWorkflow hook, `ramify classify` never runs (a fake `ramify` logs each call) | build |
-| Q33 | AC26 | low | The README documents the actions, the details, `ramify classify`, `ramify hooks run` and the bridge | audit |
+| Q33 | AC26 | low | The README documents the actions, the details, `ramify classify` and the bridge | audit |
 | Q34 | AC21 | medium | Live: a PreWorkflow hook on `pr.merge` in `~/.ram/settings.json` that denies. Ask Ram Code to merge a PR: the transcript shows the deny. Ask a branch Claude Code session (`--plugin-dir`) to do the same: Claude Code shows the same deny. | qa |
+
+Cases added at the review, one per finding that a test can catch:
+
+| Case | AC | Risk | Check | Settled by |
+|---|---|---|---|---|
+| Q35 | AC27 | high | `an_untrusted_project_runs_no_hook_of_its_own`; `bridge_runs_project_hooks_only_when_trusted` | build |
+| Q36 | AC29 | high | `a_task_waits_for_the_snapshot_of_session_start`; `bridge_reads_the_hooks_of_session_start` | build |
+| Q37 | AC28 | high | `a_hook_past_its_timeout_is_killed` also checks that the hook's child is dead | build |
+| Q38 | AC9 | high | `a_hook_that_leaves_a_child_answers_in_time` | build |
+| Q39 | AC9 | high | `a_hook_that_does_not_read_a_large_input_times_out` | build |
+| Q40 | AC1 | medium | `pre_tool_continue_false_stops_before_the_tool` | build |
+| Q41 | AC3 | low | `a_matcher_on_an_event_with_no_subject_is_ignored` | build |
+| Q42 | AC8 | medium | `stop_blocks_count_in_a_row` | build |
+| Q43 | AC12 | low | `a_plugin_installed_for_another_project_is_left_out` | build |
+| Q44 | AC16 | medium | `a_task_that_ends_without_stop_leaves_the_record_idle` | build |
+| Q45 | AC18, AC20 | high | new rows in `classify_each_action` and `classify_pr_details` | build |
 
 ## Write set
 

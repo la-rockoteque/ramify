@@ -147,10 +147,11 @@ fn run_worker(
     let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {}", config.base_url)}));
     let _ = out.flush();
     let llm = AnthropicLlm::new(config);
-    // The interface owns the session: it passes its id, and what SessionStart said for the
-    // first task.
+    // The interface owns the session: it passes its id, and the folder where SessionStart
+    // leaves the hook snapshot and, for the first task, its context.
     let session = std::env::var("RAM_CODE_SESSION").unwrap_or_else(|_| format!("ram-{}", std::process::id()));
-    let mut hooks = Hooked::load(root, &session);
+    let start = std::env::var_os("RAM_CODE_START").map(PathBuf::from);
+    let mut hooks = Hooked::for_task(root, &session, start.as_deref());
     if let Some(path) = context {
         if let Ok(text) = std::fs::read_to_string(path) {
             if !text.trim().is_empty() {

@@ -30,7 +30,7 @@ Base: `feat/zsh-prompt` (#52). This branch is stacked on it. The tests are `test
 | AC23 | met | `ramify-hook workflow-pre` calls `ramify hooks bridge pre`. Test `bridge_denies_for_claude_code` runs the hook script with Claude Code's input. A live Claude Code session is QA case Q34. |
 | AC24 | met | Ram Code: `Hooked::actions` returns before `ramify classify` without a workflow hook (test `no_workflow_hooks_no_classifier`, with a fake classifier that logs). Bridge: `bridge` returns before `workflow()` when `!set.has(event)` (read in the diff; test `bridge_without_workflow_hooks_says_nothing`). |
 | AC25 | met | `file_action` uses the repo's `work_dir` too. Test `classify_a_work_item_read`. |
-| AC26 | met | README: "Workflow events", the command table, `ramify classify`, `ramify hooks run` and the bridge. |
+| AC26 | met | README: "Workflow events", the command table, `ramify classify` and the bridge. The review found that spec 23 was not met: nothing called `ramify hooks run`. The review removed it. |
 
 Also covered: `continue: false` (`continue_false_ends_the_task`) and `systemMessage`
 (`system_message_shows_in_the_transcript`).

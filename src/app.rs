@@ -88,9 +88,6 @@ impl Drop for Loader {
     }
 }
 
-/// SessionStart's contexts for the model and notes for the transcript.
-type StartOutcome = (Vec<String>, Vec<String>);
-
 pub struct App {
     pub runner: Arc<dyn Runner>,
     pub root: PathBuf,
@@ -125,9 +122,14 @@ pub struct App {
     /// `ram-<pid>`: the session id every hook of this Ram Code gets.
     session_id: String,
     session_started: bool,
-    /// What SessionStart said: its context goes with the next task, its notes to the
-    /// transcript. It runs on a thread, so the slot fills when it is done.
-    start_slot: Arc<Mutex<Option<StartOutcome>>>,
+    /// The notes of SessionStart, for the transcript. It runs on a thread, so the slot fills
+    /// when it is done.
+    start_slot: Arc<Mutex<Vec<String>>>,
+    /// Where SessionStart leaves the hook snapshot and its context for the tasks.
+    start_dir: Option<PathBuf>,
+    start_seq: usize,
+    /// The next task is the first since SessionStart: it gets the context.
+    context_pending: bool,
     /// When `ramify statusline` last refreshed the health cache, and for which worktree.
     health_root: Option<PathBuf>,
     health_at: Option<Instant>,
@@ -165,7 +167,10 @@ impl App {
             health_busy: Arc::new(AtomicBool::new(false)),
             session_id: format!("ram-{}", std::process::id()),
             session_started: false,
-            start_slot: Arc::new(Mutex::new(None)),
+            start_slot: Arc::new(Mutex::new(Vec::new())),
+            start_dir: None,
+            start_seq: 0,
+            context_pending: false,
             health_root: None,
             health_at: None,
         }
@@ -447,8 +452,11 @@ impl App {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file));
-        if let Some(context) = self.take_start_context(&directory) {
-            command.arg("--context").arg(context);
+        if let Some(dir) = &self.start_dir {
+            command.env("RAM_CODE_START", dir);
+            if std::mem::take(&mut self.context_pending) {
+                command.arg("--context").arg(dir.join(crate::hooked::CONTEXT));
+            }
         }
         let child = command.spawn();
         match child {
@@ -472,6 +480,14 @@ impl App {
 
     pub fn poll_events(&mut self) {
         self.poll_loader();
+        let notes = self
+            .start_slot
+            .lock()
+            .map(|mut slot| std::mem::take(&mut *slot))
+            .unwrap_or_default();
+        for note in notes {
+            self.push(Role::Info, note);
+        }
 
         let (mut parsed, mut saw_finished) = self.read_worker_events();
         let exit_status = self
@@ -632,6 +648,14 @@ impl App {
     fn task_ended(&mut self) {
         // The task may have changed the branch or the stack: read the line again.
         self.status_at = None;
+        self.mark_idle();
+    }
+
+    /// A task that ends on an error, a cancel or the turn limit fires no Stop, so ramify's hook
+    /// leaves the record `working`. The task is over: the record says `idle`.
+    fn mark_idle(&self) {
+        let state = std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into());
+        crate::hooked::idle_record(std::path::Path::new(&state), &self.session_id);
     }
 
     fn hooks_cwd(&self) -> PathBuf {
@@ -641,9 +665,18 @@ impl App {
     }
 
     /// Fires SessionStart on a thread: Ram Code starts, or `/clear` starts afresh. The
-    /// SessionStart hooks of ramify write this session's record.
+    /// SessionStart hooks of ramify write this session's record. The thread leaves the hook
+    /// snapshot and the context in a new start folder; each task waits for them there.
     pub fn start_session(&mut self, source: &str) {
         self.session_started = true;
+        self.context_pending = true;
+        if let Some(old) = self.start_dir.take() {
+            let _ = std::fs::remove_dir_all(old);
+        }
+        self.start_seq += 1;
+        let dir = std::env::temp_dir().join(format!("ram-code-{}-{}", self.session_id, self.start_seq));
+        let _ = std::fs::remove_dir_all(&dir);
+        self.start_dir = Some(dir.clone());
         let (cwd, session, slot, source) = (
             self.hooks_cwd(),
             self.session_id.clone(),
@@ -654,8 +687,11 @@ impl App {
             let hooks = Hooked::load(&cwd, &session);
             let mut outcome = hooks.fire("SessionStart", &source, serde_json::json!({"source": source}));
             outcome.notes.extend(hooks.set.warnings.iter().cloned());
+            if let Err(error) = hooks.leave_start(&dir, &outcome.contexts) {
+                outcome.notes.push(format!("hooks: could not write {}: {error}", dir.display()));
+            }
             if let Ok(mut slot) = slot.lock() {
-                *slot = Some((outcome.contexts, outcome.notes));
+                slot.extend(outcome.notes);
             }
         });
     }
@@ -665,28 +701,17 @@ impl App {
         if !std::mem::take(&mut self.session_started) {
             return;
         }
-        let (cwd, session) = (self.hooks_cwd(), self.session_id.clone());
+        let (cwd, session, dir) = (self.hooks_cwd(), self.session_id.clone(), self.start_dir.take());
         let (done, wait) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let hooks = Hooked::load(&cwd, &session);
+            let hooks = Hooked::for_task(&cwd, &session, dir.as_deref());
             let _ = hooks.fire("SessionEnd", "", serde_json::json!({"reason": "exit"}));
+            if let Some(dir) = dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             let _ = done.send(());
         });
         let _ = wait.recv_timeout(Duration::from_secs(5));
-    }
-
-    /// The SessionStart context for the next task, once, as a file the worker reads.
-    fn take_start_context(&mut self, directory: &std::path::Path) -> Option<PathBuf> {
-        let (contexts, notes) = self.start_slot.lock().ok()?.take()?;
-        for note in notes {
-            self.push(Role::Info, note);
-        }
-        if contexts.is_empty() {
-            return None;
-        }
-        let path = directory.join("context.txt");
-        std::fs::write(&path, contexts.join("\n\n")).ok()?;
-        Some(path)
     }
 
     /// `ramify prompt` takes tens of milliseconds, so it runs off the drawing thread, one run at

@@ -75,8 +75,8 @@ fn work_dir(root: &Path) -> Option<String> {
     value.get("work_dir")?.as_str().map(str::to_string)
 }
 
-/// Each command of a shell line, read through `cd DIR &&`, `env X=Y`, `bash -c "…"` and a full
-/// path to the program.
+/// Each command of a shell line, read through `cd DIR &&`, `env X=Y`, `sudo`, `xargs`,
+/// `bash -c "…"` and a full path to the program.
 fn commands(line: &str) -> Vec<Value> {
     let Ok(tokens) = split_shell(line) else {
         return Vec::new();
@@ -84,23 +84,24 @@ fn commands(line: &str) -> Vec<Value> {
     let mut actions = Vec::new();
     for group in shell_groups(&tokens) {
         let mut words: Vec<String> = group;
-        loop {
-            match words.first().map(String::as_str) {
-                Some("env") => {
-                    words.remove(0);
-                    while words.first().is_some_and(|word| word.contains('=') || word.starts_with('-')) {
-                        words.remove(0);
+        while let Some(raw) = words.first().cloned() {
+            match program(&raw) {
+                // A wrapper: skip it and its flags, then read the command it runs.
+                "env" => drop_wrapper(&mut words, &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]),
+                "sudo" => drop_wrapper(&mut words, &["-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"]),
+                "xargs" => drop_wrapper(&mut words, &["-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a"]),
+                "command" | "exec" | "time" | "nohup" | "nice" => drop_wrapper(&mut words, &["-n"]),
+                "bash" | "sh" | "zsh" => {
+                    // `bash -c`, `bash -lc`, `bash -l -c`: the word after the flags is the line.
+                    let flags: Vec<&String> = words[1..].iter().take_while(|word| word.starts_with('-')).collect();
+                    let runs = flags.iter().any(|flag| !flag.starts_with("--") && flag.contains('c'));
+                    if runs {
+                        let inner = words.get(1 + flags.len()).cloned().unwrap_or_default();
+                        actions.extend(commands(&inner));
                     }
-                }
-                Some(word) if word.contains('=') && !word.starts_with('-') => {
-                    words.remove(0);
-                }
-                Some("bash" | "sh" | "zsh") if words.get(1).map(String::as_str) == Some("-c") => {
-                    let inner = words.get(2).cloned().unwrap_or_default();
-                    actions.extend(commands(&inner));
                     words.clear();
                 }
-                Some("command" | "exec" | "time" | "nohup") => {
+                _ if raw.contains('=') && !raw.starts_with('-') => {
                     words.remove(0);
                 }
                 _ => break,
@@ -113,13 +114,51 @@ fn commands(line: &str) -> Vec<Value> {
     actions
 }
 
+/// Removes a wrapper program, its flags (with the value of each flag in `valued`) and the
+/// `NAME=value` words after it.
+fn drop_wrapper(words: &mut Vec<String>, valued: &[&str]) {
+    let mut index = skip_flags(words, 1, valued);
+    while words.get(index).is_some_and(|word| word.contains('=') && !word.starts_with('-')) {
+        index += 1;
+    }
+    words.drain(..index.min(words.len()));
+}
+
+/// The index of the first word from `start` on that is not a flag. The flags in `valued` take
+/// the next word as their value; `--flag=value` is one word.
+fn skip_flags(words: &[String], start: usize, valued: &[&str]) -> usize {
+    let mut index = start;
+    while let Some(word) = words.get(index) {
+        if word == "--" {
+            return index + 1;
+        }
+        if !word.starts_with('-') {
+            break;
+        }
+        index += if valued.contains(&word.as_str()) { 2 } else { 1 };
+    }
+    index
+}
+
 fn program(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Positional words after `skip` words, without flags or their values.
-fn positionals(words: &[String], skip: usize) -> Vec<&str> {
-    words.iter().skip(skip).map(String::as_str).filter(|word| !word.starts_with('-')).collect()
+/// Positional words after `skip` words, without flags or the values of the flags in `valued`.
+fn positionals<'a>(words: &'a [String], skip: usize, valued: &[&str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut index = skip;
+    while let Some(word) = words.get(index) {
+        if valued.contains(&word.as_str()) {
+            index += 2;
+            continue;
+        }
+        if !word.starts_with('-') {
+            out.push(word.as_str());
+        }
+        index += 1;
+    }
+    out
 }
 
 /// The first positional word from `skip` on, past the value of each flag in `valued`.
@@ -150,6 +189,9 @@ fn flag_value<'a>(words: &'a [String], names: &[&str]) -> Option<&'a str> {
     })
 }
 
+/// The flags of `ramify step` that take a value.
+const STEP_VALUED: &[&str] = &["--note", "--file"];
+
 fn action(name: &str, details: Map<String, Value>) -> Option<Value> {
     Some(json!({"action": name, "details": Value::Object(details)}))
 }
@@ -167,19 +209,19 @@ fn command(words: &[String]) -> Option<Value> {
         "ramify" => match (word(1), word(2)) {
             ("step", "") => action("workitem.read", details),
             ("step", "done" | "na") => {
-                if let Some(step) = positionals(words, 3).first() {
+                if let Some(step) = positionals(words, 3, STEP_VALUED).first() {
                     details.insert("step".into(), json!(step));
                 }
                 action("workitem.update", details)
             }
             ("step", "ask") => {
-                if let Some(step) = positionals(words, 3).first() {
+                if let Some(step) = positionals(words, 3, STEP_VALUED).first() {
                     details.insert("step".into(), json!(step));
                 }
                 action("gate.ask", details)
             }
             ("step", "wait") => {
-                if let Some(step) = positionals(words, 3).first() {
+                if let Some(step) = positionals(words, 3, STEP_VALUED).first() {
                     details.insert("step".into(), json!(step));
                 }
                 action("gate.wait", details)
@@ -187,7 +229,7 @@ fn command(words: &[String]) -> Option<Value> {
             ("lane", _) | ("ticket", "start" | "sync") => action("workitem.update", details),
             ("ticket", "") => action("workitem.read", details),
             ("new", _) => {
-                if let Some(slug) = positionals(words, 2).first() {
+                if let Some(slug) = positionals(words, 2, &[]).first() {
                     details.insert("branch".into(), json!(slug));
                 }
                 action("branch.create", details)
@@ -197,21 +239,8 @@ fn command(words: &[String]) -> Option<Value> {
             _ => None,
         },
         "gh" => {
-            // `gh -R owner/repo pr merge`: skip the global flags.
-            let rest: Vec<String> = {
-                let mut out = Vec::new();
-                let mut index = 1;
-                while index < words.len() {
-                    let item = &words[index];
-                    if (item == "-R" || item == "--repo") && out.is_empty() {
-                        index += 2;
-                        continue;
-                    }
-                    out.push(item.clone());
-                    index += 1;
-                }
-                out
-            };
+            // `gh -R owner/repo pr merge`, `gh --repo=owner/repo pr merge`: skip the global flags.
+            let rest: Vec<String> = words[skip_flags(words, 1, &["-R", "--repo"]).min(words.len())..].to_vec();
             let sub = |index: usize| rest.get(index).map(String::as_str).unwrap_or("");
             match (sub(0), sub(1)) {
                 ("pr", verb @ ("create" | "ready" | "merge" | "review" | "comment")) => {
@@ -228,9 +257,11 @@ fn command(words: &[String]) -> Option<Value> {
                     }
                     match verb {
                         "create" => {
-                            details.insert("draft".into(), json!(rest.iter().any(|w| w == "--draft" || w == "-d")));
+                            let draft = rest.iter().any(|w| w == "--draft" || w == "-d")
+                                || flag_value(&rest, &["--draft"]).is_some_and(|value| value != "false");
+                            details.insert("draft".into(), json!(draft));
                             if let Some(base) = flag_value(&rest, &["--base", "-B"]) {
-                                details.insert("branch".into(), json!(base));
+                                details.insert("base".into(), json!(base));
                             }
                             action("pr.open", details)
                         }
@@ -240,7 +271,7 @@ fn command(words: &[String]) -> Option<Value> {
                     }
                 }
                 ("issue", verb @ ("view" | "edit" | "comment" | "close")) => {
-                    if let Some(item) = positionals(&rest, 2).first() {
+                    if let Some(item) = positionals(&rest, 2, &["--body", "-b", "--body-file", "-F", "--add-label", "--remove-label", "--title", "-t", "--reason", "-r", "--comment", "-c"]).first() {
                         details.insert("work_item".into(), json!(item));
                     }
                     action(if verb == "view" { "workitem.read" } else { "workitem.update" }, details)
@@ -250,7 +281,7 @@ fn command(words: &[String]) -> Option<Value> {
         }
         "acli" if word(1) == "jira" && word(2) == "workitem" => {
             let verb = word(3);
-            if let Some(key) = flag_value(words, &["--key", "-k"]).or_else(|| positionals(words, 4).first().copied()) {
+            if let Some(key) = flag_value(words, &["--key", "-k"]).or_else(|| positionals(words, 4, &["--key", "-k", "--status", "-s", "--body", "-b"]).first().copied()) {
                 details.insert("work_item".into(), json!(key));
             }
             match verb {
@@ -260,17 +291,15 @@ fn command(words: &[String]) -> Option<Value> {
             }
         }
         "git" => {
-            // `git -C dir push`: skip the global flags.
-            let mut index = 1;
-            while word(index) == "-C" || word(index) == "-c" {
-                index += 2;
-            }
+            // `git -C dir push`, `git --no-pager push`, `git --git-dir=x push`: skip the global
+            // flags.
+            let index = skip_flags(words, 1, &["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
             let rest = &words[index.min(words.len())..];
             let sub = rest.first().map(String::as_str).unwrap_or("");
             match sub {
                 "commit" => action("commit", details),
                 "push" => {
-                    let names = positionals(rest, 1);
+                    let names = positionals(rest, 1, &["-o", "--push-option", "--repo", "--receive-pack", "--exec"]);
                     if let Some(branch) = names.get(1) {
                         details.insert("branch".into(), json!(branch));
                     }

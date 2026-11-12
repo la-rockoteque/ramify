@@ -1,9 +1,13 @@
 //! The hooks one Ram Code session runs: the loaded sources, its session id, and where the
 //! workflow classifier lives.
 
-use crate::hooks::{common, project_of, HookSet, Outcome, Sources};
+use crate::hooks::{common, project_of, ramify_home, HookSet, Outcome, Sources};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How long a task waits for SessionStart to leave its snapshot.
+const START_WAIT: Duration = Duration::from_secs(10);
 
 pub struct Hooked {
     pub set: HookSet,
@@ -34,15 +38,52 @@ impl Hooked {
 
     /// Every source, for the worktree at `cwd`.
     pub fn load(cwd: &Path, session: &str) -> Self {
-        // As in the ramify CLI: RAMIFY_HOOKS_HOME, else HOME.
-        let home = std::env::var("RAMIFY_HOOKS_HOME").or_else(|_| std::env::var("HOME"));
-        Self::load_from(cwd, session, &PathBuf::from(home.unwrap_or_default()))
+        Self::load_from(cwd, session, &hooks_home())
     }
 
     /// Every source, with `home` in place of the user's home folder.
     pub fn load_from(cwd: &Path, session: &str, home: &Path) -> Self {
+        Self::build(cwd, session, home, None)
+    }
+
+    /// The hooks of one task of the interface: the files as SessionStart read them into `dir`,
+    /// so that a hook file the model writes runs only in a later session. The task waits for
+    /// the snapshot at most 10 s, then reads the files as they are.
+    pub fn for_task(cwd: &Path, session: &str, dir: Option<&Path>) -> Self {
+        Self::for_task_from(cwd, session, dir, &hooks_home())
+    }
+
+    /// `for_task`, with `home` in place of the user's home folder.
+    pub fn for_task_from(cwd: &Path, session: &str, dir: Option<&Path>, home: &Path) -> Self {
+        let Some(dir) = dir else {
+            return Self::load_from(cwd, session, home);
+        };
+        let deadline = Instant::now() + START_WAIT;
+        while !dir.join(STARTED).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let snapshot = std::fs::read_to_string(dir.join(SNAPSHOT))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        Self::build(cwd, session, home, snapshot.as_ref())
+    }
+
+    /// Writes what a task reads from `dir`: the snapshot, the SessionStart context, and last
+    /// the marker that says both are there.
+    pub fn leave_start(&self, dir: &Path, contexts: &[String]) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join(SNAPSHOT), self.set.snapshot().to_string())?;
+        std::fs::write(dir.join(CONTEXT), contexts.join("\n\n"))?;
+        std::fs::write(dir.join(STARTED), "")
+    }
+
+    fn build(cwd: &Path, session: &str, home: &Path, snapshot: Option<&Value>) -> Self {
         let project = project_of(cwd);
-        let set = HookSet::load(home, &project, ramify_home().as_deref(), Sources::All);
+        let ramify = ramify_home();
+        let set = match snapshot {
+            Some(snapshot) => HookSet::load_snapshot(snapshot, home, &project, ramify.as_deref(), Sources::All),
+            None => HookSet::load(home, &project, ramify.as_deref(), Sources::All),
+        };
         Hooked {
             set,
             session: session.to_string(),
@@ -64,12 +105,7 @@ impl Hooked {
         if !self.set.has(event) {
             return Outcome::default();
         }
-        let mut input = common(&self.session, &self.cwd, event);
-        if let (Some(target), Some(extra)) = (input.as_object_mut(), fields.as_object()) {
-            for (key, value) in extra {
-                target.insert(key.clone(), value.clone());
-            }
-        }
+        let input = common(&self.session, &self.cwd, event, fields);
         let outcome = self.set.run(event, subject, &input, &self.cwd, &self.project);
         self.spawned.set(self.spawned.get() + outcome.spawned);
         outcome
@@ -104,36 +140,37 @@ impl Hooked {
     }
 }
 
-/// Ramify's install: `RAMIFY_HOME`, else the folder above this binary that holds
-/// `hooks/ram.json` (Ram Code ships in the ramify repository).
-pub fn ramify_home() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("RAMIFY_HOME") {
-        return Some(PathBuf::from(home));
-    }
-    let mut current = std::env::current_exe().ok()?;
-    while current.pop() {
-        if current.join("hooks/ram.json").is_file() {
-            return Some(current);
-        }
-    }
-    None
+/// The files a task reads from the start folder.
+pub const SNAPSHOT: &str = "hooks.json";
+pub const CONTEXT: &str = "context.txt";
+const STARTED: &str = "started";
+
+/// As in the ramify CLI: RAMIFY_HOOKS_HOME, else HOME.
+fn hooks_home() -> PathBuf {
+    let home = std::env::var("RAMIFY_HOOKS_HOME").or_else(|_| std::env::var("HOME"));
+    PathBuf::from(home.unwrap_or_default())
 }
 
-/// Merges `more` into `into`: reasons join, a deny or a block wins.
-pub fn absorb(into: &mut Outcome, more: Outcome) {
-    into.contexts.extend(more.contexts);
-    into.notes.extend(more.notes);
-    into.spawned += more.spawned;
-    for (slot, reason) in [
-        (&mut into.deny, more.deny),
-        (&mut into.block, more.block),
-        (&mut into.stop, more.stop),
-    ] {
-        if let Some(reason) = reason {
-            *slot = Some(match slot.take() {
-                Some(earlier) => format!("{earlier}\n{reason}"),
-                None => reason,
-            });
-        }
+/// Sets the session's record to `idle` when it says `working`.
+pub fn idle_record(state_root: &Path, session: &str) {
+    let path = state_root.join("sessions").join(format!("{session}.session"));
+    let Some(mut record) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return;
+    };
+    if record.get("state").and_then(Value::as_str) != Some("working") {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    record["state"] = json!("idle");
+    record["since"] = json!(now);
+    let temporary = path.with_extension(format!("session.{}", std::process::id()));
+    if std::fs::write(&temporary, record.to_string()).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
     }
 }

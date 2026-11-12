@@ -114,6 +114,18 @@ fn classify_each_action() {
         ("/opt/bin/ramify step done build", "workitem.update"),
         ("env CI=1 gh pr merge 1", "pr.merge"),
         ("bash -c 'git push'", "push"),
+        ("bash -lc 'git push'", "push"),
+        ("/bin/sh -l -c 'gh pr merge 3'", "pr.merge"),
+        ("gh --repo=o/r pr merge 5", "pr.merge"),
+        ("gh -R o/r pr merge 5", "pr.merge"),
+        ("git --no-pager push", "push"),
+        ("git --git-dir=x push", "push"),
+        ("git -C wt push", "push"),
+        ("env -u FOO git push", "push"),
+        ("sudo git push", "push"),
+        ("sudo -u me git push", "push"),
+        ("xargs git push", "push"),
+        ("A=/x/y git commit -m x", "commit"),
     ];
     for (command, expected) in table {
         assert_eq!(actions("run_command", command), [expected], "{command}");
@@ -143,12 +155,11 @@ fn classify_a_chain() {
 
 #[test]
 fn classify_pr_details() {
-    let open = classify(
-        "run_command",
-        json!({"command": "gh pr create --draft --title x --body y"}),
-        Path::new("/"),
-    );
-    assert_eq!(open[0]["details"], json!({"draft": true}));
+    let details = |command: &str| classify("run_command", json!({"command": command}), Path::new("/"))[0]["details"].clone();
+    assert_eq!(details("gh pr create --draft --title x --body y"), json!({"draft": true}));
+    assert_eq!(details("gh pr create --draft=true --base dev"), json!({"draft": true, "base": "dev"}));
+    assert_eq!(details("git push -o ci.skip origin main"), json!({"branch": "main"}));
+    assert_eq!(details("ramify step done --note x build"), json!({"step": "build"}));
     let merge = classify(
         "run_command",
         json!({"command": "gh pr merge --subject 'a b' 50 --squash"}),
@@ -189,34 +200,69 @@ fn classify_a_work_item_read() {
     );
 }
 
+/// A copy of `hooks/ramify-hook` whose `../bin/ramify` is the binary under test: the repo's
+/// `bin/ramify` prefers a release build, which can be older.
+fn hook_kit(home: &Path) -> PathBuf {
+    let kit = home.join("kit");
+    std::fs::create_dir_all(kit.join("hooks")).unwrap();
+    std::fs::create_dir_all(kit.join("bin")).unwrap();
+    std::fs::copy(repo_root().join("hooks/ramify-hook"), kit.join("hooks/ramify-hook")).unwrap();
+    let _ = std::fs::remove_file(kit.join("bin/ramify"));
+    std::os::unix::fs::symlink(binary(), kit.join("bin/ramify")).unwrap();
+    kit.join("hooks/ramify-hook")
+}
+
 fn bridge(home: &Path, phase: &str, input: &Value) -> String {
     let mut command = Command::new("bash");
     command
-        .arg(repo_root().join("hooks/ramify-hook"))
+        .arg(hook_kit(home))
         .arg(format!("workflow-{phase}"))
-        .env("RAMIFY_HOOKS_HOME", home);
+        .env("RAMIFY_HOOKS_HOME", home)
+        .env("RAMIFY_STATE_DIR", home.join("state"));
     piped(command, input)
 }
 
-#[test]
-fn bridge_denies_for_claude_code() {
-    let home = temp("bridge-home");
-    let project = temp("bridge-project");
+fn ramify(home: &Path, args: &[&str], input: &Value) -> String {
+    let mut command = Command::new(binary());
+    command
+        .args(args)
+        .env("RAMIFY_HOOKS_HOME", home)
+        .env("RAMIFY_STATE_DIR", home.join("state"));
+    piped(command, input)
+}
+
+fn git_project(name: &str) -> PathBuf {
+    let project = temp(name);
     assert!(Command::new("git")
         .args(["init", "-q"])
         .current_dir(&project)
         .status()
         .unwrap()
         .success());
-    std::fs::create_dir_all(home.join(".ram")).unwrap();
-    let deny = r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no PR on Fridays"}}'"#;
-    let hooks = json!({"hooks": {"PreWorkflow": [{"matcher": "pr.open", "hooks": [{"type": "command", "command": deny}]}]}});
-    std::fs::write(home.join(".ram/settings.json"), hooks.to_string()).unwrap();
-    let input = json!({
-        "session_id": "s1", "cwd": project, "hook_event_name": "PreToolUse",
+    project
+}
+
+const DENY: &str = r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no PR on Fridays"}}'"#;
+
+fn deny_pr(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let hooks = json!({"hooks": {"PreWorkflow": [{"matcher": "pr.open", "hooks": [{"type": "command", "command": DENY}]}]}});
+    std::fs::write(path, hooks.to_string()).unwrap();
+}
+
+fn pr_create(session: &str, project: &Path) -> Value {
+    json!({
+        "session_id": session, "cwd": project, "hook_event_name": "PreToolUse",
         "tool_name": "Bash", "tool_input": {"command": "gh pr create --title x"},
-    });
-    let out: Value = serde_json::from_str(&bridge(&home, "pre", &input)).expect("a decision");
+    })
+}
+
+#[test]
+fn bridge_denies_for_claude_code() {
+    let home = temp("bridge-home");
+    let project = git_project("bridge-project");
+    deny_pr(&home.join(".ram/settings.json"));
+    let out: Value = serde_json::from_str(&bridge(&home, "pre", &pr_create("s1", &project))).expect("a decision");
     assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
     assert_eq!(
@@ -233,4 +279,31 @@ fn bridge_without_workflow_hooks_says_nothing() {
     let input = json!({"session_id": "s1", "cwd": "/", "tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"}});
     assert_eq!(bridge(&home, "pre", &input), "");
     assert_eq!(bridge(&home, "post", &input), "");
+}
+
+#[test]
+fn bridge_runs_project_hooks_only_when_trusted() {
+    let home = temp("trust-home");
+    let project = git_project("trust-project");
+    deny_pr(&project.join(".ram/settings.json"));
+    assert_eq!(bridge(&home, "pre", &pr_create("s2", &project)), "");
+    let said = ramify(&home, &["hooks", "trust", project.to_str().unwrap()], &Value::Null);
+    assert!(said.ends_with(": trusted"), "{said}");
+    assert!(bridge(&home, "pre", &pr_create("s2", &project)).contains("no PR on Fridays"));
+    ramify(&home, &["hooks", "untrust", project.to_str().unwrap()], &Value::Null);
+    assert_eq!(bridge(&home, "pre", &pr_create("s2", &project)), "");
+}
+
+#[test]
+fn bridge_reads_the_hooks_of_session_start() {
+    let home = temp("snapshot-home");
+    let project = git_project("snapshot-project");
+    let start = json!({"session_id": "s3", "cwd": project, "hook_event_name": "SessionStart"});
+    ramify(&home, &["hooks", "snapshot"], &start);
+    assert!(home.join("state/sessions/s3.hooks.json").is_file());
+    // A hook file written after the session started does not run in it.
+    deny_pr(&home.join(".ram/settings.json"));
+    assert_eq!(bridge(&home, "pre", &pr_create("s3", &project)), "");
+    // A session with no snapshot reads the files as they are.
+    assert!(bridge(&home, "pre", &pr_create("s4", &project)).contains("no PR on Fridays"));
 }
