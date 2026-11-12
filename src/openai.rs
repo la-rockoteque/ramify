@@ -3,19 +3,24 @@
 
 use crate::agent::{
     normalize_base, post_json, AgentConfig, Credential, Llm, Reply, ReplyEnd, INVALID_ARGUMENTS,
+    WHOLE_REPLY_TIMEOUT,
 };
 use crate::cancel::Cancel;
-use crate::stream::{post_stream, Ended, OpenAiAssembler};
+use crate::stream::{post_stream, reply_end, OpenAiAssembler};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 pub struct OpenAiLlm {
     pub config: AgentConfig,
+    pub whole_timeout: Duration,
 }
 
 impl OpenAiLlm {
     pub fn new(config: AgentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            whole_timeout: WHOLE_REPLY_TIMEOUT,
+        }
     }
 }
 
@@ -34,27 +39,22 @@ impl OpenAiLlm {
 
 impl Llm for OpenAiLlm {
     fn complete(&self, request: &Value) -> Result<Value, String> {
-        let reply = post_json(&chat_url(&self.config.base_url), &self.headers()?, &to_chat(request))?;
+        let reply = post_json(
+            &chat_url(&self.config.base_url),
+            &self.headers()?,
+            &to_chat(request),
+            self.whole_timeout,
+        )?;
         Ok(from_chat(&reply))
     }
 
     fn stream(&self, request: &Value, cancel: &Cancel, on_text: &mut dyn FnMut(&str)) -> Reply {
-        let failed = |error: String| Reply {
-            message: json!({"role": "assistant", "content": []}),
-            end: ReplyEnd::Failed(error),
-        };
         if !self.config.stream {
-            return match self.complete(request) {
-                Ok(message) => Reply {
-                    message,
-                    end: ReplyEnd::Complete,
-                },
-                Err(error) => failed(error),
-            };
+            return Reply::whole(self.complete(request));
         }
         let headers = match self.headers() {
             Ok(headers) => headers,
-            Err(error) => return failed(error),
+            Err(error) => return Reply::failed(error),
         };
         let mut body = to_chat(request);
         body["stream"] = json!(true);
@@ -67,30 +67,22 @@ impl Llm for OpenAiLlm {
             cancel,
             &mut |event| assembler.event(&event, on_text),
         );
-        let end = match ended {
-            Ended::Whole(value) => {
-                return Reply {
-                    message: from_chat(&value),
-                    end: ReplyEnd::Complete,
-                }
-            }
-            Ended::Interrupted => ReplyEnd::Interrupted,
-            Ended::Failed(error) => ReplyEnd::Failed(error),
-            Ended::Done => match &assembler.error {
-                Some(error) => ReplyEnd::Failed(error.clone()),
-                None if assembler.over() => ReplyEnd::Complete,
-                // The connection closed with no finish_reason and no [DONE]: the reply is cut.
-                None => ReplyEnd::Failed(
-                    "the model stream ended before a finish_reason or [DONE]".into(),
-                ),
-            },
+        // The connection closed with no finish_reason and no [DONE]: the reply is cut.
+        let end = match reply_end(
+            ended,
+            assembler.error.as_deref(),
+            assembler.over(),
+            "the model stream ended before a finish_reason or [DONE]",
+        ) {
+            Ok(end) => end,
+            Err(whole) => return Reply::whole(Ok(from_chat(&whole))),
         };
         let message = assembler.message();
         // A finished stream with nothing in it is an error, as `from_chat` treats a whole reply.
         if end == ReplyEnd::Complete
             && message["content"].as_array().is_some_and(Vec::is_empty)
         {
-            return failed("the model returned no content".into());
+            return Reply::failed("the model returned no content".into());
         }
         Reply { message, end }
     }

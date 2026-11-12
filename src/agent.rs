@@ -4,7 +4,6 @@ use crate::hooks::{workflow_fields, Outcome};
 use crate::tools::Tools;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:15721";
@@ -13,9 +12,8 @@ pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 /// A stream fails when no byte arrives for this many seconds. `RAM_CODE_IDLE_TIMEOUT` sets it.
 pub const DEFAULT_IDLE_TIMEOUT: u64 = 90;
 
-/// The limit on a reply read whole, in seconds. A stream has the idle timeout instead. Tests
-/// lower it to show that a long stream does not hit it.
-pub static WHOLE_REPLY_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(120);
+/// The limit on a reply read whole. A stream has the idle timeout instead.
+pub const WHOLE_REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 const MAX_TURNS: usize = 32;
 
@@ -225,6 +223,8 @@ pub enum AgentEvent {
     Hook(String),
     /// A command waits on the human in `ramify run`: the run's id.
     RunPending(String),
+    /// The model's output limit is lower than `max_tokens`: the limit the task now uses.
+    MaxTokens(u32),
 }
 
 /// How a model reply ended.
@@ -249,16 +249,21 @@ impl Reply {
         self
     }
 
-    fn whole(result: Result<Value, String>) -> Self {
+    /// A failed reply with nothing in it.
+    pub fn failed(error: String) -> Self {
+        Reply {
+            message: json!({"role": "assistant", "content": []}),
+            end: ReplyEnd::Failed(error),
+        }
+    }
+
+    pub fn whole(result: Result<Value, String>) -> Self {
         match result {
             Ok(message) => Reply {
                 message,
                 end: ReplyEnd::Complete,
             },
-            Err(error) => Reply {
-                message: json!({"role": "assistant", "content": []}),
-                end: ReplyEnd::Failed(error),
-            },
+            Err(error) => Reply::failed(error),
         }
     }
 }
@@ -287,24 +292,31 @@ pub trait Llm: Send + Sync {
 
 pub struct AnthropicLlm {
     pub config: AgentConfig,
+    pub whole_timeout: Duration,
 }
 
 impl AnthropicLlm {
     pub fn new(config: AgentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            whole_timeout: WHOLE_REPLY_TIMEOUT,
+        }
     }
 }
 
 /// POST a JSON body and return the JSON reply. A 4xx or 5xx reply is an error.
-pub fn post_json(url: &str, headers: &[(&str, String)], request: &Value) -> Result<Value, String> {
+pub fn post_json(
+    url: &str,
+    headers: &[(&str, String)],
+    request: &Value,
+    timeout: Duration,
+) -> Result<Value, String> {
     let body = serde_json::to_string(request)
         .map_err(|e| format!("could not encode the model request: {e}"))?;
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(
-                WHOLE_REPLY_TIMEOUT_SECS.load(Ordering::SeqCst),
-            )))
+            .timeout_global(Some(timeout))
             .build(),
     );
     let mut post = agent.post(url);
@@ -339,7 +351,12 @@ impl AnthropicLlm {
 
 impl Llm for AnthropicLlm {
     fn complete(&self, request: &Value) -> Result<Value, String> {
-        post_json(&messages_url(&self.config.base_url), &self.headers()?, request)
+        post_json(
+            &messages_url(&self.config.base_url),
+            &self.headers()?,
+            request,
+            self.whole_timeout,
+        )
     }
 
     fn stream(&self, request: &Value, cancel: &Cancel, on_text: &mut dyn FnMut(&str)) -> Reply {
@@ -361,18 +378,19 @@ impl Llm for AnthropicLlm {
             cancel,
             &mut |event| assembler.event(&event, on_text),
         );
-        let message = assembler.message();
-        let end = match ended {
-            crate::stream::Ended::Whole(value) => return Reply::whole(Ok(value)),
-            crate::stream::Ended::Interrupted => ReplyEnd::Interrupted,
-            crate::stream::Ended::Failed(error) => ReplyEnd::Failed(error),
-            crate::stream::Ended::Done => match &assembler.error {
-                Some(error) => ReplyEnd::Failed(error.clone()),
-                None if assembler.finished => ReplyEnd::Complete,
-                None => ReplyEnd::Failed("the model stream ended before message_stop".into()),
+        let end = crate::stream::reply_end(
+            ended,
+            assembler.error.as_deref(),
+            assembler.finished,
+            "the model stream ended before message_stop",
+        );
+        match end {
+            Ok(end) => Reply {
+                message: assembler.message(),
+                end,
             },
-        };
-        Reply { message, end }
+            Err(whole) => Reply::whole(Ok(whole)),
+        }
     }
 
     fn model(&self) -> &str {
@@ -401,7 +419,12 @@ pub fn run_turn(
     task: &str,
     on_event: &mut dyn FnMut(AgentEvent),
 ) -> Result<(String, Vec<Value>), String> {
-    run_turn_hooked(llm, root, history, task, &Hooked::none(root), on_event)
+    let turn = run_turn_cancellable(llm, root, history, task, &Hooked::none(root), &Cancel::new(), on_event);
+    match turn.end {
+        TurnEnd::Done => Ok((turn.answer, turn.history)),
+        TurnEnd::Interrupted => Err(INTERRUPTED.to_string()),
+        TurnEnd::Failed(error) => Err(error),
+    }
 }
 
 /// A Stop hook can send the model back to work this many times in a row, then the task ends.
@@ -410,23 +433,6 @@ const MAX_STOP_BLOCKS: usize = 3;
 fn notes(outcome: &Outcome, on_event: &mut dyn FnMut(AgentEvent)) {
     for note in &outcome.notes {
         on_event(AgentEvent::Hook(note.clone()));
-    }
-}
-
-/// `run_turn`, with the session's hooks around the prompt, each tool call and the stop.
-pub fn run_turn_hooked(
-    llm: &dyn Llm,
-    root: &Path,
-    history: &[Value],
-    task: &str,
-    hooks: &Hooked,
-    on_event: &mut dyn FnMut(AgentEvent),
-) -> Result<(String, Vec<Value>), String> {
-    let turn = run_turn_cancellable(llm, root, history, task, hooks, &Cancel::new(), on_event);
-    match turn.end {
-        TurnEnd::Done => Ok((turn.answer, turn.history)),
-        TurnEnd::Interrupted => Err(INTERRUPTED.to_string()),
-        TurnEnd::Failed(error) => Err(error),
     }
 }
 
@@ -471,18 +477,21 @@ fn push_task(messages: &mut Vec<Value>, content: String) {
 }
 
 /// Close a turn that stopped part way: keep the assistant blocks, and answer each `tool_use` with
-/// an error result, so the next request is valid for both formats.
-fn close_turn(messages: &mut Vec<Value>, blocks: Vec<Value>, result: &str) {
-    // Thinking alone carries nothing the next turn needs, and an assistant message with no text
-    // and no tool call is not a valid turn to send back.
-    let useful = blocks.iter().any(|block| {
-        matches!(
-            block.get("type").and_then(Value::as_str),
-            Some("text") | Some("tool_use")
-        )
-    });
+/// an error result, so the next request is valid for both formats. True when it kept a message.
+fn close_turn(messages: &mut Vec<Value>, mut blocks: Vec<Value>, result: &str) -> bool {
+    let kind = |block: &Value| block.get("type").and_then(Value::as_str).map(str::to_string);
+    let has_tool = blocks.iter().any(|block| kind(block).as_deref() == Some("tool_use"));
+    // Thinking must come before a kept `tool_use`. With no tool call, the turn that goes back is
+    // cut, so its thinking goes: a signed block followed by cut text is safer left out.
+    if !has_tool {
+        blocks.retain(|block| !matches!(kind(block).as_deref(), Some("thinking" | "redacted_thinking")));
+    }
+    // An assistant message with no text and no tool call is not a valid turn to send back.
+    let useful = blocks
+        .iter()
+        .any(|block| matches!(kind(block).as_deref(), Some("text" | "tool_use")));
     if !useful {
-        return;
+        return false;
     }
     let results: Vec<Value> = blocks
         .iter()
@@ -500,9 +509,31 @@ fn close_turn(messages: &mut Vec<Value>, blocks: Vec<Value>, result: &str) {
     if !results.is_empty() {
         messages.push(json!({"role": "user", "content": results}));
     }
+    true
 }
 
-/// `run_turn_hooked` that `cancel` can stop. It stops the model stream and the running tool.
+/// The model's output limit, from an error that says `max_tokens` is above it. With no number
+/// in the message, 8,192.
+fn output_limit(error: &str, asked: u32) -> Option<u32> {
+    let lower = error.to_ascii_lowercase();
+    let about_limit = (lower.contains("max_tokens") || lower.contains("max_completion_tokens"))
+        && ["maximum", "at most", "too large", "exceeds", " > "]
+            .iter()
+            .any(|word| lower.contains(word));
+    if !about_limit || !lower.contains("400") {
+        return None;
+    }
+    // The numbers after the status, so the status itself is not taken for a limit.
+    let message = lower.split_once("400:").map_or(lower.as_str(), |(_, rest)| rest);
+    let numbers = message
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .filter(|number| *number >= 256 && *number < asked);
+    Some(numbers.max().unwrap_or(DEFAULT_MAX_TOKENS).min(asked.saturating_sub(1)))
+}
+
+/// `run_turn` with the session's hooks around the prompt, each tool call and the stop, which
+/// `cancel` can stop. It stops the model stream and the running tool.
 pub fn run_turn_cancellable(
     llm: &dyn Llm,
     root: &Path,
@@ -542,6 +573,19 @@ pub fn run_turn_cancellable(
     };
     push_task(&mut messages, content);
     let mut stop_blocks = 0;
+    let mut max_tokens = llm.max_tokens();
+    let mut limit_retried = false;
+    // True once this task added an assistant message. Until then, a failure gives back the
+    // history from before the task, so a retry does not send the task twice.
+    let mut answered = false;
+    let failed = |messages: Vec<Value>, answered: bool, error: String| {
+        let history = if answered { messages } else { history.to_vec() };
+        Turn {
+            answer: String::new(),
+            history,
+            end: TurnEnd::Failed(error),
+        }
+    };
 
     for _ in 0..MAX_TURNS {
         if cancel.is_set() {
@@ -549,7 +593,7 @@ pub fn run_turn_cancellable(
         }
         let request = json!({
             "model": llm.model(),
-            "max_tokens": llm.max_tokens(),
+            "max_tokens": max_tokens,
             "system": system,
             "messages": messages,
             "tools": definitions,
@@ -572,8 +616,21 @@ pub fn run_turn_cancellable(
                 return end(&answer, messages, TurnEnd::Interrupted);
             }
             ReplyEnd::Failed(error) => {
-                close_turn(&mut messages, partial(&reply), "not run: the model reply failed");
-                return end(&answer, messages, TurnEnd::Failed(error.clone()));
+                if partial(&reply).is_empty() && !limit_retried {
+                    if let Some(limit) = output_limit(error, max_tokens) {
+                        limit_retried = true;
+                        max_tokens = limit;
+                        on_event(AgentEvent::Hook(format!(
+                            "the model allows at most {limit} output tokens; Ram Code uses {limit} for the rest of this session"
+                        )));
+                        on_event(AgentEvent::MaxTokens(limit));
+                        continue;
+                    }
+                }
+                let kept = close_turn(&mut messages, partial(&reply), "not run: the model reply failed");
+                let mut turn = failed(messages, answered || kept, error.clone());
+                turn.answer = answer.trim().to_string();
+                return turn;
             }
         }
         let response = reply.message;
@@ -583,16 +640,13 @@ pub fn run_turn_cancellable(
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return end(&answer, messages, TurnEnd::Failed(format!("model API error: {message}")));
+            return failed(messages, answered, format!("model API error: {message}"));
         }
 
         let Some(content) = response.get("content").and_then(Value::as_array) else {
-            return end(
-                &answer,
-                messages,
-                TurnEnd::Failed(format!("model response has no content: {response}")),
-            );
+            return failed(messages, answered, format!("model response has no content: {response}"));
         };
+        answered = true;
 
         let mut assistant_blocks = Vec::new();
         let mut tool_results = Vec::new();

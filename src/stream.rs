@@ -1,7 +1,7 @@
 //! Streamed model replies: the HTTP request on a reader thread, the server-sent events parser,
 //! and the assemblers that build the same message a whole reply gives.
 
-use crate::agent::INVALID_ARGUMENTS;
+use crate::agent::{ReplyEnd, INVALID_ARGUMENTS};
 use crate::cancel::Cancel;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -24,6 +24,26 @@ pub enum Ended {
     Failed(String),
 }
 
+/// How a streamed reply ends, for an assembler that has `error` and knows if the stream said it
+/// is over. A whole JSON reply comes back as `Err`, for the provider to convert.
+pub fn reply_end(ended: Ended, error: Option<&str>, over: bool, cut: &str) -> Result<ReplyEnd, Value> {
+    Ok(match ended {
+        Ended::Whole(value) => return Err(value),
+        Ended::Interrupted => ReplyEnd::Interrupted,
+        Ended::Failed(failure) => match error {
+            Some(error) => ReplyEnd::Failed(error.to_string()),
+            // The stream said it is over, then broke or went quiet: the reply is whole.
+            None if over => ReplyEnd::Complete,
+            None => ReplyEnd::Failed(failure),
+        },
+        Ended::Done => match error {
+            Some(error) => ReplyEnd::Failed(error.to_string()),
+            None if over => ReplyEnd::Complete,
+            None => ReplyEnd::Failed(cut.to_string()),
+        },
+    })
+}
+
 /// What an event handler tells the reader.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Flow {
@@ -42,6 +62,8 @@ pub struct Event {
 #[derive(Debug, Default)]
 pub struct SseParser {
     pending: Vec<u8>,
+    /// How much of `pending` holds no line end, so a long line is searched once.
+    scanned: usize,
     name: Option<String>,
     data: Vec<String>,
 }
@@ -50,7 +72,9 @@ impl SseParser {
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Event> {
         self.pending.extend_from_slice(bytes);
         let mut events = Vec::new();
-        while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+        while let Some(found) = self.pending[self.scanned..].iter().position(|b| *b == b'\n') {
+            let end = self.scanned + found;
+            self.scanned = 0;
             let raw: Vec<u8> = self.pending.drain(..=end).collect();
             let line = String::from_utf8_lossy(&raw[..raw.len() - 1]);
             let line = line.strip_suffix('\r').unwrap_or(&line);
@@ -68,6 +92,7 @@ impl SseParser {
                 }
             }
         }
+        self.scanned = self.pending.len();
         events
     }
 
@@ -75,6 +100,7 @@ impl SseParser {
     pub fn finish(&mut self) -> Option<Event> {
         if !self.pending.is_empty() {
             let rest = std::mem::take(&mut self.pending);
+            self.scanned = 0;
             let mut events = self.push(&rest);
             events.extend(self.push(b"\n"));
             if let Some(event) = events.pop() {
@@ -321,7 +347,8 @@ impl AnthropicAssembler {
             }
             "content_block_stop" => {
                 if let Some(block) = self.blocks.get_mut(&index) {
-                    if block.value.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let kind = block.value.get("type").and_then(Value::as_str);
+                    if matches!(kind, Some("tool_use" | "server_tool_use" | "mcp_tool_use")) {
                         block.value["input"] = parse_input(&block.input);
                     }
                     block.complete = true;
@@ -365,9 +392,13 @@ impl AnthropicAssembler {
                 kind == Some("text") || block.complete
             })
             .map(|block| block.value.clone())
+            // The API refuses a text block with no visible text when it is sent back.
             .filter(|value| {
                 value.get("type").and_then(Value::as_str) != Some("text")
-                    || value.get("text").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+                    || value
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| !t.trim().is_empty())
             })
             .collect();
         let mut message = json!({"role": "assistant", "content": content});
@@ -414,7 +445,7 @@ impl OpenAiAssembler {
         let Ok(data) = serde_json::from_str::<Value>(&event.data) else {
             return Flow::Continue;
         };
-        if let Some(error) = data.get("error") {
+        if let Some(error) = data.get("error").filter(|error| !error.is_null()) {
             let message = error.get("message").and_then(Value::as_str).unwrap_or("unknown error");
             self.error = Some(format!("model API error: {message}"));
             return Flow::Stop;

@@ -1,7 +1,8 @@
 //! Claude Code's hook mechanics in Ram Code: the sources, the events, the decisions, and the
 //! workflow events.
 
-use ram_code::agent::{run_turn_hooked, AgentEvent, Llm};
+use ram_code::agent::{run_turn_cancellable, AgentEvent, Llm};
+use ram_code::cancel::Cancel;
 use ram_code::hooked::Hooked;
 use ram_code::hooks::{trust, HookSet, Sources};
 use serde_json::{json, Value};
@@ -150,12 +151,13 @@ fn text(words: &str) -> Value {
 fn turn(fixture: &Fixture, hooks: &Hooked, responses: Vec<Value>) -> (Vec<Value>, Vec<String>) {
     let llm = FakeLlm::new(responses);
     let mut notes = Vec::new();
-    let _ = run_turn_hooked(
+    let _ = run_turn_cancellable(
         &llm,
         &fixture.project,
         &[],
         "the task",
         hooks,
+        &Cancel::new(),
         &mut |event| {
             if let AgentEvent::Hook(note) = event {
                 notes.push(note);
@@ -947,7 +949,7 @@ fn a_task_waits_for_the_snapshot_of_session_start() {
             start.leave_start(&dir, &["the context".to_string()]).unwrap();
         })
     };
-    let task = Hooked::for_task_from(&fixture.project, "ram-test", Some(&dir), &fixture.home);
+    let task = Hooked::for_task_from(&fixture.project, "ram-test", Some(&dir), &fixture.home, &Cancel::new());
     writer.join().unwrap();
     let commands: Vec<_> = task.set.matching("Stop", "").iter().map(|hook| hook.command.clone()).collect();
     assert_eq!(commands, ["echo at-start"]);
