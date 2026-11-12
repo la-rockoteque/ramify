@@ -11,6 +11,7 @@ steps:
 - {step: audit, date: '2026-11-12', note: AC16 real p10k is Q23; amendment built in ba5301c}
 - {step: qa, date: '2026-11-12', note: Q33 waived by the user}
 - {step: review, date: '2026-11-12'}
+- {step: pr, date: '2026-11-12', note: '#52'}
 ---
 
 # zsh-prompt
