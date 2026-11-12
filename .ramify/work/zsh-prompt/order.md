@@ -8,6 +8,7 @@ steps:
 - {step: spec, date: '2026-11-12'}
 - {step: qa-plan, date: '2026-11-12'}
 - {step: build, date: '2026-11-12'}
+- {step: audit, date: '2026-11-12', note: AC16 real p10k is Q23; amendment built in ba5301c}
 ---
 
 # zsh-prompt
