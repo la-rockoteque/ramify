@@ -11,6 +11,7 @@ pub mod panel;
 pub mod providers;
 pub mod ramify;
 pub mod state;
+pub mod search;
 pub mod tools;
 pub mod update;
 

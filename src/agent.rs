@@ -14,7 +14,8 @@ const MAX_TURNS: usize = 32;
 pub const INVALID_ARGUMENTS: &str = "__invalid_arguments";
 
 pub const SYSTEM_PROMPT: &str = "You are Ram Code, a coding agent working inside one git worktree. \
-Use the tools to inspect and change files. Keep changes small and focused on the task. \
+Use the tools to inspect and change files. To find code, use grep, glob and code_map first, \
+then read only the files you need. Keep changes small and focused on the task. \
 Every path is relative to the worktree root. When the task is done, reply with a short summary \
 of what changed and why. Do not ask for permission; finish the task.";
 

@@ -120,6 +120,28 @@ Add custom providers, such as a LiteLLM proxy, to `~/.config/ram-code/providers.
 `RAM_CODE_PROVIDER` picks the provider for one run, and leaves the saved choice as it is.
 `RAM_CODE_MODEL` overrides the model of every provider.
 
+### Tools
+
+The model works with these tools. Every path is relative to the worktree and stays inside it.
+
+| Tool | What it does |
+| --- | --- |
+| `read_file`, `write_file`, `list_files` | Read, write or list one file or folder. |
+| `grep` | Search file contents with a regular expression. Takes `path`, `glob` and `ignore_case`. Returns `path:line: text`, at most 200 matches. |
+| `glob` | Find files by a pattern such as `src/**/*.rs`. Returns sorted paths, at most 500. |
+| `code_map` | Outline each file's classes, types, functions and methods with their lines. Covers Rust, TypeScript, JavaScript, Python and Java. Other files show their line count. At most 40,000 characters. |
+| `run_command` | Run a shell command in the worktree. |
+
+`grep`, `glob` and `code_map` skip what `.gitignore` ignores, the `.git` folder, binary files
+and files over 10 MB. They do not follow a symlink.
+
+- A `path` under `.git`, or one that `.gitignore` ignores, is an error.
+- A glob pattern without `/` matches file names at any depth, such as `*.rs`. A pattern with `/`
+  matches the path from `path`, such as `src/**/*.rs`. `grep`'s `glob` uses the same rule.
+- `glob` needs a folder as its `path`.
+- `code_map` always shows the first file, cut at a line when it is too long. It lists a file over
+  10 MB as skipped. `grep` names the files it skipped for size.
+
 Run one task without the interface:
 
 ```bash
