@@ -280,11 +280,16 @@ pub fn resolve(
 
 /// The worker's and the headless run's provider: the saved choice, overridden by the environment.
 pub fn resolve_from_env(get: &dyn Fn(&str) -> Option<String>) -> Result<Resolved, String> {
-    let providers = Providers::load(Providers::default_dir(get))?;
+    let dir = Providers::default_dir(get);
+    // An unreadable file leaves the presets, as in the app. A custom provider then fails with the file's error.
+    let (providers, load_error) = match Providers::load(dir.clone()) {
+        Ok(providers) => (providers, None),
+        Err(error) => (Providers::empty(dir), Some(error)),
+    };
     let name = providers.active_name(get);
     let provider = providers
         .find(&name)
-        .ok_or_else(|| unknown(&name, &providers))?;
+        .ok_or_else(|| load_error.unwrap_or_else(|| unknown(&name, &providers)))?;
     resolve(&provider, get, None)
 }
 
@@ -293,4 +298,31 @@ pub fn unknown(name: &str, providers: &Providers) -> String {
         "Unknown provider {name}. Choose one of: {}.",
         providers.names().join(", ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_uses_presets_when_the_file_is_unreadable() {
+        let dir = std::env::temp_dir().join(format!("ram-code-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FILE), "{not json").unwrap();
+        let dir_text = dir.to_str().unwrap().to_string();
+        let get = |provider: &'static str| {
+            let dir_text = dir_text.clone();
+            move |key: &str| match key {
+                "RAM_CODE_CONFIG_DIR" => Some(dir_text.clone()),
+                "RAM_CODE_PROVIDER" => Some(provider.to_string()),
+                "DEEPSEEK_API_KEY" => Some("ds".to_string()),
+                _ => None,
+            }
+        };
+        let resolved = resolve_from_env(&get("deepseek")).expect("a preset still resolves");
+        assert_eq!(resolved.name, "deepseek");
+        let error = resolve_from_env(&get("litellm")).expect_err("a custom provider needs the file");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.contains("providers.json"), "{error}");
+    }
 }
