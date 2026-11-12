@@ -4,7 +4,7 @@
 |---|---|---|---|
 | AC1 | met | `src/sandbox.rs` `seatbelt_profile` allows `file-write*` under the worktree and the task temp folder, by real path | `sandbox_allows_writes_in_the_worktree`, `sandbox_allows_the_task_temp_folder` |
 | AC2 | met | `src/sandbox.rs` `seatbelt_profile` denies `file-write*` elsewhere. `bwrap` binds `/` read-only. | `sandbox_denies_writes_outside`, `sandbox_denies_writes_through_a_symlink` |
-| AC3 | met | `(deny network*)`, local Unix sockets only. `bwrap --unshare-net`. | `sandbox_denies_the_network` |
+| AC3 | met | `(deny network*)`, Unix sockets included since the review. `bwrap --unshare-net`. | `sandbox_denies_the_network` |
 | AC4 | met | `src/sandbox.rs` `scrub`, `is_secret` | `sandbox_strips_keys`, `scrub_list_covers_every_provider_key` |
 | AC5 | met | `src/tools.rs` `run_with_timeout`, `timeout_of` | `timeout_kills_the_process_group`, `timeout_is_clamped`, `timeout_keeps_partial_output` |
 | AC6 | met | `src/tools.rs` `ask_human`. `cli/src/run.rs` `--no-window`. | `outside_sandbox_asks_ramify_run`, `tui_asks_without_the_window`, `run_ask_no_window_skips_the_window` |
@@ -26,7 +26,7 @@ After the fix, `cargo test --lib` and `git log` still work inside the hardened p
 
 ## Notes
 
-- The build added local Unix sockets to the network allowance. TCP to `127.0.0.1` stays denied (Q5).
+- The build added local Unix sockets to the network allowance. The review removed it, because the Docker socket gave a full escape (`sandbox_denies_unix_sockets`). TCP to `127.0.0.1` stays denied (Q5).
 - `RAM_CODE_*` variables are scrubbed as well. That goes beyond the spec, and it is safe.
 - `git commit` fails in the sandbox: a worktree's Git data lives in the main checkout, and allowing those writes would also allow edits to `.git/hooks`. The README says so.
 - Writes to `~/.cargo` and `~/.npm` are denied, so a fetch or a registry lock needs `outside_sandbox`. An offline `cargo test` works.
