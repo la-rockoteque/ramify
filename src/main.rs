@@ -144,7 +144,7 @@ fn run_worker(
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {}", config.base_url)}));
+    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {} ({})", config.base_url, config.credential.label())}));
     let _ = out.flush();
     let llm = AnthropicLlm::new(config);
     // The interface owns the session: it passes its id, and the folder where SessionStart
