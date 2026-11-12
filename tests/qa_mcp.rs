@@ -147,8 +147,16 @@ impl Fixture {
             .unwrap()
             .success();
         assert!(ok);
-        let script = base.join("fake.py");
+        // The fake server sits outside the worktree, so the deny-by-default sandbox cannot read
+        // it. The test's own sandbox.json adds its folder, as a user would add a server's install.
+        fs::create_dir_all(base.join("bin")).unwrap();
+        let script = base.join("bin/fake.py");
         fs::write(&script, FAKE).unwrap();
+        fs::write(
+            base.join("config/sandbox.json"),
+            json!({"read": [base.join("bin").display().to_string()]}).to_string(),
+        )
+        .unwrap();
         Fixture {
             config: base.join("config"),
             base,
@@ -935,13 +943,12 @@ fn keychain_is_out_of_reach_for_servers() {
     fs::create_dir_all(&temp).unwrap();
     let mut outputs = Vec::new();
     for network in [false, true] {
+        let mut paths = ram_code::sandbox::Paths::new(&fx.root, &temp, None);
+        paths.network = network;
         let mut cmd = Sandbox::detect()
-            .command_with_network(
-                &fx.root,
-                &temp,
-                None,
+            .command(
+                &paths,
                 &format!("/usr/bin/security find-generic-password -s ram-mcp-probe -w '{path}'"),
-                network,
             )
             .expect("a sandbox");
         let out = cmd.current_dir(&fx.root).output().unwrap();

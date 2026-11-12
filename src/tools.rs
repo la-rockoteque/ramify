@@ -1,5 +1,5 @@
 use crate::providers::Providers;
-use crate::sandbox::{scrub, Sandbox};
+use crate::sandbox::{load_extras, scrub, Paths, Sandbox, DENIED_HINT};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -57,7 +57,11 @@ impl Tools {
                     .collect()
             })
             .unwrap_or_default();
-        let temp = std::env::temp_dir().join(format!(
+        // The parent is resolved once, here. The folder itself is never resolved again, so a
+        // command cannot repoint it with a link.
+        let parent = std::env::temp_dir();
+        let parent = parent.canonicalize().unwrap_or(parent);
+        let temp = parent.join(format!(
             "ram-code-task-{}-{}",
             std::process::id(),
             TEMP_SEQ.fetch_add(1, Ordering::SeqCst)
@@ -77,12 +81,10 @@ impl Tools {
     }
 
     /// The task's temp folder, created on first use. `TMPDIR` points here in a command.
+    /// A sandboxed command can write here, so before each command the folder must still be a
+    /// real folder that the user owns. A link in its place would widen the next profile.
     pub fn temp_dir(&self) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(&self.temp)
-            .map_err(|e| format!("could not create {}: {e}", self.temp.display()))?;
-        self.temp
-            .canonicalize()
-            .map_err(|e| format!("could not resolve {}: {e}", self.temp.display()))
+        crate::sandbox::checked_temp(&self.temp)
     }
 
     pub fn definitions() -> Vec<serde_json::Value> {
@@ -323,15 +325,46 @@ the human reads the command and decides whether it runs.",
             .root
             .canonicalize()
             .map_err(|e| format!("could not resolve {}: {e}", self.root.display()))?;
+        let home = self.home();
+        let config = self.config_dir();
+        let mut paths = Paths::new(&root, &temp, home.as_deref());
+        paths.extras = load_extras(&config, paths.home.as_deref())?;
+        paths.config = Some(config);
         let mut cmd = self
             .sandbox
-            .command(&root, &temp, self.home().as_deref(), command)
+            .command(&paths, command)
             .ok_or("no sandbox on this machine")?;
         cmd.current_dir(&root)
             .env_clear()
             .envs(scrub(&self.env, &self.key_envs))
-            .env("TMPDIR", &temp);
-        run_with_timeout(cmd, timeout)
+            .env("TMPDIR", &temp)
+            // A module cache per task: the shared one under the user cache folder feeds builds
+            // outside the sandbox, so a planted module there could change them.
+            .env("CLANG_MODULE_CACHE_PATH", temp.join("clang-module-cache"));
+        let mut output = run_with_timeout(cmd, timeout)?;
+        // `xcrun` cannot write its cache in the sandbox and says so on every call. That warning
+        // is expected, so it does not earn the hint.
+        let denied = output
+            .lines()
+            .any(|line| line.contains("Operation not permitted") && !line.contains("xcrun_db"));
+        if denied {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(DENIED_HINT);
+        }
+        Ok(output)
+    }
+
+    /// Ram Code's configuration folder: `RAM_CODE_CONFIG_DIR`, else `~/.config/ram-code`.
+    fn config_dir(&self) -> PathBuf {
+        let get = |key: &str| {
+            self.env
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        Providers::default_dir(&get)
     }
 
     /// Hand the command to the human through `ramify run`, and wait for the decision.
