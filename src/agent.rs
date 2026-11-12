@@ -194,6 +194,29 @@ pub enum AgentEvent {
     RunPending(String),
 }
 
+/// Tools that come from outside Ram Code, such as MCP servers. Their calls go through the same
+/// hooks as the built-in tools.
+pub trait ToolSource {
+    fn definitions(&self) -> Vec<Value>;
+    fn handles(&self, name: &str) -> bool;
+    fn call(&self, name: &str, input: &Value) -> Result<String, String>;
+}
+
+/// No outside tools.
+pub struct NoTools;
+
+impl ToolSource for NoTools {
+    fn definitions(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn handles(&self, _name: &str) -> bool {
+        false
+    }
+    fn call(&self, name: &str, _input: &Value) -> Result<String, String> {
+        Err(format!("unknown tool: {name}"))
+    }
+}
+
 pub trait Llm: Send + Sync {
     fn complete(&self, request: &Value) -> Result<Value, String>;
 
@@ -302,8 +325,22 @@ pub fn run_turn_hooked(
     hooks: &Hooked,
     on_event: &mut dyn FnMut(AgentEvent),
 ) -> Result<(String, Vec<Value>), String> {
+    run_turn_with(llm, root, history, task, hooks, &NoTools, on_event)
+}
+
+/// `run_turn_hooked`, with the tools of `extra` beside the built-in ones.
+pub fn run_turn_with(
+    llm: &dyn Llm,
+    root: &Path,
+    history: &[Value],
+    task: &str,
+    hooks: &Hooked,
+    extra: &dyn ToolSource,
+    on_event: &mut dyn FnMut(AgentEvent),
+) -> Result<(String, Vec<Value>), String> {
     let tools = Tools::new(root);
-    let definitions = Tools::definitions();
+    let mut definitions = Tools::definitions();
+    definitions.extend(extra.definitions());
     let mut messages: Vec<Value> = history.to_vec();
     let instructions = crate::instructions::load(root, crate::instructions::home().as_deref());
     for note in &instructions.notes {
@@ -384,7 +421,7 @@ pub fn run_turn_hooked(
                     } else if let Some(raw) = input.get(INVALID_ARGUMENTS) {
                         format!("error: the tool arguments are not valid JSON: {raw}")
                     } else {
-                        call_tool(&tools, hooks, &name, &input, &mut ended, on_event)
+                        call_tool(&tools, extra, hooks, &name, &input, &mut ended, on_event)
                     };
                     on_event(AgentEvent::ToolResult(result.clone()));
                     assistant_blocks.push(block.clone());
@@ -433,6 +470,7 @@ pub fn run_turn_hooked(
 /// One tool call between its PreToolUse/PreWorkflow and PostToolUse/PostWorkflow hooks.
 fn call_tool(
     tools: &Tools,
+    extra: &dyn ToolSource,
     hooks: &Hooked,
     name: &str,
     input: &Value,
@@ -459,9 +497,14 @@ fn call_tool(
         *ended = Some(reason.clone());
         return format!("stopped by a hook: {reason}");
     }
-    let mut result = match tools.call_with(name, input, &mut |id| {
-        on_event(AgentEvent::RunPending(id.to_string()))
-    }) {
+    let called = if extra.handles(name) {
+        extra.call(name, input)
+    } else {
+        tools.call_with(name, input, &mut |id| {
+            on_event(AgentEvent::RunPending(id.to_string()))
+        })
+    };
+    let mut result = match called {
         Ok(output) => output,
         Err(error) => format!("error: {error}"),
     };
