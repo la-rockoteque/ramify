@@ -10,6 +10,7 @@ steps:
 - {step: audit, date: '2026-11-12', note: binary rebuild waits on a release}
 - {step: verify, date: '2026-11-12'}
 - {step: review, date: '2026-11-12'}
+- {step: pr, date: '2026-11-12', note: '#50'}
 ---
 
 # step-commands
