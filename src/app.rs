@@ -5,6 +5,7 @@ use crate::panel::Panel;
 use crate::hooked::Hooked;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use crate::state::{parse_project, project_for_root, Project, Worktree};
+use crate::update::{self, Found};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -143,6 +144,10 @@ pub struct App {
     start_seq: usize,
     /// The next task is the first since SessionStart: it gets the context.
     context_pending: bool,
+    /// The update the start-up check found, once its thread is done.
+    update_slot: Arc<Mutex<Option<Found>>>,
+    /// The update the header shows.
+    pub update_found: Option<Found>,
     /// When `ramify statusline` last refreshed the health cache, and for which worktree.
     health_root: Option<PathBuf>,
     health_at: Option<Instant>,
@@ -186,6 +191,8 @@ impl App {
             session_id: format!("ram-{}", std::process::id()),
             session_started: false,
             start_slot: Arc::new(Mutex::new(Vec::new())),
+            update_slot: Arc::new(Mutex::new(None)),
+            update_found: None,
             start_dir: None,
             start_seq: 0,
             context_pending: false,
@@ -571,6 +578,9 @@ impl App {
 
     pub fn poll_events(&mut self) {
         self.poll_loader();
+        if let Some(found) = self.update_slot.lock().ok().and_then(|mut slot| slot.take()) {
+            self.update_found = Some(found);
+        }
         let notes = self
             .start_slot
             .lock()
@@ -785,6 +795,35 @@ impl App {
                 slot.extend(outcome.notes);
             }
         });
+    }
+
+    /// Checks for an update on a thread: the interface never waits for the network or `git`.
+    pub fn start_update_check(&mut self) {
+        if update::disabled() {
+            return;
+        }
+        let Some(home) = update::home() else {
+            return;
+        };
+        let slot = self.update_slot.clone();
+        std::thread::spawn(move || {
+            let found = update::check(&update::install_of(&home), &update::cache_dir(), &update::releases());
+            if let (Some(found), Ok(mut slot)) = (found, slot.lock()) {
+                *slot = Some(found);
+            }
+        });
+    }
+
+    /// At quit, with `auto_update` on and an update found, starts `ram-code update` on its own.
+    /// Returns whether it started.
+    pub fn auto_update(&mut self) -> bool {
+        if let Some(found) = self.update_slot.lock().ok().and_then(|mut slot| slot.take()) {
+            self.update_found = Some(found);
+        }
+        if update::disabled() || self.update_found.is_none() || !update::auto_update(&self.providers.dir) {
+            return false;
+        }
+        update::start_detached(&update::cache_dir()).is_ok()
     }
 
     /// Fires SessionEnd, and waits for it at most 5 seconds: quitting must not hang on a hook.
@@ -1136,8 +1175,9 @@ impl App {
     }
 
     fn render_chat(&self, area: Rect, buf: &mut Buffer) {
+        let header = if self.update_found.is_some() { 5 } else { 4 };
         let chunks = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(header),
             Constraint::Min(1),
             Constraint::Length(3),
         ])
@@ -1189,6 +1229,12 @@ impl App {
         }
         lines.push(Line::from(chips));
         lines.push(Line::from(Span::raw(format!(" {}", self.status_line))));
+        if let Some(found) = &self.update_found {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", found.line()),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
         lines.push(Line::from(Span::styled(
             "─".repeat(area.width as usize),
             Style::default().fg(Color::DarkGray),

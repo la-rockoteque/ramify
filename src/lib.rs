@@ -11,6 +11,7 @@ pub mod providers;
 pub mod ramify;
 pub mod state;
 pub mod tools;
+pub mod update;
 
 pub use agent::{AgentConfig, AgentEvent};
 pub use app::{App, Screen};

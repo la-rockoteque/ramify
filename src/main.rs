@@ -5,6 +5,7 @@ use ram_code::providers::resolve_from_env;
 use ram_code::app::{App, Screen};
 use ram_code::panel::Pane;
 use ram_code::ramify::RealRunner;
+use ram_code::update;
 use ratatui::DefaultTerminal;
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
@@ -18,8 +19,9 @@ fn main() -> std::io::Result<()> {
     if args.iter().skip(1).any(|arg| arg == "-h" || arg == "--help") {
         println!(
             "Ram Code — a terminal coding harness for Ramify worktrees\n\n\
-             usage: ram [--panel <pane>] [--task <text>]\n\n  \
+             usage: ram [--panel <pane>] [--task <text>] | ram update\n\n  \
              no flags     open the chat\n  \
+             update       install the newer release, or the new commits on main\n  \
              --panel P    open the side panel on dashboard, approvals, scratch, run,\n               \
              sessions, agents or artifacts\n  \
              --task T     run one task without the interface\n\n\
@@ -28,8 +30,27 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
     if args.iter().skip(1).any(|arg| arg == "-V" || arg == "--version") {
-        println!("ram-code {}", env!("CARGO_PKG_VERSION"));
+        let install = update::home().map(|home| update::install_of(&home));
+        match install.and_then(|install| install.version()) {
+            Some(version) => println!("ram-code {} ({version})", env!("CARGO_PKG_VERSION")),
+            None => println!("ram-code {}", env!("CARGO_PKG_VERSION")),
+        }
         return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("update") {
+        let install = update::home()
+            .map(|home| update::install_of(&home))
+            .unwrap_or(update::Install::Unknown);
+        match update::run(&install, &update::releases()) {
+            Ok(done) => {
+                println!("{done}");
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("ram update: {error}");
+                std::process::exit(1);
+            }
+        }
     }
     let root = std::env::var_os("RAMIFY_ROOT")
         .map(PathBuf::from)
@@ -69,10 +90,12 @@ fn main() -> std::io::Result<()> {
     }
 
     app.start_session("startup");
+    app.start_update_check();
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
     app.end_session();
+    app.auto_update();
     result
 }
 

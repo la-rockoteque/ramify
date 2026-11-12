@@ -138,7 +138,35 @@ curl -fsSL https://raw.githubusercontent.com/la-rockoteque/ramify/main/install.s
 The installer downloads the latest [GitHub Release](https://github.com/la-rockoteque/ramify/releases)
 for your machine into `~/.local/share/ramify`. It checks the archive's SHA-256 and links `ram`
 (Ram Code) and `ramify` (the CLI) into `~/.local/bin`. Ram Code calls `ramify`, so it installs
-both. Rust is not needed. Run the installer again to update.
+both. Rust is not needed. Run the installer again to update, or use `ram update`.
+
+### Updates
+
+When the interface starts, Ram Code checks for an update on a background thread. It checks at
+most once in 24 hours, and keeps the result in `~/.cache/ram-code/update.json`. A network error
+or a check longer than 10 s shows nothing.
+
+- A release install (a folder with a `RELEASE` file) compares its tag with the latest GitHub
+  release. `RAMIFY_RELEASES` changes the releases URL.
+- A checkout runs `git fetch origin main` and counts the commits on `origin/main` that `main`
+  does not have.
+
+When an update exists, the header shows `update v0.3.0 → ram update`, or
+`update: 4 commits on main → ram update`.
+
+`ram update` installs it:
+
+- A release install runs its own `install.sh` from a copy. The installer checks the SHA-256 and
+  swaps the folder in one move, so a failed update keeps the old release.
+- A checkout fast-forwards `main` to `origin/main`, then builds `cli/` and Ram Code in release
+  mode. It refuses a checkout on another branch, with uncommitted changes, or with commits that
+  `origin/main` does not have.
+
+Auto-update is off. To turn it on, put `{"auto_update": true}` in
+`~/.config/ram-code/settings.json`. Then, when you quit with an update found, Ram Code starts
+`ram update` on its own. Its output goes to `~/.cache/ram-code/update.log`, and the next start
+uses the new version. `RAM_CODE_NO_UPDATE=1` turns off the check, the header line and
+auto-update. `ram --version` names the release tag, or the branch and commit of a checkout.
 
 Releases exist for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). On another
 machine, pass `--from-source`: the installer then clones the repo and builds it with cargo
