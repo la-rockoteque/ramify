@@ -155,14 +155,33 @@ The tests are `cargo test`; they cover the acceptance criteria in
 
 `run_command` runs each command in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux.
 
-- A command reads any file except credentials in the home folder: `~/.ssh`, `~/.aws`,
+On macOS the sandbox denies everything by default. It then allows only what builds, tests and Git
+need:
+
+- A command runs programs, starts child processes, and reads system settings. It can signal
+  and inspect only its own processes.
+- A command reads files only under these roots:
+  - system folders: `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/private/etc`, `/dev`,
+    `/opt/homebrew` and `/Applications/Xcode.app`;
+  - the worktree, the task's temp folder (`$TMPDIR`), and the main repository's Git folder of
+    a linked worktree;
+  - the per-user temp and cache folders under `/private/var/folders`;
+  - toolchains in the home folder: `~/.cargo`, `~/.rustup`, `~/.asdf`, `~/.nvm`, `~/.pyenv`,
+    `~/.volta`, `~/.local/share/mise`, `~/.npm` and `~/.tool-versions`;
+  - Git settings: `~/.gitconfig`, the files whose name starts with it, and `~/.config/git`.
+- Other files, such as `~/Documents`, your other repositories and your dotfiles, stay
+  unreadable. A command can still see that a path exists.
+- A command writes only in the worktree, in the task's temp folder, and to `/dev/null`.
+  Two more places let `ar`, `xcrun` and `clang` work: files directly in the per-user temp
+  folder, and clang's cache. Other programs use these places too, so a command could leave a
+  file there that another program reads later.
+- A command never reads credentials in the home folder: `~/.ssh`, `~/.aws`,
   `~/.azure`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.config/gh`,
   `~/.config/hub`, `~/.config/anthropic`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`,
   `~/.pypirc`, `~/.cargo/credentials.toml`, `~/.vault-token`, `~/.terraform.d`, `~/.orbstack`,
-  `~/.colima`, the shell histories and `~/Library/Keychains`. What a command reads goes to the
-  provider in the transcript.
-- A command writes only in the worktree, in a temp folder for the task (`$TMPDIR`), and to
-  `/dev/null`.
+  `~/.colima`, the shell histories and `~/Library/Keychains`. It never writes them either.
+  What a command reads goes to the provider in the transcript.
+- A command never writes Ram Code's configuration folder, so it cannot widen its own sandbox.
 - A command never writes Git metadata: a `.git` file or folder anywhere in the worktree. Git runs
   hooks and `core.fsmonitor` from there later, outside the sandbox. `git init` and
   `git commit` fail in the sandbox.
@@ -182,6 +201,24 @@ The tests are `cargo test`; they cover the acceptance criteria in
   command's whole process group and returns the output so far with `timed out after N s`.
   A background job that outlives its command is killed too. Ram Code keeps at most 40,000
   bytes of output, and stops reading 1 second after the command ends.
+
+To add paths for good, list them in `~/.config/ram-code/sandbox.json`. `RAM_CODE_CONFIG_DIR`
+moves that folder:
+
+```json
+{ "read": ["~/work/shared-fixtures"], "write": ["~/.cache/my-tool"] }
+```
+
+- A path is absolute or starts with `~/`.
+- A credential path or a `.git` path stays denied, even when the file lists it.
+- Ram Code reads no sandbox file from the worktree, so a project cannot widen its own sandbox.
+- A file that is not valid stops every sandboxed command, with an error that names the file.
+
+When a command fails with `Operation not permitted`, the tool result ends with a hint. It names
+`sandbox.json` for a lasting need, and `outside_sandbox` for a one-time need.
+
+On Linux, `bwrap` still lets a command read any file except the credentials. A deny-by-default
+view needs a bind for each root, which is a later change.
 
 The sandbox cannot protect what you run later yourself. A command can change a `Makefile`,
 `build.rs`, `.cargo/config.toml`, `.envrc`, `package.json` scripts or `node_modules/.bin` in the
