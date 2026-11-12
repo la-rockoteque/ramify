@@ -53,8 +53,20 @@ approvals, scratch, run, sessions, agents and artifacts. `1`–`7` or `[`/`]` sw
 `ram-code --panel approvals` starts with that pane open. The panel is for people in a terminal;
 the Electron windows below stay for Claude Code and Codex sessions.
 
-Ram Code reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. It stores no key. The model is
-`RAM_CODE_MODEL`, else `ANTHROPIC_DEFAULT_SONNET_MODEL`, else `deepseek-v4.1-flash`.
+Ram Code stores no key. It takes the first credential it finds:
+
+| Credential | Sent as | Default base URL | Default model |
+| --- | --- | --- | --- |
+| `ANTHROPIC_API_KEY` | `x-api-key` | `https://api.anthropic.com` | `claude-opus-5-5` |
+| `ANTHROPIC_AUTH_TOKEN` | `Authorization: Bearer` and `x-api-key` | `http://127.0.0.1:15721` | `deepseek-v4.1-flash` |
+| Anthropic login (`ant auth login`) | `Authorization: Bearer` with `anthropic-beta: oauth-2025-04-20` | `https://api.anthropic.com` | `claude-opus-5-5` |
+
+For the Anthropic login, run `ant auth login` once. Before each request, Ram Code runs
+`ant auth print-credentials --access-token`, which refreshes the token when needed.
+`ANTHROPIC_PROFILE` selects a profile. An exported key or token overrides the login.
+
+`ANTHROPIC_BASE_URL` overrides the base URL. The model is `RAM_CODE_MODEL`, else
+`ANTHROPIC_DEFAULT_SONNET_MODEL`, else the default in the table.
 
 Run one task without the interface:
 
