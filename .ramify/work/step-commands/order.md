@@ -6,6 +6,7 @@ tags: []
 created: 2026-11-12
 steps:
 - {step: diagnose, date: '2026-11-12'}
+- {step: fix, date: '2026-11-12'}
 ---
 
 # step-commands
