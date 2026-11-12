@@ -155,6 +155,8 @@ done
 : "${RAMIFY_JIRA_URL:=}"
 : "${RAMIFY_WORKFLOW_SOURCE:=auto}"
 : "${RAMIFY_WORKFLOW_DOCS:=}"
+: "${RAMIFY_MOCKUPS:=penpot}"
+: "${RAMIFY_MOCKUP_URL:=http://localhost:9001}"
 : "${RAMIFY_JIRA_DONE:=}"
 : "${RAMIFY_JIRA_PROGRESS:=In Progress}"
 : "${RAMIFY_JIRA_REVIEW:=}"
@@ -1692,6 +1694,13 @@ show_config() { # [-q | get VAR]
   case "${RAMIFY_SESSION_NAMES:-trees}" in off|*[[:space:]]*) ;; *)
     [ -f "$RAMIFY_HOME/assets/names/${RAMIFY_SESSION_NAMES:-trees}.txt" ] \
       || echo "  warning: no theme named '$RAMIFY_SESSION_NAMES' in $RAMIFY_HOME/assets/names" ;; esac
+  if [ "$RAMIFY_MOCKUPS" = penpot ]; then
+    echo "mockups     $RAMIFY_MOCKUPS   $RAMIFY_MOCKUP_URL"
+  else
+    echo "mockups     $RAMIFY_MOCKUPS"
+  fi
+  case "$RAMIFY_MOCKUPS" in penpot|off) ;; *)
+    echo "  warning: no mockup provider named '$RAMIFY_MOCKUPS' (known: penpot, off)" ;; esac
   echo "state       $STATE_DIR"
   [ -n "$CONFIG" ]
 }

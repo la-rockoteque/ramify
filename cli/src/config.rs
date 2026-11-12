@@ -3,6 +3,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The mockup providers the spec step knows. `off` makes no mockups.
+pub const MOCKUP_PROVIDERS: [&str; 2] = ["penpot", "off"];
+pub const DEFAULT_MOCKUPS: &str = "penpot";
+/// The port a local Penpot listens on with its Docker Compose file.
+pub const DEFAULT_MOCKUP_URL: &str = "http://localhost:9001";
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Config {
@@ -27,6 +33,8 @@ pub struct Config {
     pub ticket_pattern: String,
     pub workflow_docs: String,
     pub session_names: String,
+    pub mockups: String,
+    pub mockup_url: String,
     pub values: HashMap<String, String>,
 }
 
@@ -64,6 +72,8 @@ impl Config {
             "RAMIFY_WORKFLOW_SOURCE" => Some(self.workflow_source.clone()),
             "RAMIFY_WORKFLOW_DOCS" => Some(self.workflow_docs.clone()),
             "RAMIFY_SESSION_NAMES" => Some(self.session_names.clone()),
+            "RAMIFY_MOCKUPS" => Some(self.mockups.clone()),
+            "RAMIFY_MOCKUP_URL" => Some(self.mockup_url.clone()),
             "RAMIFY_MAX_SLOT" => Some(self.max_slot.to_string()),
             _ => None,
         }
@@ -107,6 +117,12 @@ impl Config {
                 .or_else(|| std::env::var(key).ok())
         };
         let get_or = |key: &str, default: &str| get(key).unwrap_or_else(|| default.to_string());
+        // Like the shell's `${VAR:=default}`: an empty value takes the default too.
+        let get_set = |key: &str, default: &str| {
+            get(key)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| default.to_string())
+        };
 
         let project = get("RAMIFY_PROJECT").unwrap_or_else(|| basename(&primary));
         let worktrees = get_or("RAMIFY_WORKTREES", &format!("../{}-wt", basename(&primary)));
@@ -154,6 +170,8 @@ impl Config {
             ticket_pattern: get_or("RAMIFY_TICKET_PATTERN", "[A-Za-z][A-Za-z0-9]*-[0-9]+"),
             workflow_docs: get_or("RAMIFY_WORKFLOW_DOCS", ""),
             session_names: get_or("RAMIFY_SESSION_NAMES", "trees"),
+            mockups: get_set("RAMIFY_MOCKUPS", DEFAULT_MOCKUPS),
+            mockup_url: get_set("RAMIFY_MOCKUP_URL", DEFAULT_MOCKUP_URL),
             values,
         })
     }

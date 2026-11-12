@@ -182,6 +182,69 @@ fn config_matches_the_shell() {
     }
 }
 
+/// `RAMIFY_MOCKUPS` defaults to a local Penpot, takes `off`, and warns on a provider it does not know.
+#[test]
+fn mockups_match_the_shell() {
+    let cases = [
+        (
+            "",
+            "mockups     penpot   http://localhost:9001\n",
+            "penpot\n",
+            false,
+        ),
+        ("RAMIFY_MOCKUPS=off\n", "mockups     off\n", "off\n", false),
+        (
+            "RAMIFY_MOCKUPS=excalidraw\n",
+            "mockups     excalidraw\n",
+            "excalidraw\n",
+            true,
+        ),
+    ];
+    for (index, (conf, line, get, warns)) in cases.into_iter().enumerate() {
+        let fixture = temp(&format!("mockups-{index}"));
+        git(&["init", "-q", "-b", "main"], &fixture);
+        fs::write(
+            fixture.join(".ramify.conf"),
+            format!("RAMIFY_SERVICES=\"\"\n{conf}"),
+        )
+        .unwrap();
+        git(&["add", "."], &fixture);
+        git(&["commit", "-qm", "init"], &fixture);
+        let fixture = fixture.canonicalize().unwrap();
+        let state = temp(&format!("mockups-{index}-state"));
+        let registry = temp(&format!("mockups-{index}-registry")).join("projects");
+
+        for args in [vec!["config"], vec!["config", "get", "RAMIFY_MOCKUPS"]] {
+            let shell = run_args(&reference_bin(), &args, &fixture, &state, &registry, true);
+            let rust = run_args(
+                Path::new(env!("CARGO_BIN_EXE_ramify")),
+                &args,
+                &fixture,
+                &state,
+                &registry,
+                false,
+            );
+            let shell_out = String::from_utf8_lossy(&shell.stdout).into_owned();
+            let rust_out = String::from_utf8_lossy(&rust.stdout).into_owned();
+            assert_eq!(shell.status.code(), rust.status.code());
+            assert_eq!(shell_out, rust_out, "{conf:?} {args:?} differs");
+            if args.len() == 1 {
+                assert!(
+                    rust_out.contains(line),
+                    "{conf:?}: no {line:?} in\n{rust_out}"
+                );
+                assert_eq!(
+                    rust_out.contains("no mockup provider named"),
+                    warns,
+                    "{conf:?}: warning\n{rust_out}"
+                );
+            } else {
+                assert_eq!(rust_out, get, "{conf:?}: config get");
+            }
+        }
+    }
+}
+
 #[test]
 fn status_matches_the_shell() {
     let fixture = temp("status");

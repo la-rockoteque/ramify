@@ -28,6 +28,20 @@ Follow the [workflow contract](../workflow/SKILL.md). This step is a **human gat
 
 Keep the work order body to the summary: what and why, in a few lines, with a link to `spec.md`.
 
+## Mockups
+
+When the feature adds or changes a screen, show it before the gate. `ramify config get
+RAMIFY_MOCKUPS` names the provider:
+
+- `penpot` (the default): draw one board per screen and per state named in **Behaviour**, in
+  the Penpot at `ramify config get RAMIFY_MOCKUP_URL` (a local Penpot by default). Use a
+  Penpot MCP tool when the session has one. Otherwise ask the user to draw the boards, or to
+  start Penpot when the URL does not answer. Put a **Mockups** section in `spec.md` with one
+  link per board, and the AC each board shows.
+- `off`: make no mockups. Describe the screens in **Behaviour** only.
+
+A feature with no visible change needs no mockup, whatever the provider.
+
 ## Prose
 
 Run `ocre-jelly` on `spec.md` and on the work order body before you show them.
