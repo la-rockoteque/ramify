@@ -788,3 +788,31 @@ fn system_message_shows_in_the_transcript() {
     let (_, notes) = turn(&fixture, &fixture.hooked(), vec![tool("run_command", json!({"command": "true"}))]);
     assert_eq!(notes, ["hook PreToolUse: lint is slow today"]);
 }
+
+#[test]
+fn an_old_ramify_plugin_gives_way_to_ram_codes_own_hooks() {
+    // The installed ramify plugin predates hooks/ram.json: its Claude Code hooks match `Bash` and
+    // run without RAMIFY_AGENT=ram. Ram Code's own ram.json takes its place.
+    let fixture = Fixture::new("old-ramify");
+    let old = fixture.base.join("plugins/ramify");
+    std::fs::create_dir_all(old.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        old.join(".claude-plugin/plugin.json"),
+        json!({"hooks": {"Stop": group("", "echo old-claude-hook")}}).to_string(),
+    )
+    .unwrap();
+    let installed = fixture.home.join(".claude/plugins/installed_plugins.json");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    std::fs::write(&installed, json!({"plugins": {"ramify@ramify": [{"installPath": old}]}}).to_string()).unwrap();
+    std::fs::write(
+        fixture.home.join(".claude/settings.json"),
+        json!({"enabledPlugins": {"ramify@ramify": true}}).to_string(),
+    )
+    .unwrap();
+    let ramify = fixture.base.join("ramify-home");
+    fixture.settings(&ramify.join("hooks/ram.json"), json!({"Stop": group("", "echo ram-hook")}));
+    let set = HookSet::load(&fixture.home, &fixture.project, Some(&ramify), Sources::All);
+    let commands: Vec<&str> = set.matching("Stop", "").iter().map(|hook| hook.command.as_str()).collect();
+    assert_eq!(commands, ["echo ram-hook"]);
+    assert_eq!(set.matching("Stop", "")[0].plugin_root.as_deref(), Some(ramify.as_path()));
+}

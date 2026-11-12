@@ -24,7 +24,10 @@ for it.
       A plugin that ships `hooks/ram.json` uses it, not its Claude Code hooks: their matchers
       name Claude Code's tools. (Added in the build.)
    6. `<RAMIFY_HOME>/hooks/ram.json`: ramify's hooks for Ram Code (see 14). It is skipped when
-      the ramify plugin was read in 5, so ramify's hooks never run twice. (Added in the build.)
+      the ramify plugin read in 5 has its own `hooks/ram.json`. An enabled ramify plugin
+      without one (0.10.2 and older) is not read at all: its Claude Code hooks match `Bash` and
+      run without `RAMIFY_AGENT=ram`. Either way, ramify's hooks run once. (Added in the build
+      and in QA.)
    `RAMIFY_HOOKS_HOME` replaces `~` for these files, and `ramify hooks list` prints every hook
    they hold. (Added in the build.)
 2. `<project>` is the primary checkout of the project that Ram Code opened.

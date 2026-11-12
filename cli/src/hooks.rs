@@ -77,13 +77,21 @@ impl HookSet {
         set.file(&home.join(".claude/settings.json"), None, &[]);
         set.file(&project.join(".claude/settings.json"), None, &[]);
         set.file(&project.join(".claude/settings.local.json"), None, &[]);
+        // Ram Code ships with ramify, so ramify's hooks for it come from `ramify_home` when the
+        // installed ramify plugin has none: its Claude Code hooks match `Bash` and run without
+        // RAMIFY_AGENT=ram. Either way, ramify's hooks are read once.
+        let ram_home = ramify_home.map(|home| home.join("hooks/ram.json")).filter(|path| path.is_file());
         let mut ramify_loaded = false;
         for (name, root) in enabled_plugins(home) {
+            let is_ramify = name.starts_with("ramify@");
             // A plugin that ships hooks for Ram Code uses them, not its Claude Code ones: their
             // matchers name Claude Code's tools.
             let ram = root.join("hooks/ram.json");
             if ram.is_file() {
                 set.file(&ram, Some(&root), &[]);
+                ramify_loaded |= is_ramify;
+            } else if is_ramify && ram_home.is_some() {
+                continue;
             } else {
                 let manifest = root.join(".claude-plugin/plugin.json");
                 let hooks = root.join("hooks/hooks.json");
@@ -91,13 +99,9 @@ impl HookSet {
                     set.file(&hooks, Some(&root), &[]);
                 }
             }
-            ramify_loaded |= name.starts_with("ramify@");
         }
-        if let (Some(ramify), false) = (ramify_home, ramify_loaded) {
-            let ram = ramify.join("hooks/ram.json");
-            if ram.is_file() {
-                set.file(&ram, Some(ramify), &[]);
-            }
+        if let (Some(ram), Some(ramify), false) = (&ram_home, ramify_home, ramify_loaded) {
+            set.file(ram, Some(ramify), &[]);
         }
         set
     }
