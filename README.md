@@ -190,6 +190,8 @@ need:
 - A command runs in its own session, with no terminal. It cannot type into Ram Code.
 - On macOS, a command cannot start a program outside the sandbox: `open`, `osascript`,
   `osacompile` and `launchctl` are blocked, and so are Apple events and Launch Services.
+- On macOS, a command cannot reach the Keychain. `security find-generic-password` fails, so a
+  token stored with the `security` command stays out of the transcript.
 - On Linux, `bwrap` also hides `/run/user/<uid>` (the session bus) and the Docker socket, and
   gives the command its own process and IPC namespaces.
 - The environment has no provider keys. Ram Code removes every `ANTHROPIC_*` and `RAM_CODE_*`
