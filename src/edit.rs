@@ -1,14 +1,14 @@
 //! `edit_file`: replace an exact string in one file of the worktree.
 
 use crate::search::read_utf8;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::write::replace;
+use std::path::Path;
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
+/// The most line numbers an ambiguous-match error lists.
+const MAX_LINES_LISTED: usize = 10;
 
-/// Replace `old` with `new` in the file at `path`, which `Tools::resolve` already checked.
-/// `relative` is the path the model gave, for the `.git` check and the output.
+/// Replace `old` with `new` in the file at `path`, which `write::target` returned.
+/// `relative` is the path the model gave, for the messages.
 pub fn edit_file(
     path: &Path,
     relative: &str,
@@ -16,12 +16,6 @@ pub fn edit_file(
     new: &str,
     replace_all: bool,
 ) -> Result<String, String> {
-    if Path::new(relative)
-        .components()
-        .any(|c| matches!(c, Component::Normal(name) if name == ".git"))
-    {
-        return Err(format!("{relative} is inside .git, which is not edited"));
-    }
     if old.is_empty() {
         return Err("old_string is empty; use write_file to create a file".into());
     }
@@ -30,15 +24,14 @@ pub fn edit_file(
     }
     let text = read_utf8(path)?;
 
-    // A CRLF file gets CRLF in the strings, so an LF edit matches and keeps the file's endings.
-    // A file with mixed endings is matched as it is first, and with CRLF only if that fails.
+    // A CRLF file gets CRLF in old_string, so an LF edit matches. A file with mixed endings is
+    // matched as it is first, and with CRLF only if that fails.
     let crlf = text.contains("\r\n");
     let bare_lf = text.replace("\r\n", "").contains('\n');
-    let converted = (to_crlf(old), to_crlf(new));
-    let (old, new) = if crlf && (!bare_lf || !text.contains(old)) {
-        converted
+    let old = if crlf && (!bare_lf || !text.contains(old)) {
+        to_crlf(old)
     } else {
-        (old.to_string(), new.to_string())
+        old.to_string()
     };
 
     let starts: Vec<usize> = text.match_indices(&old).map(|(at, _)| at).collect();
@@ -51,35 +44,59 @@ pub fn edit_file(
         }
         1 => {}
         count if !replace_all => {
-            let lines: Vec<String> = starts
+            let listed: Vec<String> = starts
                 .iter()
+                .take(MAX_LINES_LISTED)
                 .map(|&at| line_of(&text, at).to_string())
                 .collect();
+            let mut list = listed.join(", ");
+            if count > listed.len() {
+                list.push_str(&format!(", and {} more", count - listed.len()));
+            }
             return Err(format!(
-                "old_string occurs {count} times in {relative}, on lines {}. Add context so it \
-                 occurs once, or set replace_all.",
-                lines.join(", ")
+                "old_string occurs {count} times in {relative}, on lines {list}. Add context so \
+                 it occurs once, or set replace_all."
             ));
         }
         _ => {}
     }
 
-    let first_line = line_of(&text, starts[0]);
-    let edited = if replace_all {
-        text.replace(&old, &new)
-    } else {
-        text.replacen(&old, &new, 1)
-    };
-    write_over(path, &edited)?;
-
-    let count = starts.len();
-    if count > 1 {
-        return Ok(format!("replaced {count} occurrences in {relative}"));
+    // Each replacement takes the line ending of the line where its match starts, so new lines
+    // in a CRLF part of the file get CRLF and new lines in an LF part get LF.
+    let mut edited = String::with_capacity(text.len());
+    let mut from = 0;
+    let mut first_range = (0, 0);
+    let mut last_range = (0, 0);
+    for (index, &at) in starts.iter().enumerate() {
+        edited.push_str(&text[from..at]);
+        let piece = if line_is_crlf(&text, at) {
+            to_crlf(new)
+        } else {
+            new.replace("\r\n", "\n")
+        };
+        let start_line = line_of(&edited, edited.len());
+        let end_line = start_line + lines_in(&piece) - 1;
+        if index == 0 {
+            first_range = (start_line, end_line);
+        }
+        last_range = (start_line, end_line);
+        edited.push_str(&piece);
+        from = at + old.len();
     }
-    let new_lines = new.matches('\n').count();
+    edited.push_str(&text[from..]);
+    replace(path, edited.as_bytes())?;
+
+    if starts.len() > 1 {
+        return Ok(format!(
+            "replaced {} occurrences in {relative}, lines {}-{}",
+            starts.len(),
+            first_range.0,
+            last_range.1
+        ));
+    }
     Ok(format!(
-        "edited {relative}: lines {first_line}-{}",
-        first_line + new_lines
+        "edited {relative}: lines {}-{}",
+        first_range.0, first_range.1
     ))
 }
 
@@ -92,29 +109,22 @@ fn line_of(text: &str, at: usize) -> usize {
     text[..at].matches('\n').count() + 1
 }
 
-/// Write a sibling file with the original mode, then rename it over the file, so a failed write
-/// never leaves the file half written.
-fn write_over(path: &Path, text: &str) -> Result<(), String> {
-    let shown = path.display();
-    let mode = std::fs::metadata(path)
-        .map_err(|e| format!("could not read {shown}: {e}"))?
-        .permissions()
-        .mode();
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("{shown} has no file name"))?;
-    let partial = path.with_file_name(format!(
-        ".{name}.ram-edit-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
-    let result = std::fs::write(&partial, text)
-        .and_then(|_| std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(mode)))
-        .and_then(|_| std::fs::rename(&partial, path));
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&partial);
-        return Err(format!("could not write {shown}: {error}"));
+/// True when the line that holds byte `at` ends in CRLF. A last line with no ending takes the
+/// ending of the line before it.
+fn line_is_crlf(text: &str, at: usize) -> bool {
+    match text[at..].find('\n') {
+        Some(offset) => text[..at + offset].ends_with('\r'),
+        None => text[..at]
+            .rfind('\n')
+            .is_some_and(|end| text[..end].ends_with('\r')),
     }
-    Ok(())
+}
+
+/// The lines a replacement fills. A final line ending does not start another line.
+fn lines_in(piece: &str) -> usize {
+    let body = piece
+        .strip_suffix("\r\n")
+        .or_else(|| piece.strip_suffix('\n'))
+        .unwrap_or(piece);
+    body.matches('\n').count() + 1
 }
