@@ -52,6 +52,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash|Read|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" workflow-pre",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -77,6 +87,16 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" auto-gate",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Read|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" workflow-post",
+            "timeout": 30
           }
         ]
       }

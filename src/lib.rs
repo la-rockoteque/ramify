@@ -1,6 +1,10 @@
 pub mod agent;
 pub mod app;
 pub mod bonsai_art;
+/// Claude Code's hook mechanics, shared with the ramify CLI.
+#[path = "../cli/src/hooks.rs"]
+pub mod hooks;
+pub mod hooked;
 pub mod panel;
 pub mod ramify;
 pub mod state;
