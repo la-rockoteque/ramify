@@ -14,7 +14,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -107,6 +107,13 @@ pub struct App {
     loader: Option<Loader>,
     task_seq: u64,
     picker_from: usize,
+    /// The `ramify prompt` line of the selected worktree, and when and where it was read.
+    status_line: String,
+    status_root: Option<PathBuf>,
+    status_at: Option<Instant>,
+    /// This session's record, once a task has started: `ramify prompt` shows it as `◆ ram`.
+    ram_record: Option<PathBuf>,
+    ram_since: u64,
 }
 
 impl App {
@@ -133,6 +140,11 @@ impl App {
             loader: None,
             task_seq: 0,
             picker_from: 0,
+            status_line: String::new(),
+            status_root: None,
+            status_at: None,
+            ram_record: None,
+            ram_since: 0,
         }
     }
 
@@ -413,6 +425,7 @@ impl App {
             .spawn();
         match child {
             Ok(child) => {
+                self.write_ram_record(&worktree.path, "working");
                 self.worker = Some(Worker {
                     child,
                     events,
@@ -454,6 +467,7 @@ impl App {
             let stderr = self.worker.as_ref().map(|worker| worker.stderr.clone());
             self.worker = None;
             self.running = false;
+            self.task_ended();
             if was_running {
                 let tail = stderr
                     .and_then(|path| std::fs::read_to_string(path).ok())
@@ -579,6 +593,80 @@ impl App {
             let _ = std::fs::remove_dir_all(directory);
         }
         self.running = false;
+        self.task_ended();
+    }
+
+    fn task_ended(&mut self) {
+        let root = self
+            .ram_record
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|value| value["root"].as_str().map(PathBuf::from));
+        if let Some(root) = root {
+            self.write_ram_record(&root, "idle");
+        }
+        // The task may have changed the branch or the stack: read the line again.
+        self.status_at = None;
+    }
+
+    /// `sessions/ram-<pid>.session`, in the format the session hooks write for Claude Code and
+    /// Codex, so `ramify prompt` and the Sessions pane list Ram Code with them.
+    fn write_ram_record(&mut self, root: &std::path::Path, state: &str) {
+        let directory = PathBuf::from(
+            std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into()),
+        )
+        .join("sessions");
+        if std::fs::create_dir_all(&directory).is_err() {
+            return;
+        }
+        if self.ram_since == 0 {
+            self.ram_since = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+        }
+        let path = directory.join(format!("ram-{}.session", std::process::id()));
+        let record = serde_json::json!({
+            "agent": "ram",
+            "root": root,
+            "pid": std::process::id(),
+            "state": state,
+            "since": self.ram_since,
+        });
+        let temporary = path.with_extension("session.tmp");
+        if std::fs::write(&temporary, record.to_string()).is_ok()
+            && std::fs::rename(&temporary, &path).is_ok()
+        {
+            self.ram_record = Some(path);
+        }
+    }
+
+    fn refresh_status(&mut self) {
+        let Some(root) = self.selected_worktree().map(|worktree| worktree.path.clone()) else {
+            self.status_line.clear();
+            self.status_root = None;
+            return;
+        };
+        let fresh = self.status_root.as_ref() == Some(&root)
+            && self
+                .status_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(5));
+        if fresh {
+            return;
+        }
+        self.status_line = self
+            .runner
+            .run(&CommandSpec {
+                root: root.clone(),
+                args: vec!["prompt".into()],
+            })
+            .ok()
+            .filter(|output| output.ok())
+            .and_then(|output| output.stdout.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        self.status_root = Some(root);
+        self.status_at = Some(Instant::now());
     }
 
     fn push(&mut self, role: Role, text: impl Into<String>) {
@@ -779,6 +867,7 @@ impl App {
             self.panel.set_worktree(Some(worktree.path.clone()));
         }
         self.panel.tick(&*self.runner, &self.root);
+        self.refresh_status();
     }
 
     pub fn open_root(&mut self, root: PathBuf) {
@@ -820,7 +909,7 @@ impl App {
 
     fn render_chat(&self, area: Rect, buf: &mut Buffer) {
         let chunks = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(1),
             Constraint::Length(3),
         ])
@@ -867,6 +956,7 @@ impl App {
             }
         }
         lines.push(Line::from(chips));
+        lines.push(Line::from(Span::raw(format!(" {}", self.status_line))));
         lines.push(Line::from(Span::styled(
             "─".repeat(area.width as usize),
             Style::default().fg(Color::DarkGray),
@@ -1253,4 +1343,13 @@ fn shadow_rows(art: &[&str]) -> Vec<String> {
         }
     }
     vec![near.into_iter().collect(), far.into_iter().collect()]
+}
+
+/// Ram Code is an agent session while it runs: its record goes when it quits.
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(path) = self.ram_record.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }

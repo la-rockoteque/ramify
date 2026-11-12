@@ -625,3 +625,11 @@ fn prompt_install_links_the_plugin() {
         "{text}"
     );
 }
+
+#[test]
+fn a_ram_session_shows_as_ram() {
+    let fixture = Fixture::plain("ram");
+    let wt = fixture.worktree(1);
+    fixture.put("ram-1", &wt, "ram", "working", 1, std::process::id(), None);
+    assert_eq!(fixture.prompt(&wt), "𖣂 wt-1 ⎇ feat/wt-1 · ◆ ram");
+}

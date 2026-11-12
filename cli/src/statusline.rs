@@ -299,7 +299,8 @@ fn agents(state_root: &str, root: &Path) -> Vec<Agent> {
     found
 }
 
-/// ` · ✻ birch, ◇ ash ⏸`: Claude Code is ✻, Codex is ◇, and ⏸ follows an idle session.
+/// ` · ✻ birch, ◇ ash ⏸`: Claude Code is ✻, Codex is ◇, Ram Code is ◆, and ⏸ follows an idle
+/// session.
 fn agents_line(agents: &[Agent]) -> String {
     if agents.is_empty() {
         return String::new();
@@ -307,7 +308,11 @@ fn agents_line(agents: &[Agent]) -> String {
     let parts: Vec<String> = agents
         .iter()
         .map(|agent| {
-            let mark = if agent.agent == "codex" { "◇" } else { "✻" };
+            let mark = match agent.agent.as_str() {
+                "codex" => "◇",
+                "ram" => "◆",
+                _ => "✻",
+            };
             let label = agent.name.clone().unwrap_or_else(|| agent.agent.clone());
             let idle = if agent.state == "idle" { " ⏸" } else { "" };
             format!("{mark} {label}{idle}")

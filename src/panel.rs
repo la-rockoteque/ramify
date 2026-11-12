@@ -101,6 +101,9 @@ pub struct SessionEntry {
     pub root: Option<PathBuf>,
     pub branch: String,
     pub project: String,
+    /// From the session record: `claude`, `codex` or `ram`. Empty for a pinned session without one.
+    pub agent: String,
+    pub state: String,
 }
 
 enum Visible {
@@ -739,11 +742,15 @@ impl Panel {
                             } else {
                                 Style::default().fg(color)
                             };
+                            let who = if session.agent.is_empty() {
+                                format!("{} {}", session.id, session.name)
+                            } else {
+                                session_label(session)
+                            };
                             lines.push(Line::from(Span::styled(
                                 format!(
-                                    "  {} {} {} {}",
-                                    session.id,
-                                    session.name,
+                                    "  {} {} {}",
+                                    who,
                                     session.branch,
                                     session
                                         .root
@@ -886,44 +893,89 @@ fn state_root() -> PathBuf {
     PathBuf::from(std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into()))
 }
 
+/// Every live session: the records the session hooks write (`<id>.session`), and the sessions
+/// that `ramify new` pinned to a worktree (`<id>.root`) without a live record.
 fn sessions() -> Vec<SessionEntry> {
     let directory = state_root().join("sessions");
     let Ok(entries) = std::fs::read_dir(&directory) else {
         return Vec::new();
     };
-    let mut sessions: Vec<SessionEntry> = entries
-        .flatten()
-        .filter(|entry| entry.path().extension().map(|ext| ext == "root").unwrap_or(false))
-        .filter_map(|entry| {
-            let path = entry.path();
-            let id = path.file_stem()?.to_string_lossy().into_owned();
-            let root = std::fs::read_to_string(&path)
-                .ok()
-                .map(|text| PathBuf::from(text.trim()))
-                .filter(|path| path.is_dir());
-            let name = std::fs::read_to_string(directory.join(format!("{id}.name")))
-                .ok()
-                .and_then(|text| text.lines().next().map(str::to_string))
-                .unwrap_or_default();
-            let branch = root
-                .as_deref()
-                .and_then(git_branch)
-                .unwrap_or_default();
-            let project = root
-                .as_deref()
-                .and_then(primary_of)
-                .unwrap_or_default();
-            Some(SessionEntry {
-                id,
-                name,
-                root,
-                branch,
-                project,
-            })
-        })
-        .collect();
+    let mut records: Vec<(String, Value)> = Vec::new();
+    let mut pins: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("session") => {
+                let record = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .filter(|record| record["pid"].as_u64().is_some_and(running));
+                if let Some(record) = record {
+                    records.push((id, record));
+                }
+            }
+            Some("root") => pins.push((id, path)),
+            _ => {}
+        }
+    }
+    let name_of = |id: &str| {
+        std::fs::read_to_string(directory.join(format!("{id}.name")))
+            .ok()
+            .and_then(|text| text.lines().next().map(str::to_string))
+            .unwrap_or_default()
+    };
+    let entry = |id: String, root: Option<PathBuf>, agent: String, state: String| SessionEntry {
+        name: name_of(&id),
+        branch: root.as_deref().and_then(git_branch).unwrap_or_default(),
+        project: root.as_deref().and_then(primary_of).unwrap_or_default(),
+        id,
+        root,
+        agent,
+        state,
+    };
+    let mut sessions: Vec<SessionEntry> = Vec::new();
+    for (id, path) in pins {
+        if records.iter().any(|(record, _)| *record == id) {
+            continue;
+        }
+        let root = std::fs::read_to_string(&path)
+            .ok()
+            .map(|text| PathBuf::from(text.trim()))
+            .filter(|path| path.is_dir());
+        sessions.push(entry(id, root, String::new(), String::new()));
+    }
+    for (id, record) in records {
+        let root = record["root"].as_str().map(PathBuf::from).filter(|path| path.is_dir());
+        let agent = record["agent"].as_str().unwrap_or("").to_string();
+        let state = record["state"].as_str().unwrap_or("idle").to_string();
+        sessions.push(entry(id, root, agent, state));
+    }
     sessions.sort_by(|a, b| a.project.cmp(&b.project).then(b.id.cmp(&a.id)));
     sessions
+}
+
+/// Whether the process runs. `kill -0` sends no signal; the crate has no libc binding.
+fn running(pid: u64) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// `✻ birch`, `◇ codex ⏸`, `◆ ram`: the marks and labels of `ramify prompt`.
+fn session_label(session: &SessionEntry) -> String {
+    let mark = match session.agent.as_str() {
+        "codex" => "◇",
+        "ram" => "◆",
+        _ => "✻",
+    };
+    let label = if session.name.is_empty() { session.agent.as_str() } else { session.name.as_str() };
+    let idle = if session.state == "idle" { " ⏸" } else { "" };
+    format!("{mark} {label}{idle}")
 }
 
 fn agent_entries(worktree: &Path) -> Vec<AgentEntry> {

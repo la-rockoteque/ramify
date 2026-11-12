@@ -44,6 +44,11 @@ Press any key to leave the splash. The interface is a chat:
 - Slash commands: `/help`, `/up`, `/down`, `/step`, `/status`, `/workflow`, `/new <slug>`,
   `/refresh`, `/worktrees`, `/clear`, `/quit`.
 
+Under the worktree chips, the header shows the `ramify prompt` line of the selected worktree:
+its branch, stack, workflow step and the agent sessions that work in it (see
+[The zsh prompt](#the-zsh-prompt)). Ram Code reads it again when the selection changes, when a
+task ends, and every 5 seconds.
+
 The first message starts a task in the selected worktree. The transcript stays, and later
 messages carry the earlier turns to the model. Each task runs in a worker process, so the
 interface keeps drawing while the model works.
@@ -640,8 +645,8 @@ sessions that work in the same worktree:
 𖣂 tm-127 ⎇ feat/tm-127 · 2/3 up · feature/standard 3/8 → build · ✻ birch, ◇ ash ⏸
 ```
 
-- `✻` is a Claude Code session and `◇` a Codex session. Each one shows its
-  [session name](#session-names), or its agent when it has none.
+- `✻` is a Claude Code session, `◇` a Codex session and `◆` a Ram Code session. Each one shows
+  its [session name](#session-names), or its agent when it has none.
 - `⏸` follows a session that waits for a prompt. A session without it is working.
 - The sessions are in the order they started.
 - The command prints nothing outside a git repository or in a repository without a ramify
@@ -653,11 +658,13 @@ sessions that work in the same worktree:
 
 The hooks keep one record per session in
 `${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/<session_id>.session`. It is a JSON object:
-`agent` (`claude` or `codex`), `root` (the session's worktree), `pid` (the agent's process),
+`agent` (`claude`, `codex` or `ram`), `root` (the session's worktree), `pid` (the agent's process),
 `state` (`working` or `idle`) and `since` (epoch seconds). SessionStart writes it in a repo with
 a ramify config. UserPromptSubmit sets `working` and Stop sets `idle`. SessionEnd removes it,
-except on `prompt_input_exit`. A record whose process has stopped is ignored, and
-`ramify reap` deletes it.
+except on `prompt_input_exit`. Ram Code writes `ram-<pid>.session` itself: `working` while a
+task runs, `idle` after it, and it deletes the record when it quits. A record whose process has
+stopped is ignored, and `ramify reap` deletes it. The Sessions pane of the Ram Code panel lists
+every live record.
 
 To use it with oh-my-zsh:
 
