@@ -2,6 +2,7 @@
 //! workflow classifier lives.
 
 use crate::hooks::{common, project_of, ramify_home, HookSet, Outcome, Sources};
+use crate::cancel::Cancel;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -48,18 +49,24 @@ impl Hooked {
 
     /// The hooks of one task of the interface: the files as SessionStart read them into `dir`,
     /// so that a hook file the model writes runs only in a later session. The task waits for
-    /// the snapshot at most 10 s, then reads the files as they are.
-    pub fn for_task(cwd: &Path, session: &str, dir: Option<&Path>) -> Self {
-        Self::for_task_from(cwd, session, dir, &hooks_home())
+    /// the snapshot at most 10 s, then reads the files as they are. A cancel ends the wait.
+    pub fn for_task(cwd: &Path, session: &str, dir: Option<&Path>, cancel: &Cancel) -> Self {
+        Self::for_task_from(cwd, session, dir, &hooks_home(), cancel)
     }
 
     /// `for_task`, with `home` in place of the user's home folder.
-    pub fn for_task_from(cwd: &Path, session: &str, dir: Option<&Path>, home: &Path) -> Self {
+    pub fn for_task_from(
+        cwd: &Path,
+        session: &str,
+        dir: Option<&Path>,
+        home: &Path,
+        cancel: &Cancel,
+    ) -> Self {
         let Some(dir) = dir else {
             return Self::load_from(cwd, session, home);
         };
         let deadline = Instant::now() + START_WAIT;
-        while !dir.join(STARTED).exists() && Instant::now() < deadline {
+        while !dir.join(STARTED).exists() && Instant::now() < deadline && !cancel.is_set() {
             std::thread::sleep(Duration::from_millis(20));
         }
         let snapshot = std::fs::read_to_string(dir.join(SNAPSHOT))

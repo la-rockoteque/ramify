@@ -46,6 +46,10 @@ fn install_sigint() {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_sigint as *const () as usize;
         libc::sigemptyset(&mut action.sa_mask);
+        // SA_RESETHAND: the first SIGINT stops the task, and a second one ends the process, so
+        // a run stuck where the flag is not read can still be stopped. SA_RESTART: a read or a
+        // wait that the signal interrupts starts again instead of failing.
+        action.sa_flags = libc::SA_RESETHAND | libc::SA_RESTART;
         libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
     }
 }

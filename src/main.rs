@@ -3,7 +3,7 @@ use ram_code::agent::{run_turn_cancellable, AgentEvent, TurnEnd};
 use ram_code::cancel::Cancel;
 use ram_code::hooked::Hooked;
 use ram_code::providers::resolve_from_env;
-use ram_code::app::{App, Screen};
+use ram_code::app::{needs_redraw, App, Screen};
 use ram_code::panel::Pane;
 use ram_code::ramify::RealRunner;
 use ram_code::update;
@@ -113,6 +113,9 @@ fn argument_path(args: &[String], flag: &str) -> Option<PathBuf> {
 }
 
 fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
+    // Ctrl+C stops the task, keeps what finished, and exits with 130. The handler comes first,
+    // so a Ctrl+C during the setup is an interrupt too.
+    let cancel = Cancel::on_sigint();
     let resolved = match resolve_from_env(&|key| std::env::var(key).ok()) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -128,8 +131,6 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         eprintln!("{note}");
     }
     hooks.start_context = started.contexts;
-    // Ctrl+C stops the task, keeps what finished, and exits with 130.
-    let cancel = Cancel::on_sigint();
     let turn = run_turn_cancellable(llm.as_ref(), root, &[], task, &hooks, &cancel, &mut |event| match event {
         AgentEvent::Text(text) => println!("{text}"),
         AgentEvent::TextDelta(_) => {}
@@ -144,6 +145,7 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         AgentEvent::RunPending(id) => {
             println!("→ run {id} waits for your OK: ramify run go {id}, or ramify run block {id}")
         }
+        AgentEvent::MaxTokens(_) => {}
     });
     let _ = hooks.fire("SessionEnd", "", json!({"reason": "exit"}));
     match turn.end {
@@ -170,6 +172,9 @@ fn run_worker(
     history: &Path,
     context: Option<&Path>,
 ) -> std::io::Result<()> {
+    // The interface sends SIGINT on Esc: the turn stops and keeps what finished. The handler
+    // comes first, so an Esc during the setup is an interrupt too.
+    let cancel = Cancel::on_sigint();
     let mut out = OpenOptions::new().create(true).append(true).open(events)?;
     let _ = writeln!(out, "{}", json!({"type": "trace", "text": "worker start"}));
     let _ = out.flush();
@@ -191,7 +196,7 @@ fn run_worker(
     // leaves the hook snapshot and, for the first task, its context.
     let session = std::env::var("RAM_CODE_SESSION").unwrap_or_else(|_| format!("ram-{}", std::process::id()));
     let start = std::env::var_os("RAM_CODE_START").map(PathBuf::from);
-    let mut hooks = Hooked::for_task(root, &session, start.as_deref());
+    let mut hooks = Hooked::for_task(root, &session, start.as_deref(), &cancel);
     if let Some(path) = context {
         if let Ok(text) = std::fs::read_to_string(path) {
             if !text.trim().is_empty() {
@@ -199,8 +204,6 @@ fn run_worker(
             }
         }
     }
-    // The interface sends SIGINT on Esc: the turn stops and keeps what finished.
-    let cancel = Cancel::on_sigint();
     let turn = run_turn_cancellable(llm.as_ref(), root, &previous, task, &hooks, &cancel, &mut |event| {
         let value = match event {
             AgentEvent::Text(text) => json!({"type": "text", "text": text}),
@@ -212,6 +215,7 @@ fn run_worker(
             AgentEvent::Error(text) => json!({"type": "error", "text": text}),
             AgentEvent::Hook(text) => json!({"type": "hook", "text": text}),
             AgentEvent::RunPending(id) => json!({"type": "run_pending", "id": id}),
+            AgentEvent::MaxTokens(limit) => json!({"type": "max_tokens", "value": limit}),
         };
         let _ = writeln!(out, "{value}");
         let _ = out.flush();
@@ -236,8 +240,16 @@ fn run_worker(
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
     let mut splash_from = std::time::Instant::now();
+    let mut drawn_at: Option<std::time::Instant> = None;
+    let mut resized = false;
     loop {
-        terminal.draw(|frame| frame.render_widget(&*app, frame.area()))?;
+        // Drawing rebuilds and wraps the whole transcript, so it runs only when needed.
+        let since = drawn_at.map_or(Duration::MAX, |at| at.elapsed());
+        let dirty = app.take_dirty() || std::mem::take(&mut resized);
+        if needs_redraw(dirty, since, app.running || app.screen != Screen::Main) {
+            terminal.draw(|frame| frame.render_widget(&*app, frame.area()))?;
+            drawn_at = Some(std::time::Instant::now());
+        }
         app.poll_events();
         app.tick();
         if app.quit {
@@ -255,7 +267,11 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
         // A running task streams text: read its events often.
         let wait = if app.running { 50 } else { 120 };
         if event::poll(Duration::from_millis(wait))? {
-            if let Event::Key(key) = event::read()? {
+            let read = event::read()?;
+            if let Event::Resize(..) = read {
+                resized = true;
+            }
+            if let Event::Key(key) = read {
                 if key.kind == KeyEventKind::Press {
                     if app.screen == Screen::Splash {
                         app.load_async();
