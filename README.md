@@ -133,8 +133,15 @@ The tests are `cargo test`; they cover the acceptance criteria in
 
 `run_command` runs each command in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux.
 
-- A command reads any file. It writes only in the worktree, in a temp folder for the task
-  (`$TMPDIR`), and to `/dev/null` and the terminal devices.
+- A command reads any file except credentials in the home folder: `~/.ssh`, `~/.aws`,
+  `~/.azure`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.config/gh`,
+  `~/.config/anthropic`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.pypirc` and
+  `~/Library/Keychains`. What a command reads goes to the provider in the transcript.
+- A command writes only in the worktree, in a temp folder for the task (`$TMPDIR`), and to
+  `/dev/null` and the terminal devices.
+- On macOS, a command cannot start a program outside the sandbox: `open`, `osascript`,
+  `osacompile` and `launchctl` are blocked, and so are Apple events and Launch Services.
+- `git commit` fails in the sandbox, because a worktree's Git data lives in the main checkout.
 - A command has no network. Local Unix sockets still work.
 - The environment has no provider keys. Ram Code removes every `ANTHROPIC_*` and `RAM_CODE_*`
   variable, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, each `key_env` in `providers.json`, and any

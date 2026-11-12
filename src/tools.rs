@@ -210,6 +210,14 @@ the human reads the command and decides whether it runs.",
         }
     }
 
+    fn home(&self) -> Option<PathBuf> {
+        self.env
+            .iter()
+            .find(|(name, _)| name == "HOME")
+            .map(|(_, value)| PathBuf::from(value))
+            .filter(|path| path.is_absolute())
+    }
+
     fn run_sandboxed(&self, command: &str, timeout: u64) -> Result<String, String> {
         let temp = self.temp_dir()?;
         let root = self
@@ -218,7 +226,7 @@ the human reads the command and decides whether it runs.",
             .map_err(|e| format!("could not resolve {}: {e}", self.root.display()))?;
         let mut cmd = self
             .sandbox
-            .command(&root, &temp, command)
+            .command(&root, &temp, self.home().as_deref(), command)
             .ok_or("no sandbox on this machine")?;
         cmd.current_dir(&root)
             .env_clear()

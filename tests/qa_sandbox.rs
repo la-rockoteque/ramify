@@ -555,3 +555,47 @@ fn run_pane_highlights_the_script() {
     assert_eq!(colour_of(&screen, "git push"), Color::Red);
     assert_eq!(colour_of(&screen, "echo"), Color::Magenta);
 }
+
+// ── audit fixes ──────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sandbox_hides_secret_files() {
+    let (base, root) = worktree("a1");
+    let home = base.join("home");
+    fs::create_dir_all(home.join(".ssh")).unwrap();
+    fs::create_dir_all(home.join(".aws")).unwrap();
+    fs::write(home.join(".ssh/id_test"), "ssh-secret").unwrap();
+    fs::write(home.join(".aws/credentials"), "aws-secret").unwrap();
+    fs::write(home.join(".netrc"), "netrc-secret").unwrap();
+    fs::write(home.join("notes.txt"), "plain").unwrap();
+    let home_text = home.to_str().unwrap().to_string();
+    let mut env: Vec<(String, String)> = base_env()
+        .into_iter()
+        .filter(|(k, _)| k != "HOME")
+        .collect();
+    env.push(("HOME".into(), home_text));
+    let tools = Tools::with_env(&root, env);
+    for file in [".ssh/id_test", ".aws/credentials", ".netrc"] {
+        let out = run(&tools, json!({"command": format!("cat \"$HOME/{file}\"")}));
+        assert!(!out.contains("secret"), "{file} was readable: {out}");
+        assert!(!out.starts_with("exit 0"), "{file}: {out}");
+    }
+    let out = run(&tools, json!({"command": "cat \"$HOME/notes.txt\""}));
+    assert!(out.starts_with("exit 0") && out.contains("plain"), "{out}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sandbox_blocks_launching_outside() {
+    let (_base, root) = worktree("a2");
+    let tools = tools(&root, &[]);
+    for command in [
+        "/usr/bin/osascript -e 'return 1'",
+        "/usr/bin/open -h",
+        "/bin/launchctl version",
+    ] {
+        let out = run(&tools, json!({"command": command}));
+        assert!(!out.starts_with("exit 0"), "{command} ran: {out}");
+    }
+}
