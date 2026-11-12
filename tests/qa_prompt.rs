@@ -97,6 +97,20 @@ fn render_text(app: &App) -> String {
     text
 }
 
+/// The prompt line comes from a background thread: tick until it shows, for at most 2 s.
+fn settle(app: &mut App, wanted: &str) -> String {
+    let mut text = String::new();
+    for _ in 0..200 {
+        app.tick();
+        text = render_text(app);
+        if text.contains(wanted) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    text
+}
+
 #[test]
 fn header_shows_the_prompt_line() {
     let _guard = serial();
@@ -106,14 +120,14 @@ fn header_shows_the_prompt_line() {
     runner.push(&base.join("wt-1"), &["prompt"], out("𖣂 wt-1 ⎇ feat/wt-1 · ✻ birch\n"));
     runner.push(&base.join("wt-2"), &["prompt"], out("𖣂 wt-2 ⎇ feat/wt-2 · ◇ ash ⏸\n"));
     let mut app = app_with(runner, &base);
-    app.tick();
-    let text = render_text(&app);
+    let text = settle(&mut app, "wt-1 ⎇ feat/wt-1 · ✻ birch");
     assert!(text.contains("wt-1 ⎇ feat/wt-1 · ✻ birch"), "{text}");
     app.select(1);
     app.tick();
     let text = render_text(&app);
+    assert!(!text.contains("✻ birch"), "the line of the other worktree stays: {text}");
+    let text = settle(&mut app, "wt-2 ⎇ feat/wt-2 · ◇ ash ⏸");
     assert!(text.contains("wt-2 ⎇ feat/wt-2 · ◇ ash ⏸"), "{text}");
-    assert!(!text.contains("✻ birch"), "the old line stays: {text}");
 }
 
 fn record(state: &Path) -> Option<Value> {
@@ -187,7 +201,8 @@ fn sessions_pane_lists_live_records() {
     app.tick();
     let text = render_text(&app);
     assert!(text.contains("✻ birch"), "{text}");
-    assert!(text.contains("◇ codex") && text.contains("⏸"), "{text}");
+    assert!(text.contains("✻ birch ") && !text.contains("✻ birch ⏸"), "{text}");
+    assert!(text.contains("◇ codex ⏸"), "{text}");
 }
 
 #[test]

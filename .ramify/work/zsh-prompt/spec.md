@@ -16,7 +16,8 @@ This branch puts the segment into ramify.
    (the session root), `pid` (the agent process), `state` and `since` (epoch seconds).
 2. The `user-prompt-submit` hook sets `state` to `working`. The `stop` hook sets it to `idle`.
    A new session starts `idle`.
-3. The `session-end` hook removes the file on every reason except `prompt_input_exit`.
+3. The `session-end` hook removes the file on every reason. (Review: `prompt_input_exit` was an
+   exception, and that left a dead session's record behind.)
 4. A session whose `pid` no longer runs counts as gone. Readers skip it. `ramify reap` removes
    its file.
 5. The hook writes the record in a configured repo only, under the rules of the name file.
@@ -66,7 +67,7 @@ This branch puts the segment into ramify.
 - AC2: Given `RAMIFY_AGENT=codex`, when a session starts, then the record holds `agent: "codex"`.
 - AC3: Given a live record, when `user-prompt-submit` fires, then `state` is `working`. When
   `stop` fires, then `state` is `idle`.
-- AC4: Given a session that ends with any reason except `prompt_input_exit`, then its record
+- AC4: Given a session that ends with any reason, `prompt_input_exit` included, then its record
   is gone.
 - AC5: Given a record whose `pid` does not run, then `ramify prompt` skips it, and `ramify reap`
   deletes it.

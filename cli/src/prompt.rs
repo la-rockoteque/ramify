@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 pub fn prompt(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
-        Some("install") => install(),
+        Some("install") => install(args.get(1).map(String::as_str) == Some("--force")),
         None | Some("--json") => {
             let cwd = std::env::current_dir()
                 .map(|cwd| cwd.to_string_lossy().into_owned())
@@ -16,14 +16,15 @@ pub fn prompt(args: &[String]) -> i32 {
             0
         }
         Some(_) => {
-            eprintln!("ramify: usage: ramify prompt [--json | install]");
+            eprintln!("ramify: usage: ramify prompt [--json | install [--force]]");
             2
         }
     }
 }
 
 /// Links `shell/` as the oh-my-zsh plugin `ramify`. It edits no rc file: it prints the lines.
-fn install() -> i32 {
+/// It replaces a `ramify` link that points elsewhere only with `--force`.
+fn install(force: bool) -> i32 {
     let home = match crate::launch::home() {
         Ok(home) => home,
         Err(error) => {
@@ -37,12 +38,31 @@ fn install() -> i32 {
     let plugins = custom.join("plugins");
     let link = plugins.join("ramify");
     let source = home.join("shell");
+    if !source.join("ramify.plugin.zsh").is_file() {
+        eprintln!("ramify: {} has no ramify.plugin.zsh — set RAMIFY_HOME to the ramify install", source.display());
+        return 1;
+    }
+    let text = source.to_string_lossy();
+    if text.contains("/plugins/cache/") || text.contains("-wt/") {
+        eprintln!(
+            "ramify: warning: {} goes away when this version or worktree is removed; the link will then dangle",
+            source.display()
+        );
+    }
     if let Err(error) = std::fs::create_dir_all(&plugins) {
         eprintln!("ramify: could not create {}: {error}", plugins.display());
         return 1;
     }
     match std::fs::read_link(&link) {
         Ok(target) if target == source => {}
+        Ok(target) if !force => {
+            eprintln!(
+                "ramify: {} already points to {} — run 'ramify prompt install --force' to replace it",
+                link.display(),
+                target.display()
+            );
+            return 1;
+        }
         Ok(_) => {
             let _ = std::fs::remove_file(&link);
         }

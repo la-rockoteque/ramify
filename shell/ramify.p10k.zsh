@@ -5,6 +5,5 @@
 prompt_ramify() {
   local line="$(ramify_prompt_info)"
   [[ -n $line ]] || return
-  # `%` is a prompt escape: a branch name may hold one.
-  p10k segment -t "${line//\%/%%}"
+  p10k segment -t "$line"
 }

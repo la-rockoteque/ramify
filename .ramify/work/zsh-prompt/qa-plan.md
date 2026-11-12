@@ -13,7 +13,7 @@ with oh-my-zsh and powerlevel10k.
 | Q3 | AC3 | high | `prompt_submit_and_stop_switch_the_state`: `user-prompt-submit` gives `working`, `stop` gives `idle`, and `since` does not change | build |
 | Q4 | AC3 | medium | `state_change_without_a_record_writes_nothing`: `user-prompt-submit` for an unknown session creates no file | build |
 | Q5 | AC4 | high | `session_end_removes_the_record`, for `logout`, `clear` and `other` | build |
-| Q6 | AC4 | medium | `prompt_input_exit_keeps_the_record` | build |
+| Q6 | AC4 | medium | `prompt_input_exit_removes_the_record` (changed in review) | build |
 | Q7 | AC5 | high | `a_dead_pid_is_skipped`: a record with a `pid` that does not run is not on the line | build |
 | Q8 | AC5 | medium | `reap_removes_dead_session_records`, and keeps the live ones | build |
 | Q9 | AC6 | medium | `no_record_without_a_ramify_config` | build |

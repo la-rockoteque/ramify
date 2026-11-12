@@ -13,7 +13,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,10 @@ pub struct App {
     status_line: String,
     status_root: Option<PathBuf>,
     status_at: Option<Instant>,
+    /// Where the background `ramify prompt` run leaves its line, and whether one is running.
+    status_slot: Arc<Mutex<Option<(PathBuf, String)>>>,
+    status_busy: Arc<AtomicBool>,
+    health_busy: Arc<AtomicBool>,
     /// This session's record, once a task has started: `ramify prompt` shows it as `◆ ram`.
     ram_record: Option<PathBuf>,
     ram_since: u64,
@@ -146,6 +151,9 @@ impl App {
             status_line: String::new(),
             status_root: None,
             status_at: None,
+            status_slot: Arc::new(Mutex::new(None)),
+            status_busy: Arc::new(AtomicBool::new(false)),
+            health_busy: Arc::new(AtomicBool::new(false)),
             ram_record: None,
             ram_since: 0,
             health_root: None,
@@ -647,31 +655,47 @@ impl App {
         }
     }
 
+    /// `ramify prompt` takes tens of milliseconds, so it runs off the drawing thread, one run at
+    /// a time. The line of another worktree is never shown: a new selection clears it.
     fn refresh_status(&mut self) {
         let Some(root) = self.selected_worktree().map(|worktree| worktree.path.clone()) else {
             self.status_line.clear();
             self.status_root = None;
             return;
         };
-        let fresh = self.status_root.as_ref() == Some(&root)
-            && self
-                .status_at
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(5));
-        if fresh {
+        if let Some((from, line)) = self.status_slot.lock().ok().and_then(|mut slot| slot.take()) {
+            if from == root {
+                self.status_line = line;
+            }
+        }
+        if self.status_root.as_ref() != Some(&root) {
+            self.status_line.clear();
+            self.status_root = Some(root.clone());
+            self.status_at = None;
+        }
+        let fresh = self
+            .status_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5));
+        if fresh || self.status_busy.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.status_line = self
-            .runner
-            .run(&CommandSpec {
-                root: root.clone(),
-                args: vec!["prompt".into()],
-            })
-            .ok()
-            .filter(|output| output.ok())
-            .and_then(|output| output.stdout.lines().next().map(str::to_string))
-            .unwrap_or_default();
-        self.status_root = Some(root);
         self.status_at = Some(Instant::now());
+        let (runner, slot, busy) = (self.runner.clone(), self.status_slot.clone(), self.status_busy.clone());
+        std::thread::spawn(move || {
+            let line = runner
+                .run(&CommandSpec {
+                    root: root.clone(),
+                    args: vec!["prompt".into()],
+                })
+                .ok()
+                .filter(|output| output.ok())
+                .and_then(|output| output.stdout.lines().next().map(str::to_string))
+                .unwrap_or_default();
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some((root, line));
+            }
+            busy.store(false, Ordering::SeqCst);
+        });
     }
 
     fn push(&mut self, role: Role, text: impl Into<String>) {
@@ -887,17 +911,18 @@ impl App {
             && self
                 .health_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(30));
-        if fresh {
+        if fresh || self.health_busy.swap(true, Ordering::SeqCst) {
             return;
         }
         self.health_root = Some(root.clone());
         self.health_at = Some(Instant::now());
-        let runner = self.runner.clone();
+        let (runner, busy) = (self.runner.clone(), self.health_busy.clone());
         std::thread::spawn(move || {
             let _ = runner.run(&CommandSpec {
                 root,
                 args: vec!["statusline".into()],
             });
+            busy.store(false, Ordering::SeqCst);
         });
     }
 

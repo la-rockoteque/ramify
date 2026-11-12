@@ -924,7 +924,7 @@ fn sessions() -> Vec<SessionEntry> {
     let name_of = |id: &str| {
         std::fs::read_to_string(directory.join(format!("{id}.name")))
             .ok()
-            .and_then(|text| text.lines().next().map(str::to_string))
+            .and_then(|text| text.lines().next().map(printable))
             .unwrap_or_default()
     };
     let entry = |id: String, root: Option<PathBuf>, agent: String, state: String| SessionEntry {
@@ -949,21 +949,32 @@ fn sessions() -> Vec<SessionEntry> {
     }
     for (id, record) in records {
         let root = record["root"].as_str().map(PathBuf::from).filter(|path| path.is_dir());
-        let agent = record["agent"].as_str().unwrap_or("").to_string();
-        let state = record["state"].as_str().unwrap_or("idle").to_string();
+        let agent = printable(record["agent"].as_str().unwrap_or(""));
+        let state = printable(record["state"].as_str().unwrap_or("idle"));
         sessions.push(entry(id, root, agent, state));
     }
     sessions.sort_by(|a, b| a.project.cmp(&b.project).then(b.id.cmp(&a.id)));
     sessions
 }
 
-/// Whether the process runs. `kill -0` sends no signal; the crate has no libc binding.
+/// Any process that can write the state folder writes records: drop control characters, which
+/// would reach the terminal as escape sequences.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Whether the process runs. Signal 0 checks and sends nothing; EPERM means it runs under
+/// another user. Pid 0 would name the process group, so it never counts.
 fn running(pid: u64) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 has no effect on the target.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// `✻ birch`, `◇ codex ⏸`, `◆ ram`: the marks and labels of `ramify prompt`.

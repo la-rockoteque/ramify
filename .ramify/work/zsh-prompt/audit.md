@@ -9,7 +9,7 @@ part of this audit.
 | AC1 | met | `hooks/ramify-hook` `write_record`, `agent_pid`. Test `session_start_writes_a_claude_record`. |
 | AC2 | met | `write_record` takes `RAMIFY_AGENT`. Test `session_start_with_codex_writes_a_codex_record`. |
 | AC3 | met | `set_state` from `user-prompt-submit` and `on_stop`. Tests `prompt_submit_and_stop_switch_the_state` and `state_change_without_a_record_writes_nothing`. |
-| AC4 | met | `on_session_end` removes the record after the `prompt_input_exit` check. Tests `session_end_removes_the_record` and `prompt_input_exit_keeps_the_record`. |
+| AC4 | met | `on_session_end` removes the record on every reason (changed in review). Tests `session_end_removes_the_record` and `prompt_input_exit_removes_the_record`. |
 | AC5 | met | `statusline.rs` `agents` filters on `running`. `mem.rs` `reap_sessions`. Tests `a_dead_pid_is_skipped` and `reap_removes_dead_session_records`. |
 | AC6 | met | `write_record` returns early unless `configured`. Test `no_record_without_a_ramify_config`. |
 | AC7 | met | `prompt` and `statusline` share `render`. Tests `prompt_matches_statusline_without_sessions` and `prompt_in_the_primary_checkout`. |

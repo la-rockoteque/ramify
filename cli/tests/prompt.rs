@@ -293,7 +293,9 @@ fn session_end_removes_the_record() {
 }
 
 #[test]
-fn prompt_input_exit_keeps_the_record() {
+fn prompt_input_exit_removes_the_record() {
+    // The session is over on prompt_input_exit too: a record left behind would show a dead
+    // session, or a stranger's once the pid is reused.
     let fixture = Fixture::plain("end-escape");
     fixture.start("s1", &fixture.worktree(1), None);
     fixture.hook(
@@ -301,7 +303,66 @@ fn prompt_input_exit_keeps_the_record() {
         json!({"session_id": "s1", "cwd": fixture.worktree(1), "reason": "prompt_input_exit"}),
         None,
     );
-    assert!(fixture.record("s1").is_some());
+    assert!(fixture.record("s1").is_none());
+}
+
+#[test]
+fn compact_and_resume_keep_the_state() {
+    let fixture = Fixture::plain("compact");
+    let wt = fixture.worktree(1);
+    fixture.start("s1", &wt, None);
+    fixture.hook("user-prompt-submit", json!({"session_id": "s1", "cwd": wt}), None);
+    for source in ["compact", "resume"] {
+        fixture.hook("session-start", json!({"session_id": "s1", "source": source, "cwd": wt}), None);
+        assert_eq!(fixture.record("s1").unwrap()["state"], "working", "{source} reset the state");
+    }
+    fixture.hook("session-start", json!({"session_id": "s1", "source": "startup", "cwd": wt}), None);
+    assert_eq!(fixture.record("s1").unwrap()["state"], "idle");
+}
+
+#[test]
+fn a_move_to_a_new_worktree_moves_the_record() {
+    let fixture = Fixture::plain("move");
+    fixture.start("s1", &fixture.primary, None);
+    let input = json!({
+        "session_id": "s1",
+        "cwd": fixture.primary,
+        "tool_name": "Bash",
+        "tool_input": {"command": "ramify new wt-2"},
+        "tool_response": {"stdout": format!("ramify: worktree {}\n", fixture.worktree(2).display())},
+    });
+    fixture.hook("worktree-add", input, None);
+    let root = fixture.record("s1").unwrap()["root"].as_str().unwrap().to_string();
+    assert_eq!(Path::new(&root).canonicalize().unwrap(), fixture.worktree(2));
+}
+
+#[test]
+fn a_late_state_change_does_not_bring_back_a_record() {
+    let fixture = Fixture::plain("late");
+    let wt = fixture.worktree(1);
+    fixture.start("s1", &wt, None);
+    fixture.hook("session-end", json!({"session_id": "s1", "cwd": wt, "reason": "logout"}), None);
+    fixture.hook("stop", json!({"session_id": "s1", "cwd": wt}), None);
+    assert!(fixture.record("s1").is_none());
+    let leftovers: Vec<_> = fs::read_dir(fixture.sessions())
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "a temp file was left behind");
+}
+
+#[test]
+fn session_end_ignores_a_session_id_with_a_path() {
+    let fixture = Fixture::plain("end-path");
+    let outside = fixture.state.join("x.session");
+    fs::write(&outside, "{}").unwrap();
+    fixture.hook(
+        "session-end",
+        json!({"session_id": "../x", "cwd": fixture.worktree(1), "reason": "logout"}),
+        None,
+    );
+    assert!(outside.exists(), "session-end removed a file outside the sessions folder");
 }
 
 #[test]
@@ -632,4 +693,94 @@ fn a_ram_session_shows_as_ram() {
     let wt = fixture.worktree(1);
     fixture.put("ram-1", &wt, "ram", "working", 1, std::process::id(), None);
     assert_eq!(fixture.prompt(&wt), "𖣂 wt-1 ⎇ feat/wt-1 · ◆ ram");
+}
+
+#[test]
+fn prompt_json_has_no_stack_without_a_fresh_cache() {
+    let (fixture, wt) = served("json-stale", dead_port());
+    let output = fixture.run(&["prompt", "--json"], &wt);
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["stack"], Value::Null, "{value}");
+}
+
+#[test]
+fn a_control_character_in_a_record_is_dropped() {
+    let fixture = Fixture::plain("control");
+    let wt = fixture.worktree(1);
+    fixture.put("a", &wt, "claude", "working", 1, std::process::id(), Some("bir\u{1b}[31mch"));
+    let line = fixture.prompt(&wt);
+    assert!(!line.contains('\u{1b}'), "{line:?}");
+    assert!(line.ends_with("✻ bir[31mch"), "{line:?}");
+}
+
+fn install(base: &Path, home: &Path, extra: &[&str]) -> Output {
+    Command::new(binary())
+        .args(["prompt", "install"])
+        .args(extra)
+        .env("HOME", base)
+        .env("ZSH_CUSTOM", base.join("custom"))
+        .env("RAMIFY_HOME", home)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn prompt_install_refuses_a_home_without_the_plugin() {
+    let base = temp("install-nohome");
+    let output = install(&base, &base.join("nohome"), &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(fs::symlink_metadata(base.join("custom/plugins/ramify")).is_err(), "a link was made");
+}
+
+#[test]
+fn prompt_install_keeps_a_foreign_link_without_force() {
+    let base = temp("install-foreign");
+    let plugins = base.join("custom/plugins");
+    fs::create_dir_all(&plugins).unwrap();
+    std::os::unix::fs::symlink("/elsewhere", plugins.join("ramify")).unwrap();
+    assert_eq!(install(&base, &repo_root(), &[]).status.code(), Some(1));
+    assert_eq!(fs::read_link(plugins.join("ramify")).unwrap(), Path::new("/elsewhere"));
+    assert_eq!(install(&base, &repo_root(), &["--force"]).status.code(), Some(0));
+    assert_eq!(fs::read_link(plugins.join("ramify")).unwrap(), repo_root().join("shell"));
+}
+
+#[test]
+fn zsh_plugin_escapes_percent_for_any_theme() {
+    let fixture = Fixture::plain("percent");
+    let wt = fixture.worktree(1);
+    git(&["checkout", "-q", "-b", "feat/a%Fb"], &wt);
+    let plugin = repo_root().join("shell/ramify.plugin.zsh");
+    let script = format!(
+        "source {}; cd {}; _ramify_precmd; print -rP -- \"$(ramify_prompt_info)\"",
+        plugin.display(),
+        wt.display()
+    );
+    assert!(zsh(&fixture, &script).ends_with("⎇ feat/a%Fb"));
+}
+
+#[test]
+fn zsh_plugin_skips_an_unbuilt_ramify() {
+    let fixture = Fixture::plain("unbuilt");
+    let fake = fixture.base.join("fakehome");
+    fs::create_dir_all(fake.join("bin")).unwrap();
+    fs::create_dir_all(fake.join("cli")).unwrap();
+    let wrapper = fake.join("bin/ramify");
+    fs::write(&wrapper, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\necho built\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let plugin = repo_root().join("shell/ramify.plugin.zsh");
+    let output = Command::new("zsh")
+        .args([
+            "-fc",
+            &format!(
+                "source {}; cd {}; _ramify_precmd; print -r -- \"[$(ramify_prompt_info)]\"",
+                plugin.display(),
+                fixture.worktree(1).display()
+            ),
+        ])
+        .env("RAMIFY_BIN", &wrapper)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end(), "[]");
+    assert!(!fake.join("bin/ran").exists(), "the plugin ran an unbuilt ramify");
 }

@@ -7,7 +7,7 @@
 | Q3 | pass | `prompt_submit_and_stop_switch_the_state` passes (`cargo test`) |
 | Q4 | pass | `state_change_without_a_record_writes_nothing` passes (`cargo test`) |
 | Q5 | pass | `session_end_removes_the_record` passes (`cargo test`) |
-| Q6 | pass | `prompt_input_exit_keeps_the_record` passes (`cargo test`) |
+| Q6 | pass | `prompt_input_exit_removes_the_record` passes (`cargo test`), changed in review |
 | Q7 | pass | `a_dead_pid_is_skipped` passes (`cargo test`) |
 | Q8 | pass | `reap_removes_dead_session_records` passes (`cargo test`) |
 | Q9 | pass | `no_record_without_a_ramify_config` passes (`cargo test`) |

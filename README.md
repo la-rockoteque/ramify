@@ -661,8 +661,9 @@ The hooks keep one record per session in
 `${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/<session_id>.session`. It is a JSON object:
 `agent` (`claude`, `codex` or `ram`), `root` (the session's worktree), `pid` (the agent's process),
 `state` (`working` or `idle`) and `since` (epoch seconds). SessionStart writes it in a repo with
-a ramify config. UserPromptSubmit sets `working` and Stop sets `idle`. SessionEnd removes it,
-except on `prompt_input_exit`. Ram Code writes `ram-<pid>.session` itself: `working` while a
+a ramify config. A resume or a compaction keeps the state. UserPromptSubmit sets `working` and
+Stop sets `idle`. A move to a new worktree moves the record's `root`. SessionEnd removes it, on
+every reason. Ram Code writes `ram-<pid>.session` itself: `working` while a
 task runs, `idle` after it, and it deletes the record when it quits. A record whose process has
 stopped is ignored, and `ramify reap` deletes it. The Sessions pane of the Ram Code panel lists
 every live record.
@@ -670,14 +671,16 @@ every live record.
 To use it with oh-my-zsh:
 
 1. Run `ramify prompt install`. It links `shell/` as `${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/ramify`.
-   It does not edit your rc files.
+   It does not edit your rc files. It refuses to replace a `ramify` link that points elsewhere,
+   unless you add `--force`.
 2. In `~/.zshrc`, add `ramify` to the plugins list: `plugins=(git ramify)`.
 3. With powerlevel10k, add `ramify` to `POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS` in `~/.p10k.zsh`.
    With another theme, put `$(ramify_prompt_info)` in your prompt.
 4. Open a new shell.
 
 The plugin runs `ramify prompt` once per prompt (`precmd`). `ramify` must be on the PATH, or
-`RAMIFY_BIN` must name it.
+`RAMIFY_BIN` must name it. A `ramify` whose Rust binary is not built yet shows nothing: the
+prompt never starts the build.
 
 ### The app
 

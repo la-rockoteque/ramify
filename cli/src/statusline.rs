@@ -104,7 +104,11 @@ pub(crate) fn render(session: &str, cwd: &str, json_out: bool, mode: Mode) -> Op
     let mut answering = 0;
     let mut total = 0;
     if services {
-        stack = Some("stopped");
+        // Without a fresh measure, the prompt cannot tell a stopped stack from a running one,
+        // so it says nothing rather than "stopped".
+        if mode == Mode::Statusline || !env.is_file() {
+            stack = Some("stopped");
+        }
         let cache = directory.join(format!("{worktree}.health"));
         let measured = match mode {
             Mode::Statusline if env.is_file() => {
@@ -262,19 +266,25 @@ pub(crate) fn records(state_root: &str) -> Vec<Agent> {
             let value: Value = serde_json::from_str(&std::fs::read_to_string(entry.path()).ok()?).ok()?;
             let name = std::fs::read_to_string(folder.join(format!("{id}.name")))
                 .ok()
-                .and_then(|text| text.lines().next().map(str::to_string))
+                .and_then(|text| text.lines().next().map(printable))
                 .filter(|name| !name.is_empty());
             Some(Agent {
                 id,
                 name,
-                agent: value.get("agent")?.as_str()?.to_string(),
-                state: value.get("state").and_then(Value::as_str).unwrap_or("idle").to_string(),
+                agent: printable(value.get("agent")?.as_str()?),
+                state: printable(value.get("state").and_then(Value::as_str).unwrap_or("idle")),
                 since: value.get("since").and_then(Value::as_u64).unwrap_or(0),
                 root: PathBuf::from(value.get("root")?.as_str()?),
                 pid: i32::try_from(value.get("pid")?.as_u64()?).ok()?,
             })
         })
         .collect()
+}
+
+/// A record is written by any process that can write the state folder: a control character in
+/// it would reach the terminal as an escape sequence.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Whether the process runs. EPERM means it runs under another user.
