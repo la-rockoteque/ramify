@@ -4,6 +4,7 @@ use crate::providers::{missing_key, resolve, unknown, Providers};
 use crate::bonsai_art;
 use crate::panel::{Pane, Panel};
 use crate::hooked::Hooked;
+use crate::mcp;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use crate::state::{parse_project, project_for_root, Project, Worktree};
 use crate::update::{self, Found};
@@ -142,6 +143,15 @@ impl Drop for Loader {
 /// Reads an environment variable.
 pub type EnvFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// The project MCP servers that wait for a decision before a task starts.
+struct McpPrompt {
+    task: String,
+    root: PathBuf,
+    names: Vec<String>,
+    /// The hash of the entry on screen. A key stores a decision only for that entry.
+    shown: Option<String>,
+}
+
 pub struct App {
     pub runner: Arc<dyn Runner>,
     pub root: PathBuf,
@@ -169,6 +179,8 @@ pub struct App {
     pub session_model: Option<String>,
     /// The run that waits on the human in the Run pane, while the task waits for it.
     pub waiting_run: Option<String>,
+    /// A task that waits until the human decides on the project's MCP servers.
+    mcp_pending: Option<McpPrompt>,
     /// `provider · model` for the header, kept current so a frame does no file work.
     provider_line: String,
     worker: Option<Worker>,
@@ -235,6 +247,7 @@ impl App {
             provider: crate::providers::ENV.to_string(),
             session_model: None,
             waiting_run: None,
+            mcp_pending: None,
             provider_line: String::new(),
             worker: None,
             loader: None,
@@ -1147,6 +1160,10 @@ impl App {
     }
 
     fn key_chat(&mut self, key: KeyEvent) {
+        if self.mcp_pending.is_some() {
+            self.key_mcp(key);
+            return;
+        }
         match key.code {
             KeyCode::Enter => self.submit(),
             KeyCode::Backspace => {
@@ -1205,8 +1222,193 @@ impl App {
             self.handle_command(&text);
             return;
         }
+        if self.ask_mcp(&text) {
+            return;
+        }
         let config = self.resolve_config();
         self.start_task_with_text(config, text);
+    }
+
+    fn mcp_get(&self) -> impl Fn(&str) -> Option<String> {
+        let env = self.env.clone();
+        move |key| env(key)
+    }
+
+    fn task_root(&self) -> PathBuf {
+        self.selected_worktree()
+            .map(|worktree| worktree.path.clone())
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    /// Before a task: when project MCP servers wait for a decision, show the first prompt and
+    /// keep the task until the human answers. True when the task waits.
+    fn ask_mcp(&mut self, task: &str) -> bool {
+        if self.running {
+            return false;
+        }
+        let root = self.task_root();
+        let get = self.mcp_get();
+        let config = mcp::load(&root, &get);
+        let approvals = mcp::Approvals::load(&self.providers.dir, &root);
+        let names: Vec<String> = mcp::pending(&config, &approvals)
+            .into_iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        if names.is_empty() {
+            return false;
+        }
+        self.mcp_pending = Some(McpPrompt {
+            task: task.to_string(),
+            root,
+            names,
+            shown: None,
+        });
+        self.show_mcp_prompt();
+        true
+    }
+
+    fn show_mcp_prompt(&mut self) {
+        let Some(prompt) = &self.mcp_pending else {
+            return;
+        };
+        let Some(name) = prompt.names.first().cloned() else {
+            return;
+        };
+        let get = self.mcp_get();
+        let config = mcp::load(&prompt.root, &get);
+        // A project server runs only in the sandbox, so the prompt offers no `u`.
+        let shown = config
+            .servers
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| (mcp::prompt_text(entry), entry.hash.clone()));
+        if let Some(prompt) = self.mcp_pending.as_mut() {
+            prompt.shown = shown.as_ref().map(|(_, hash)| hash.clone());
+        }
+        if let Some((text, _)) = shown {
+            self.push(Role::Info, text);
+        }
+    }
+
+    fn key_mcp(&mut self, key: KeyEvent) {
+        let choice = match key.code {
+            KeyCode::Char(c) => mcp::Choice::from_key(c),
+            KeyCode::Esc => {
+                if let Some(prompt) = self.mcp_pending.take() {
+                    self.push(
+                        Role::Info,
+                        "the task did not start: the MCP server waits for your decision",
+                    );
+                    self.input = prompt.task;
+                }
+                return;
+            }
+            _ => None,
+        };
+        let Some(choice) = choice else {
+            return;
+        };
+        let Some(prompt) = self.mcp_pending.as_ref() else {
+            return;
+        };
+        let Some(name) = prompt.names.first().cloned() else {
+            return;
+        };
+        let root = prompt.root.clone();
+        let shown = prompt.shown.clone();
+        // A refused key or a changed entry keeps the prompt: the human decides again.
+        if let Err(error) = self.record_mcp_seen(&root, &name, choice, shown.as_deref()) {
+            self.push(Role::Error, error);
+            self.show_mcp_prompt();
+            return;
+        }
+        self.push(
+            Role::Info,
+            format!("MCP server {}: {}", mcp::visible_line(&name), choice.label()),
+        );
+        let more = match self.mcp_pending.as_mut() {
+            Some(prompt) => {
+                prompt.names.remove(0);
+                !prompt.names.is_empty()
+            }
+            None => false,
+        };
+        if more {
+            self.show_mcp_prompt();
+            return;
+        }
+        if let Some(prompt) = self.mcp_pending.take() {
+            let config = self.resolve_config();
+            self.start_task_with_text(config, prompt.task);
+        }
+    }
+
+    fn record_mcp(&self, root: &std::path::Path, name: &str, choice: mcp::Choice) -> Result<(), String> {
+        self.record_mcp_seen(root, name, choice, None)
+    }
+
+    /// Store `choice` for `name`. With `shown`, only when the entry still has the hash the
+    /// human read: a file that changed during the prompt is shown again, not approved.
+    fn record_mcp_seen(
+        &self,
+        root: &std::path::Path,
+        name: &str,
+        choice: mcp::Choice,
+        shown: Option<&str>,
+    ) -> Result<(), String> {
+        let get = self.mcp_get();
+        let config = mcp::load(root, &get);
+        let entry = config
+            .servers
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| format!("no MCP server named {}", mcp::visible_line(name)))?;
+        if shown.is_some_and(|hash| hash != entry.hash) {
+            return Err(format!(
+                "MCP server {} changed while its prompt was on screen. Read it again.",
+                mcp::visible_line(name)
+            ));
+        }
+        let mut approvals = mcp::Approvals::load(&self.providers.dir, root);
+        approvals.set(entry, choice)
+    }
+
+    /// `/mcp`, `/mcp approve <name> [a|n|u]` and `/mcp deny <name>`.
+    fn mcp_command(&mut self, rest: &str) {
+        let root = self.task_root();
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        match words.as_slice() {
+            [] => {
+                let get = self.mcp_get();
+                let config = mcp::load(&root, &get);
+                let approvals = mcp::Approvals::load(&self.providers.dir, &root);
+                let lines = mcp::status_lines(&config, &approvals);
+                self.push(Role::Info, lines.join("\n"));
+            }
+            ["approve", name] | ["approve", name, _] => {
+                let choice = words
+                    .get(2)
+                    .and_then(|word| word.chars().next())
+                    .and_then(mcp::Choice::from_key)
+                    .filter(|choice| *choice != mcp::Choice::Deny)
+                    .unwrap_or(mcp::Choice::Sandbox);
+                match self.record_mcp(&root, name, choice) {
+                    Ok(()) => self.push(
+                        Role::Info,
+                        format!("MCP server {}: {}", mcp::visible_line(name), choice.label()),
+                    ),
+                    Err(error) => self.push(Role::Error, error),
+                }
+            }
+            ["deny", name] => match self.record_mcp(&root, name, mcp::Choice::Deny) {
+                Ok(()) => self.push(
+                    Role::Info,
+                    format!("MCP server {}: denied", mcp::visible_line(name)),
+                ),
+                Err(error) => self.push(Role::Error, error),
+            },
+            _ => self.push(Role::Info, "usage: /mcp, /mcp approve <name> [a|n|u], /mcp deny <name>"),
+        }
     }
 
     fn handle_command(&mut self, text: &str) {
@@ -1219,7 +1421,7 @@ impl App {
                 Role::Info,
                 "enter send · tab worktrees · i inspect · ↑/↓ scroll · ^C quit\n\
                  /up /down /step /status /workflow /new <slug> /refresh /worktrees\n\
-                 /provider [name] /model <id> /instructions /clear /quit",
+                 /provider [name] /model <id> /instructions /mcp /clear /quit",
             ),
             "/up" => self.run_action_inline(Action::Up),
             "/down" => self.run_action_inline(Action::Down),
@@ -1253,6 +1455,7 @@ impl App {
                     self.start_session("clear");
                 }
             }
+            "/mcp" => self.mcp_command(rest),
             "/provider" => {
                 if rest.is_empty() {
                     self.list_providers();
@@ -1452,7 +1655,9 @@ impl App {
     }
 
     fn render_input(&self, area: Rect, buf: &mut Buffer) {
-        let hint = if self.running && self.waiting_run.is_some() {
+        let hint = if self.mcp_pending.is_some() {
+            " a approve · n with network · u outside the sandbox · d deny · Esc not now "
+        } else if self.running && self.waiting_run.is_some() {
             " waiting for your OK in the Run pane · g run · b block · ^C quit "
         } else if self.running {
             " working… · esc stop · ↑/↓ scroll · ^C quit "

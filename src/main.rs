@@ -1,5 +1,5 @@
 use crossterm::event::{self, Event, KeyEventKind};
-use ram_code::agent::{run_turn_cancellable, AgentEvent, TurnEnd};
+use ram_code::agent::{run_turn_cancellable_with, AgentEvent, TurnEnd};
 use ram_code::cancel::Cancel;
 use ram_code::hooked::Hooked;
 use ram_code::providers::resolve_from_env;
@@ -131,7 +131,12 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         eprintln!("{note}");
     }
     hooks.start_context = started.contexts;
-    let turn = run_turn_cancellable(llm.as_ref(), root, &[], task, &hooks, &cancel, &mut |event| match event {
+    // A headless run never prompts: an unapproved project server is skipped with one line.
+    let mut servers = ram_code::mcp::Session::start(root, std::env::vars().collect());
+    for note in servers.notes() {
+        eprintln!("{note}");
+    }
+    let turn = run_turn_cancellable_with(llm.as_ref(), root, &[], task, &hooks, &servers, &cancel, &mut |event| match event {
         AgentEvent::Text(text) => println!("{text}"),
         AgentEvent::TextDelta(_) => {}
         AgentEvent::ToolCall { name, input } => println!("→ {name} {input}"),
@@ -147,6 +152,7 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         }
         AgentEvent::MaxTokens(_) => {}
     });
+    servers.shutdown();
     let _ = hooks.fire("SessionEnd", "", json!({"reason": "exit"}));
     match turn.end {
         TurnEnd::Done => {
@@ -204,7 +210,13 @@ fn run_worker(
             }
         }
     }
-    let turn = run_turn_cancellable(llm.as_ref(), root, &previous, task, &hooks, &cancel, &mut |event| {
+    // The task's MCP servers start here and stop when the task ends, whatever way it ends.
+    let mut servers = ram_code::mcp::Session::start(root, std::env::vars().collect());
+    for note in servers.notes() {
+        let _ = writeln!(out, "{}", json!({"type": "hook", "text": note}));
+    }
+    let _ = out.flush();
+    let turn = run_turn_cancellable_with(llm.as_ref(), root, &previous, task, &hooks, &servers, &cancel, &mut |event| {
         let value = match event {
             AgentEvent::Text(text) => json!({"type": "text", "text": text}),
             AgentEvent::TextDelta(text) => json!({"type": "text_delta", "text": text}),
@@ -220,6 +232,7 @@ fn run_worker(
         let _ = writeln!(out, "{value}");
         let _ = out.flush();
     });
+    servers.shutdown();
     // The history keeps what finished, whatever way the turn ended.
     if let Ok(text) = serde_json::to_string(&turn.history) {
         let _ = std::fs::write(history, text);

@@ -269,6 +269,40 @@ impl Reply {
     }
 }
 
+/// Tools that come from outside Ram Code, such as MCP servers. Their calls go through the same
+/// hooks as the built-in tools.
+pub trait ToolSource {
+    fn definitions(&self) -> Vec<Value>;
+    fn handles(&self, name: &str) -> bool;
+    fn call(&self, name: &str, input: &Value) -> Result<String, String>;
+
+    /// `call`, which `cancel` can stop. A source that cannot stop a call waits for it.
+    fn call_cancellable(
+        &self,
+        name: &str,
+        input: &Value,
+        cancel: &Cancel,
+    ) -> Result<String, String> {
+        let _ = cancel;
+        self.call(name, input)
+    }
+}
+
+/// No outside tools.
+pub struct NoTools;
+
+impl ToolSource for NoTools {
+    fn definitions(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn handles(&self, _name: &str) -> bool {
+        false
+    }
+    fn call(&self, name: &str, _input: &Value) -> Result<String, String> {
+        Err(format!("unknown tool: {name}"))
+    }
+}
+
 pub trait Llm: Send + Sync {
     fn complete(&self, request: &Value) -> Result<Value, String>;
 
@@ -544,8 +578,44 @@ pub fn run_turn_cancellable(
     cancel: &Cancel,
     on_event: &mut dyn FnMut(AgentEvent),
 ) -> Turn {
+    run_turn_cancellable_with(llm, root, history, task, hooks, &NoTools, cancel, on_event)
+}
+
+/// `run_turn_cancellable` with no cancel: the result is `Err` when the turn did not finish.
+pub fn run_turn_with(
+    llm: &dyn Llm,
+    root: &Path,
+    history: &[Value],
+    task: &str,
+    hooks: &Hooked,
+    extra: &dyn ToolSource,
+    on_event: &mut dyn FnMut(AgentEvent),
+) -> Result<(String, Vec<Value>), String> {
+    let turn =
+        run_turn_cancellable_with(llm, root, history, task, hooks, extra, &Cancel::new(), on_event);
+    match turn.end {
+        TurnEnd::Done => Ok((turn.answer, turn.history)),
+        TurnEnd::Interrupted => Err(INTERRUPTED.to_string()),
+        TurnEnd::Failed(error) => Err(error),
+    }
+}
+
+/// `run_turn_cancellable`, with the tools of `extra`, such as MCP servers, beside the built-in
+/// ones. `cancel` also stops a running call to `extra`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_turn_cancellable_with(
+    llm: &dyn Llm,
+    root: &Path,
+    history: &[Value],
+    task: &str,
+    hooks: &Hooked,
+    extra: &dyn ToolSource,
+    cancel: &Cancel,
+    on_event: &mut dyn FnMut(AgentEvent),
+) -> Turn {
     let tools = Tools::new(root).with_cancel(cancel.clone());
-    let definitions = Tools::definitions();
+    let mut definitions = Tools::definitions();
+    definitions.extend(extra.definitions());
     let mut messages: Vec<Value> = history.to_vec();
     let mut answer = String::new();
     let end = |answer: &str, messages: Vec<Value>, end: TurnEnd| Turn {
@@ -684,7 +754,7 @@ pub fn run_turn_cancellable(
                     } else if let Some(raw) = input.get(INVALID_ARGUMENTS) {
                         format!("error: the tool arguments are not valid JSON: {raw}")
                     } else {
-                        call_tool(&tools, hooks, &name, &input, &mut ended, on_event)
+                        call_tool(&tools, extra, cancel, hooks, &name, &input, &mut ended, on_event)
                     };
                     on_event(AgentEvent::ToolResult(result.clone()));
                     assistant_blocks.push(block.clone());
@@ -741,8 +811,11 @@ pub fn run_turn_cancellable(
 }
 
 /// One tool call between its PreToolUse/PreWorkflow and PostToolUse/PostWorkflow hooks.
+#[allow(clippy::too_many_arguments)]
 fn call_tool(
     tools: &Tools,
+    extra: &dyn ToolSource,
+    cancel: &Cancel,
     hooks: &Hooked,
     name: &str,
     input: &Value,
@@ -769,9 +842,14 @@ fn call_tool(
         *ended = Some(reason.clone());
         return format!("stopped by a hook: {reason}");
     }
-    let mut result = match tools.call_with(name, input, &mut |id| {
-        on_event(AgentEvent::RunPending(id.to_string()))
-    }) {
+    let called = if extra.handles(name) {
+        extra.call_cancellable(name, input, cancel)
+    } else {
+        tools.call_with(name, input, &mut |id| {
+            on_event(AgentEvent::RunPending(id.to_string()))
+        })
+    };
+    let mut result = match called {
         Ok(output) => output,
         Err(error) => format!("error: {error}"),
     };

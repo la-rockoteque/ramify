@@ -49,7 +49,7 @@ pub fn home() -> Option<PathBuf> {
 }
 
 /// The git top level of `root`, or `root` outside git.
-fn top_level(root: &Path) -> PathBuf {
+pub(crate) fn top_level(root: &Path) -> PathBuf {
     Command::new("git")
         .arg("-C")
         .arg(root)
