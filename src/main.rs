@@ -120,7 +120,7 @@ fn run_worker(root: &Path, task: &str, events: &Path, history: &Path) -> std::io
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {}", config.base_url)}));
+    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {} ({})", config.base_url, config.credential.label())}));
     let _ = out.flush();
     let llm = AnthropicLlm::new(config);
     let result = run_turn(&llm, root, &previous, task, &mut |event| {

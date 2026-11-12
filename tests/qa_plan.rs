@@ -1,4 +1,4 @@
-use ram_code::agent::{run_task, run_turn, AgentConfig, AgentEvent, Llm};
+use ram_code::agent::{run_task, run_turn, AgentConfig, AgentEvent, Credential, Llm};
 use ram_code::app::{App, MessageKind, Role, Screen};
 use ram_code::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -597,7 +597,7 @@ fn worker_events_reach_the_transcript() {
 
     let config = AgentConfig {
         base_url: "http://127.0.0.1:1".into(),
-        token: "test".into(),
+        credential: Credential::AuthToken("test".into()),
         model: "test".into(),
         max_tokens: 10,
     };
