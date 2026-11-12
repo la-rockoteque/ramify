@@ -1,0 +1,52 @@
+# QA plan: hooks in Ram Code
+
+The automated cases go in a new integration test file, `tests/qa_hooks.rs`. It drives
+`run_turn` with a fake model, as `tests/qa_plan.rs` does. Hook files and scripts live in a temp
+folder, and `HOME` points there so the user's real `~/.ram` and `~/.claude` are never read.
+Each hook script appends its stdin to a log, so a test can read back what each hook received.
+The ramify cases (AC15, AC16) run the real `hooks/ramify-hook` on a fixture repo, as
+`cli/tests/prompt.rs` does.
+
+| Case | AC | Risk | Check | Settled by |
+|---|---|---|---|---|
+| Q1 | AC1 | high | `pre_tool_deny_blocks_the_command`: the command would create a file; the file does not exist, and the tool result is `blocked by a hook: <reason>` | build |
+| Q2 | AC1 | medium | `pre_tool_ask_counts_as_deny` | build |
+| Q3 | AC2 | high | `exit_two_blocks_with_stderr` | build |
+| Q4 | AC3 | high | `matcher_selects_the_tool`: a `write_file` hook does not run on `run_command`; `*` and an empty matcher run on both; `run_.*` runs on `run_command` only | build |
+| Q5 | AC4 | medium | `post_tool_context_reaches_the_model` | build |
+| Q6 | AC5 | high | `prompt_block_sends_nothing`: the fake model counts zero requests | build |
+| Q7 | AC6 | medium | `session_and_prompt_context_come_first`: the first request's user message starts with the SessionStart context, then the UserPromptSubmit context, then the prompt | build |
+| Q8 | AC7 | high | `stop_block_gives_one_more_turn` | build |
+| Q9 | AC8 | high | `stop_blocks_at_most_three_times` | build |
+| Q10 | AC9 | high | `a_hook_past_its_timeout_is_killed`: a 1 s timeout, a hook that sleeps 30 s; the turn ends in under 5 s, the tool ran, and one transcript event names the hook | build |
+| Q11 | AC9, AC8 | medium | `a_failing_hook_does_not_stop_the_turn`: exit 1 gives one transcript line, and the tool runs | build |
+| Q12 | AC10 | medium | `the_same_command_runs_once` | build |
+| Q13 | AC11 | high | `every_source_runs_in_order`: one hook per source, each appends its source name; the log has all six, in source order | build |
+| Q14 | AC11 | medium | `a_broken_source_is_skipped`: a source that is not JSON gives one transcript line, and the other sources run | build |
+| Q15 | AC12 | high | `enabled_plugin_hooks_run_with_plugin_root`: one enabled and one disabled plugin; only the enabled one runs, and `CLAUDE_PLUGIN_ROOT` is its folder | build |
+| Q16 | AC13 | high | `hook_input_has_the_common_and_event_fields`: for each event, the logged JSON has `session_id` `ram-<pid>`, `cwd` the worktree, `hook_event_name`, the event fields, and `RAM_CODE=1` in the environment | build |
+| Q17 | AC11 | medium | `a_deny_wins_over_an_allow` | build |
+| Q18 | AC14 | medium | `no_hooks_no_process`: with no source, the hook runner reports zero spawns for a turn with tool calls | build |
+| Q19 | AC15 | high | `ramify_pr_gate_denies_in_ram_code`: the real `hooks/ram.json` and `ramify-hook` on a fixture with a work order missing steps; `gh pr create` through `run_command` is denied with the pr-gate reason, and no `gh` runs | build |
+| Q20 | AC16 | high | `ramify_session_start_writes_the_ram_record`: SessionStart from `hooks/ram.json` writes `ram-<pid>.session` with agent `ram`, its context holds the work order note, and SessionEnd removes the record | build |
+| Q21 | AC16 | medium | `ram_code_no_longer_writes_its_own_record`: with no hook source, a task writes no `ram-<pid>.session` | build |
+| Q22 | AC1–AC16 | high | Live: in `~/dev/ramify-wt/ram-hooks`, run the branch's Ram Code with a work order that has steps missing. Ask it to run `gh pr create --title x --body y`. The transcript shows the pr-gate deny, and no PR opens. A shell prompt in the worktree shows `◆ <name>` while Ram Code runs. | qa |
+| Q23 | AC17 | low | The README has the sources, events, decisions and `hooks/ram.json` | audit |
+| Q24 | AC14 | medium | Read the diff: the tool loop calls no hook code when no hook is loaded, and the interface thread never waits on a hook (SessionStart in a thread, SessionEnd bounded at 5 s) | audit |
+
+## Write set
+
+```
+src/**
+tests/qa_hooks.rs
+tests/qa_prompt.rs
+hooks/ram.json
+hooks/ramify-hook
+README.md
+.ramify/work/ram-hooks/**
+!cli/**
+!.claude-plugin/**
+!hooks/codex.json
+!workflows.yml
+!skills/**
+```

@@ -4,7 +4,8 @@ lane: standard
 branch: feat/ram-hooks
 tags: []
 created: 2026-11-12
-steps: []
+steps:
+- {step: spec, date: '2026-11-12'}
 ---
 
 # ram-hooks
