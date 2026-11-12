@@ -246,6 +246,15 @@ pub fn seatbelt_profile_with(
 (allow default)
 (deny appleevent-send)
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
+(deny mach-lookup
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.secd")
+  (global-name "com.apple.security.agent")
+  (global-name "com.apple.security.agent.login")
+  (global-name "com.apple.security.keychain-circle-notification")
+  (global-name "com.apple.security.cloudkeychainproxy3"))
 (deny process-exec
   (literal "/usr/bin/open")
   (literal "/usr/bin/osascript")
@@ -302,7 +311,7 @@ fn has_userinfo(value: &str) -> bool {
 }
 
 /// True for a variable that holds a key, a token, a password, or a way to reach one.
-fn is_secret(name: &str, value: &str, key_envs: &[String]) -> bool {
+pub(crate) fn is_secret(name: &str, value: &str, key_envs: &[String]) -> bool {
     let upper = name.to_ascii_uppercase();
     upper.starts_with("ANTHROPIC_")
         || upper.starts_with("RAM_CODE_")
