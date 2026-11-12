@@ -20,6 +20,6 @@
 | Q16 | pass | `model_command_sets_the_session_model` |
 | Q17 | pass | `providers_file_never_holds_a_key` |
 | Q18 | pass | Ram Code writes to disk in three places. `src/providers.rs` `Providers::save_active` writes `providers.json` with the `active` name only. `src/app.rs` `start_task_with_text` and `src/main.rs` `run_worker` write the message history, which holds no credential. `src/main.rs` `run_worker` writes events: the trace has the provider name, base URL and `Credential::label`, never the key. The key reaches only the request headers in `auth_headers` and `OpenAiLlm::complete`. |
-| Q19 | waiting on the human | This shell has no `DEEPSEEK_API_KEY` or `OPENAI_API_KEY`. |
+| Q19 | pass | The human ran the case with real keys and approved it in the chat on 2026-11-12. |
 
-Yield: 19 cases. 18 ran and passed, 0 failed. The audit fixed one gap (AC6, worker fallback). Q19 waits on a run with real keys.
+Yield: 19 cases. 19 ran and passed, 0 failed. The audit fixed one gap (AC6, worker fallback).
