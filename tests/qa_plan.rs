@@ -577,6 +577,8 @@ fn slash_action_runs_in_the_selected_root() {
 #[test]
 fn worker_events_reach_the_transcript() {
     let root = tmp("worker");
+    // A task writes Ram Code's session record: keep it out of the machine's state folder.
+    std::env::set_var("RAMIFY_STATE_DIR", tmp("worker-state"));
     let json = dash_json("demo", &root, &[("demo", &root, "main")]);
     let (mut app, _) = app_with(vec![(vec!["dash-project", "--json"], out(&json))], &root);
     app.load();
