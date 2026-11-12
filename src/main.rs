@@ -1,6 +1,7 @@
 use crossterm::event::{self, Event, KeyEventKind};
-use ram_code::agent::{run_turn_hooked, AgentConfig, AgentEvent, AnthropicLlm};
+use ram_code::agent::{run_turn_hooked, AgentEvent, Llm};
 use ram_code::hooked::Hooked;
+use ram_code::providers::resolve_from_env;
 use ram_code::app::{App, Screen};
 use ram_code::panel::Pane;
 use ram_code::ramify::RealRunner;
@@ -83,14 +84,14 @@ fn argument_path(args: &[String], flag: &str) -> Option<PathBuf> {
 }
 
 fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
-    let config = match AgentConfig::from_process_env() {
-        Ok(config) => config,
+    let resolved = match resolve_from_env(&|key| std::env::var(key).ok()) {
+        Ok(resolved) => resolved,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);
         }
     };
-    let llm = AnthropicLlm::new(config);
+    let llm = resolved.llm();
     // One task is one session: it starts and ends here.
     let mut hooks = Hooked::load(root, &format!("ram-{}", std::process::id()));
     let started = hooks.fire("SessionStart", "startup", json!({"source": "startup"}));
@@ -98,7 +99,7 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         eprintln!("{note}");
     }
     hooks.start_context = started.contexts;
-    let result = run_headless_task(&llm, root, task, &mut |event| match event {
+    let result = run_headless_task(llm.as_ref(), root, task, &mut |event| match event {
         AgentEvent::Text(text) => println!("{text}"),
         AgentEvent::ToolCall { name, input } => println!("→ {name} {input}"),
         AgentEvent::ToolResult(result) => {
@@ -133,8 +134,8 @@ fn run_worker(
     let mut out = OpenOptions::new().create(true).append(true).open(events)?;
     let _ = writeln!(out, "{}", json!({"type": "trace", "text": "worker start"}));
     let _ = out.flush();
-    let config = match AgentConfig::from_process_env() {
-        Ok(config) => config,
+    let resolved = match resolve_from_env(&|key| std::env::var(key).ok()) {
+        Ok(resolved) => resolved,
         Err(error) => {
             let _ = writeln!(out, "{}", json!({"type": "error", "text": error}));
             return Ok(());
@@ -144,9 +145,9 @@ fn run_worker(
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {} ({})", config.base_url, config.credential.label())}));
+    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker {} {} ({})", resolved.name, resolved.config.base_url, resolved.config.credential.label())}));
     let _ = out.flush();
-    let llm = AnthropicLlm::new(config);
+    let llm = resolved.llm();
     // The interface owns the session: it passes its id, and the folder where SessionStart
     // leaves the hook snapshot and, for the first task, its context.
     let session = std::env::var("RAM_CODE_SESSION").unwrap_or_else(|_| format!("ram-{}", std::process::id()));
@@ -159,7 +160,7 @@ fn run_worker(
             }
         }
     }
-    let result = run_turn_hooked(&llm, root, &previous, task, &hooks, &mut |event| {
+    let result = run_turn_hooked(llm.as_ref(), root, &previous, task, &hooks, &mut |event| {
         let value = match event {
             AgentEvent::Text(text) => json!({"type": "text", "text": text}),
             AgentEvent::ToolCall { name, input } => {
@@ -224,7 +225,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
 
 /// `run_task` with the session's hooks: the headless run is its own session.
 fn run_headless_task(
-    llm: &AnthropicLlm,
+    llm: &dyn Llm,
     root: &Path,
     task: &str,
     on_event: &mut dyn FnMut(AgentEvent),
