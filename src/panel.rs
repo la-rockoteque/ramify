@@ -86,6 +86,8 @@ pub struct RunEntry {
     pub root: Option<PathBuf>,
     pub worktree: String,
     pub output: String,
+    /// The frozen script, from `<runs_dir>/<id>/script`.
+    pub script: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +133,8 @@ pub struct Panel {
     gates: Vec<Gate>,
     scratch: Vec<ScratchItem>,
     runs: Vec<RunEntry>,
+    /// Where `ramify run` keeps its runs; each holds its frozen `script`.
+    pub runs_dir: PathBuf,
     sessions: Vec<SessionEntry>,
     open_group: Option<String>,
     agents: Vec<AgentEntry>,
@@ -140,6 +144,12 @@ pub struct Panel {
     prompt: Option<(PromptKind, String)>,
     pub message: String,
     last_refresh: Option<Instant>,
+    /// The first script row the Run pane shows.
+    script_scroll: usize,
+    /// The largest useful `script_scroll`, from the last render.
+    script_max: std::cell::Cell<usize>,
+    /// The runs whose last script row has been on screen. `g` runs only these.
+    seen_end: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl Default for Panel {
@@ -158,6 +168,7 @@ impl Panel {
             gates: Vec::new(),
             scratch: Vec::new(),
             runs: Vec::new(),
+            runs_dir: runs_dir(),
             sessions: Vec::new(),
             open_group: None,
             agents: Vec::new(),
@@ -167,6 +178,9 @@ impl Panel {
             prompt: None,
             message: String::new(),
             last_refresh: None,
+            script_scroll: 0,
+            script_max: std::cell::Cell::new(0),
+            seen_end: std::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -219,7 +233,13 @@ impl Panel {
             Pane::Dashboard => self.projects = self.json(runner, root, &["dash", "--json"]),
             Pane::Approvals => self.gates = gates(self.json(runner, root, &["gates", "--json"])),
             Pane::Scratch => self.scratch = scratch_items(&scratch_dir()),
-            Pane::Run => self.runs = runs(self.json(runner, root, &["runs", "--json"])),
+            Pane::Run => {
+                self.runs = runs(self.json(runner, root, &["runs", "--json"]));
+                for entry in &mut self.runs {
+                    entry.script = std::fs::read_to_string(self.runs_dir.join(&entry.id).join("script"))
+                        .unwrap_or_default();
+                }
+            }
             Pane::Sessions => {
                 self.sessions = sessions();
                 let projects: Vec<String> = self
@@ -325,6 +345,13 @@ impl Panel {
         }
     }
 
+    /// Select the run `id` in the Run pane, when it is listed.
+    pub fn select_run(&mut self, id: &str) {
+        if let Some(index) = self.runs.iter().position(|entry| entry.id == id) {
+            self.selected = index;
+        }
+    }
+
     pub fn select_next(&mut self) {
         let length = self.length();
         if length > 0 {
@@ -405,12 +432,24 @@ impl Panel {
                 self.switch(all[(index + all.len() - 1) % all.len()], runner, root);
                 true
             }
+            KeyCode::PageDown | KeyCode::Char('J') if self.pane == Pane::Run => {
+                let step = if key.code == KeyCode::PageDown { 10 } else { 1 };
+                self.script_scroll = (self.script_scroll + step).min(self.script_max.get());
+                true
+            }
+            KeyCode::PageUp | KeyCode::Char('K') if self.pane == Pane::Run => {
+                let step = if key.code == KeyCode::PageUp { 10 } else { 1 };
+                self.script_scroll = self.script_scroll.saturating_sub(step);
+                true
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.select_next();
+                self.script_scroll = 0;
                 true
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.select_previous();
+                self.script_scroll = 0;
                 true
             }
             KeyCode::Char('a') if self.pane == Pane::Approvals => {
@@ -566,6 +605,17 @@ impl Panel {
             self.message = format!("run {} is {}", entry.id, entry.status);
             return;
         }
+        if entry.script.is_empty() {
+            self.message = format!(
+                "cannot show the script of run {}, so it does not run from here; use 'ramify run'",
+                entry.id
+            );
+            return;
+        }
+        if !self.seen_end.borrow().contains(&entry.id) {
+            self.message = "scroll to the end of the script first (PgDn or J), then press g".into();
+            return;
+        }
         let spec = CommandSpec {
             root: entry.root.unwrap_or_else(|| root.to_path_buf()),
             args: vec!["run".into(), "go".into(), entry.id.clone()],
@@ -617,9 +667,64 @@ impl Panel {
         let inner = block.inner(area);
         block.render(area, buf);
         let lines = self.lines();
+        let script = (self.pane == Pane::Run)
+            .then(|| self.runs.get(self.selected))
+            .flatten()
+            .filter(|entry| !entry.script.is_empty());
+        let Some(entry) = script.filter(|_| inner.height >= 6) else {
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(inner, buf);
+            return;
+        };
+        // The list and messages take the top third; the script takes the rest, cut into rows
+        // that fit the width, so no part of it hides past the right edge.
+        let head = (lines.len() as u16).clamp(2, inner.height / 3);
+        let top = Rect { height: head, ..inner };
+        let bottom = Rect {
+            y: inner.y + head,
+            height: inner.height - head,
+            ..inner
+        };
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .render(inner, buf);
+            .render(top, buf);
+        self.render_script(entry, bottom, buf);
+    }
+
+    /// The whole script, scrollable. When rows remain below, the last row says how many, in red.
+    fn render_script(&self, entry: &RunEntry, area: Rect, buf: &mut Buffer) {
+        let width = area.width.max(1) as usize;
+        let rows: Vec<Line<'static>> = crate::shell::highlight_script(&entry.script)
+            .into_iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
+        let mut shown = vec![Line::from(Span::styled(
+            format!("script {} · g run · b block · PgDn/PgUp", entry.id),
+            Style::default().fg(Color::Gray),
+        ))];
+        // The last message, such as why `g` did not run, stays in view above the script.
+        for line in tail(&self.message, 2).lines().filter(|line| !line.is_empty()) {
+            shown.extend(wrap_line(
+                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Yellow))),
+                width,
+            ));
+        }
+        let room = (area.height as usize).saturating_sub(shown.len()).max(2);
+        let max = rows.len().saturating_sub(room);
+        self.script_max.set(max);
+        if self.script_scroll >= max {
+            shown.extend(rows[max..].iter().cloned());
+            self.seen_end.borrow_mut().insert(entry.id.clone());
+        } else {
+            let end = self.script_scroll + room - 1;
+            shown.extend(rows[self.script_scroll..end].iter().cloned());
+            shown.push(Line::from(Span::styled(
+                format!("{} more lines below · PgDn", rows.len() - end),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+        }
+        Paragraph::new(shown).render(area, buf);
     }
 
     fn title(&self) -> String {
@@ -1097,8 +1202,47 @@ fn runs(values: Vec<Value>) -> Vec<RunEntry> {
             root: value["root"].as_str().map(PathBuf::from),
             worktree: value["worktree"].as_str().unwrap_or("").into(),
             output: value["output"].as_str().unwrap_or("").into(),
+            script: String::new(),
         })
         .collect()
+}
+
+/// Cut `line` into rows of at most `width` columns, keeping each span's style.
+fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for span in line.spans {
+        let mut text = String::new();
+        for c in span.content.chars() {
+            let wide = Span::raw(c.to_string()).width();
+            if used + wide > width && used > 0 {
+                if !text.is_empty() {
+                    row.push(Span::styled(std::mem::take(&mut text), span.style));
+                }
+                rows.push(Line::from(std::mem::take(&mut row)));
+                used = 0;
+            }
+            text.push(c);
+            used += wide;
+        }
+        if !text.is_empty() {
+            row.push(Span::styled(text, span.style));
+        }
+    }
+    rows.push(Line::from(row));
+    rows
+}
+
+/// `RAMIFY_RUNS_DIR`, else `$CLAUDE_CONFIG_DIR/ramify/runs`, else `~/.claude/ramify/runs`, as in ramify.
+/// `ramify runs --json` does not give the folder, and its code is outside this branch's write set.
+fn runs_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("RAMIFY_RUNS_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("CLAUDE_CONFIG_DIR")
+        .unwrap_or_else(|_| format!("{}/.claude", std::env::var("HOME").unwrap_or_default()));
+    PathBuf::from(base).join("ramify/runs")
 }
 
 fn scratch_dir() -> PathBuf {

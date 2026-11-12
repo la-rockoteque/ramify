@@ -151,6 +151,63 @@ RAMIFY_ROOT=/path/to/worktree cargo run -- --task "Add a --version flag"
 The tests are `cargo test`; they cover the acceptance criteria in
 `.ramify/work/ram-code/spec.md`.
 
+### Sandbox
+
+`run_command` runs each command in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux.
+
+- A command reads any file except credentials in the home folder: `~/.ssh`, `~/.aws`,
+  `~/.azure`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.config/gh`,
+  `~/.config/hub`, `~/.config/anthropic`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`,
+  `~/.pypirc`, `~/.cargo/credentials.toml`, `~/.vault-token`, `~/.terraform.d`, `~/.orbstack`,
+  `~/.colima`, the shell histories and `~/Library/Keychains`. What a command reads goes to the
+  provider in the transcript.
+- A command writes only in the worktree, in a temp folder for the task (`$TMPDIR`), and to
+  `/dev/null`.
+- A command never writes Git metadata: a `.git` file or folder anywhere in the worktree. Git runs
+  hooks and `core.fsmonitor` from there later, outside the sandbox. `git init` and
+  `git commit` fail in the sandbox.
+- A command has no network, Unix sockets included. Docker, an ssh-agent and the DNS daemon are
+  out of reach.
+- A command runs in its own session, with no terminal. It cannot type into Ram Code.
+- On macOS, a command cannot start a program outside the sandbox: `open`, `osascript`,
+  `osacompile` and `launchctl` are blocked, and so are Apple events and Launch Services.
+- On Linux, `bwrap` also hides `/run/user/<uid>` (the session bus) and the Docker socket, and
+  gives the command its own process and IPC namespaces.
+- The environment has no provider keys. Ram Code removes every `ANTHROPIC_*` and `RAM_CODE_*`
+  variable, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `SSH_AUTH_SOCK`, `DOCKER_HOST`,
+  `GOOGLE_APPLICATION_CREDENTIALS`, each `key_env` in `providers.json`, any variable whose name
+  ends in `_KEY`, `_TOKEN`, `_SECRET`, `_PAT`, `_APIKEY`, `_CREDENTIALS`, `_PASS`, `_PWD`,
+  `_AUTH` or `_DSN` or contains `PASSWORD`, and any URL value with a user and password.
+- A command stops after `timeout_seconds`: 120 by default, 600 at most. Ram Code kills the
+  command's whole process group and returns the output so far with `timed out after N s`.
+  A background job that outlives its command is killed too. Ram Code keeps at most 40,000
+  bytes of output, and stops reading 1 second after the command ends.
+
+The sandbox cannot protect what you run later yourself. A command can change a `Makefile`,
+`build.rs`, `.cargo/config.toml`, `.envrc`, `package.json` scripts or `node_modules/.bin` in the
+worktree. These run outside the sandbox when you build or test. Read the diff before you run them.
+
+A command that must reach the network or write elsewhere, such as a dependency fetch, needs
+your OK. The model sets `outside_sandbox` and gives a reason:
+
+1. Ram Code writes the command to a script, with the reason in a comment.
+2. It runs `ramify run ask <script> --cwd <worktree> --note <reason> --no-window`.
+3. The side panel opens on the Run pane, on that run. The pane shows the whole script with
+   colours: comments, strings, variables and keywords. Risky parts are red, in a comment or a
+   string too: `rm -rf`, `sudo`, a pipe into `sh` or `bash`, `curl`, `wget`, a write to an
+   absolute path, `git push`, `chmod` and `chown`. A control character or a Unicode mark that
+   hides or reorders text shows as a red escape, such as `^M` or `<U+202E>`.
+4. A long script shows `N more lines below` in red. `PgDn` and `PgUp` scroll by 10 rows, `J`
+   and `K` by one.
+5. `g` runs the script, but only after the last line has been on screen. `b` blocks it with a
+   note. The model gets `ran: exit N` with the output, or `blocked: <note>`.
+6. After 30 minutes without a decision, the model gets
+   `no decision; the run stays pending in the Run pane`. `RAM_CODE_RUN_WAIT` sets the wait in
+   seconds.
+
+With no sandbox program on the machine, every command goes to you this way. A headless run
+(`--task`) asks without `--no-window`, so the run window opens.
+
 ### Instructions: AGENTS.md and CLAUDE.md
 
 Before each task, Ram Code reads `AGENTS.md` and `CLAUDE.md` files, as Codex and Claude Code do,
@@ -735,8 +792,8 @@ ramify runs                             # every run, newest first
   directory, the hash and the script with line numbers. Run has no keyboard shortcut. A started
   run outlives the window, and the window streams its output.
 - A run is a folder in `~/.claude/ramify/runs/<id>`: `script`, `meta.json` and `output.log`.
-  `RAMIFY_RUNS_DIR` moves them. `RAMIFY_POPUP=0` keeps the window shut, and a bare `ramify run`
-  opens it.
+  `RAMIFY_RUNS_DIR` moves them. `run ask --no-window` or `RAMIFY_POPUP=0` keeps the window
+  shut, and a bare `ramify run` opens it. Ram Code uses `--no-window`: its Run pane shows the run.
 - The plugin refuses `ramify run go` and `ramify run block` from the agent.
 
 `card`, `dash` and the status line show `▶ run <id> waits on you` while a run asked from that

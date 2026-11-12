@@ -16,8 +16,15 @@ pub const INVALID_ARGUMENTS: &str = "__invalid_arguments";
 pub const SYSTEM_PROMPT: &str = "You are Ram Code, a coding agent working inside one git worktree. \
 Use the tools to inspect and change files. To find code, use grep, glob and code_map first, \
 then read only the files you need. Keep changes small and focused on the task. \
-Every path is relative to the worktree root. When the task is done, reply with a short summary \
-of what changed and why. Do not ask for permission; finish the task.";
+Every path is relative to the worktree root. \
+run_command runs in a sandbox: it can read files, write only inside the worktree and $TMPDIR, \
+and has no network, and keys and tokens are not in its environment. A command stops after \
+timeout_seconds (default 120, at most 600); set a longer one for a slow build or test run. \
+When a command must reach the network or write outside the worktree, set outside_sandbox \
+and give a short reason: the human reads the command and runs or blocks it. Ask only when \
+the sandbox cannot do the job. If the human blocks a command, do not ask for it again; \
+find another way or say what you need. When the task is done, reply with a short summary \
+of what changed and why.";
 
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 pub const ANTHROPIC_MODEL: &str = "claude-opus-5-5";
@@ -183,6 +190,8 @@ pub enum AgentEvent {
     Error(String),
     /// A hook blocked, denied, failed or sent a message: one transcript line.
     Hook(String),
+    /// A command waits on the human in `ramify run`: the run's id.
+    RunPending(String),
 }
 
 pub trait Llm: Send + Sync {
@@ -450,7 +459,9 @@ fn call_tool(
         *ended = Some(reason.clone());
         return format!("stopped by a hook: {reason}");
     }
-    let mut result = match tools.call(name, input) {
+    let mut result = match tools.call_with(name, input, &mut |id| {
+        on_event(AgentEvent::RunPending(id.to_string()))
+    }) {
         Ok(output) => output,
         Err(error) => format!("error: {error}"),
     };

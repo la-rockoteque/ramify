@@ -1,7 +1,7 @@
 use crate::agent::AgentConfig;
 use crate::providers::{missing_key, resolve, unknown, Providers};
 use crate::bonsai_art;
-use crate::panel::Panel;
+use crate::panel::{Pane, Panel};
 use crate::hooked::Hooked;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use crate::state::{parse_project, project_for_root, Project, Worktree};
@@ -118,6 +118,8 @@ pub struct App {
     pub provider: String,
     /// The `/model` choice for this session.
     pub session_model: Option<String>,
+    /// The run that waits on the human in the Run pane, while the task waits for it.
+    pub waiting_run: Option<String>,
     /// `provider · model` for the header, kept current so a frame does no file work.
     provider_line: String,
     worker: Option<Worker>,
@@ -177,6 +179,7 @@ impl App {
             providers: Providers::empty(PathBuf::new()),
             provider: crate::providers::ENV.to_string(),
             session_model: None,
+            waiting_run: None,
             provider_line: String::new(),
             worker: None,
             loader: None,
@@ -545,6 +548,8 @@ impl App {
             .env("RAMIFY_ROOT", &worktree.path)
             .env("RAM_CODE_SESSION", &self.session_id)
             .env("RAM_CODE_PROVIDER", &self.provider)
+            // The Run pane shows the runs this task asks for, so the run window stays closed.
+            .env("RAM_CODE_NO_WINDOW", "1")
             .env("RAM_CODE_CONFIG_DIR", &self.providers.dir)
             .envs(self.session_model.iter().map(|model| ("RAM_CODE_MODEL", model)))
             .stdin(Stdio::null())
@@ -701,7 +706,19 @@ impl App {
                     value.get("text").and_then(Value::as_str).unwrap_or(""),
                 );
             }
+            Some("run_pending") => {
+                let id = value.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                self.panel.open_on(Pane::Run);
+                self.panel.refresh(&*self.runner, &self.root);
+                self.panel.select_run(&id);
+                self.push(
+                    Role::Info,
+                    format!("run {id} waits for your OK in the Run pane: g runs it, b blocks it"),
+                );
+                self.waiting_run = Some(id);
+            }
             Some("tool_result") => {
+                self.waiting_run = None;
                 let text = value.get("text").and_then(Value::as_str).unwrap_or("");
                 let head: Vec<&str> = text.lines().take(2).collect();
                 self.push(Role::ToolResult, head.join("\n"));
@@ -747,6 +764,7 @@ impl App {
     }
 
     fn task_ended(&mut self) {
+        self.waiting_run = None;
         // The task may have changed the branch or the stack: read the line again.
         self.status_at = None;
         self.mark_idle();
@@ -1264,7 +1282,9 @@ impl App {
     }
 
     fn render_input(&self, area: Rect, buf: &mut Buffer) {
-        let hint = if self.running {
+        let hint = if self.running && self.waiting_run.is_some() {
+            " waiting for your OK in the Run pane · g run · b block · ^C quit "
+        } else if self.running {
             " working… · ↑/↓ scroll · ^C quit "
         } else {
             " enter send · tab worktrees · ^O inspect · /help · ^C quit "
