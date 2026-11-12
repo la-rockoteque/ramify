@@ -9,6 +9,8 @@ pub mod openai;
 pub mod panel;
 pub mod providers;
 pub mod ramify;
+pub mod sandbox;
+pub mod shell;
 pub mod state;
 pub mod tools;
 pub mod update;

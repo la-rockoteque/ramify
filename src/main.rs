@@ -137,6 +137,9 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         }
         AgentEvent::Error(error) => eprintln!("error: {error}"),
         AgentEvent::Hook(note) => eprintln!("{note}"),
+        AgentEvent::RunPending(id) => {
+            println!("→ run {id} waits for your OK: ramify run go {id}, or ramify run block {id}")
+        }
     }, &hooks);
     let _ = hooks.fire("SessionEnd", "", json!({"reason": "exit"}));
     match result {
@@ -197,6 +200,7 @@ fn run_worker(
             AgentEvent::ToolResult(text) => json!({"type": "tool_result", "text": text}),
             AgentEvent::Error(text) => json!({"type": "error", "text": text}),
             AgentEvent::Hook(text) => json!({"type": "hook", "text": text}),
+            AgentEvent::RunPending(id) => json!({"type": "run_pending", "id": id}),
         };
         let _ = writeln!(out, "{value}");
         let _ = out.flush();
