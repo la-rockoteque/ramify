@@ -208,6 +208,61 @@ your OK. The model sets `outside_sandbox` and gives a reason:
 With no sandbox program on the machine, every command goes to you this way. A headless run
 (`--task`) asks without `--no-window`, so the run window opens.
 
+### MCP servers
+
+Ram Code is an MCP client for local servers over stdio. It offers their tools to the model.
+Remote servers (`type: "http"`) show in `/mcp` as `not supported yet`.
+
+Ram Code reads two files in Claude Code's format:
+
+1. `~/.config/ram-code/mcp.json`, the user file. `RAM_CODE_CONFIG_DIR` moves its folder.
+2. `.mcp.json` at the project's git top level.
+
+```json
+{
+  "mcpServers": {
+    "tracker": {
+      "command": "npx",
+      "args": ["-y", "tracker-mcp"],
+      "env": { "TRACKER_TOKEN": "${TRACKER_TOKEN}" },
+      "timeout_seconds": 60
+    }
+  }
+}
+```
+
+- On a name clash, the user file wins.
+- `${VAR}` and `${VAR:-default}` expand in `command`, `args`, `env`, `url` and `headers`.
+  An unset variable with no default stops that server only.
+- A tool appears to the model as `mcp__<server>__<tool>`. A name that is not valid, or longer
+  than 64 characters, is changed so that it stays valid and unique.
+- A call waits at most `timeout_seconds`: 120 by default, 600 at most.
+- A result is cut at 40,000 characters. An image becomes `[image: <type>, <size> bytes]`.
+- `PreToolUse` and `PostToolUse` hooks see MCP calls by their `mcp__…` name.
+
+A project server does not start until you approve it. Before the first task, Ram Code shows
+the server's command line and the names of its `env` keys. Answer with one key:
+
+- `a`: run it in the sandbox, with no network.
+- `n`: run it in the sandbox, with network. Ram Code suggests this for `npx` and `uvx`, which
+  download packages on their first run.
+- `u`: run it outside the sandbox, with your full rights. The prompt shows this in red.
+- `d`: deny it.
+- `Esc`: do not start the task now.
+
+Ram Code stores the decision in `~/.config/ram-code/mcp-approvals.json`, by project and by a
+SHA-256 of the entry. The file holds no `env` value. A changed entry asks again. A headless run
+(`--task`) never asks: it skips an unapproved server and prints one line. User servers need no
+approval and run in the sandbox with no network.
+
+`/mcp` lists the servers, with their source, approval and state. `/mcp approve <name> [a|n|u]`
+and `/mcp deny <name>` change a decision.
+
+Servers start with each task, in the worker, and stop when the task ends: Ram Code closes
+their input, waits 2 seconds, then kills their process group. A server that crashes starts
+again once on the next call. A second crash marks it failed for the task. A server gets the
+environment without secrets, as `run_command` does, plus the variables its `env` names.
+
 ### Instructions: AGENTS.md and CLAUDE.md
 
 Before each task, Ram Code reads `AGENTS.md` and `CLAUDE.md` files, as Codex and Claude Code do,
