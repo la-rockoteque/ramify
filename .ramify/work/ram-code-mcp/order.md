@@ -7,6 +7,7 @@ created: 2026-11-12
 steps:
 - {step: spec, date: '2026-11-12'}
 - {step: qa-plan, date: '2026-11-12'}
+- {step: build, date: '2026-11-12'}
 ---
 
 # Ram Code MCP
