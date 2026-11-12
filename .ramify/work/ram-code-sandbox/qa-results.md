@@ -21,6 +21,6 @@
 | Q17 | pass | `no_sandbox_goes_to_the_human` |
 | Q18 | pass | `no_decision_leaves_the_run_pending` |
 | Q19 | pass after a fix | `audit.md`: credential reads and launches outside the sandbox were open. Fixed in `b5e6a80`, with `sandbox_hides_secret_files` and `sandbox_blocks_launching_outside`. |
-| Q20 | waiting on the human | Needs a provider key and a person at the Run pane. |
+| Q20 | pass | The human ran the case live and approved it in the chat on 2026-11-12. |
 
-Yield: 20 cases. 19 ran and passed, 0 failed. The audit fixed 2 gaps. Q20 waits on a live run.
+Yield: 20 cases. 20 ran and passed, 0 failed. The audit fixed 2 gaps.
