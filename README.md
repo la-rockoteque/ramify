@@ -68,6 +68,44 @@ For the Anthropic login, run `ant auth login` once. Before each request, Ram Cod
 `ANTHROPIC_BASE_URL` overrides the base URL. The model is `RAM_CODE_MODEL`, else
 `ANTHROPIC_DEFAULT_SONNET_MODEL`, else the default in the table.
 
+### Providers
+
+A provider is a named model endpoint. `/provider` lists them, and `/provider <name>` switches.
+The choice is saved and holds for later sessions. `/model <id>` sets the model for this session.
+The header shows the active provider and model.
+
+| Provider | Format | Base URL | Key | Default model |
+| --- | --- | --- | --- | --- |
+| `env` | Anthropic Messages | as above | as above | as above |
+| `claude` | Anthropic Messages | `https://api.anthropic.com` | the credential order above | `claude-opus-5-5` |
+| `openai` | OpenAI Chat Completions | `https://api.openai.com/v1` | `OPENAI_API_KEY` | none: set one with `/model` or `RAM_CODE_MODEL` |
+| `deepseek` | Anthropic Messages | `https://api.deepseek.com/anthropic` | `DEEPSEEK_API_KEY` | `deepseek-v4.1-flash` |
+
+`env` is active until you switch. It reads the environment as described above.
+
+Add custom providers, such as a LiteLLM proxy, to `~/.config/ram-code/providers.json`.
+`RAM_CODE_CONFIG_DIR` moves that folder. An entry with a preset's name replaces the preset.
+`format` is `anthropic` (the default) or `openai`. `key_env` names the variable that holds the
+key. The file never holds a key.
+
+```json
+{
+  "active": "litellm",
+  "providers": [
+    {
+      "name": "litellm",
+      "format": "openai",
+      "base_url": "https://litellm.example.com",
+      "key_env": "LITELLM_API_KEY",
+      "model": "team-default"
+    }
+  ]
+}
+```
+
+`RAM_CODE_PROVIDER` picks the provider for one run, and leaves the saved choice as it is.
+`RAM_CODE_MODEL` overrides the model of every provider.
+
 Run one task without the interface:
 
 ```bash

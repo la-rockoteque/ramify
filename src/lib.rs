@@ -1,7 +1,9 @@
 pub mod agent;
 pub mod app;
 pub mod bonsai_art;
+pub mod openai;
 pub mod panel;
+pub mod providers;
 pub mod ramify;
 pub mod state;
 pub mod tools;

@@ -1,5 +1,6 @@
 use crossterm::event::{self, Event, KeyEventKind};
-use ram_code::agent::{run_task, run_turn, AgentConfig, AgentEvent, AnthropicLlm};
+use ram_code::agent::{run_task, run_turn, AgentEvent};
+use ram_code::providers::resolve_from_env;
 use ram_code::app::{App, Screen};
 use ram_code::panel::Pane;
 use ram_code::ramify::RealRunner;
@@ -74,15 +75,15 @@ fn argument_path(args: &[String], flag: &str) -> Option<PathBuf> {
 }
 
 fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
-    let config = match AgentConfig::from_process_env() {
-        Ok(config) => config,
+    let resolved = match resolve_from_env(&|key| std::env::var(key).ok()) {
+        Ok(resolved) => resolved,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);
         }
     };
-    let llm = AnthropicLlm::new(config);
-    let result = run_task(&llm, root, task, &mut |event| match event {
+    let llm = resolved.llm();
+    let result = run_task(llm.as_ref(), root, task, &mut |event| match event {
         AgentEvent::Text(text) => println!("{text}"),
         AgentEvent::ToolCall { name, input } => println!("→ {name} {input}"),
         AgentEvent::ToolResult(result) => {
@@ -109,8 +110,8 @@ fn run_worker(root: &Path, task: &str, events: &Path, history: &Path) -> std::io
     let mut out = OpenOptions::new().create(true).append(true).open(events)?;
     let _ = writeln!(out, "{}", json!({"type": "trace", "text": "worker start"}));
     let _ = out.flush();
-    let config = match AgentConfig::from_process_env() {
-        Ok(config) => config,
+    let resolved = match resolve_from_env(&|key| std::env::var(key).ok()) {
+        Ok(resolved) => resolved,
         Err(error) => {
             let _ = writeln!(out, "{}", json!({"type": "error", "text": error}));
             return Ok(());
@@ -120,10 +121,10 @@ fn run_worker(root: &Path, task: &str, events: &Path, history: &Path) -> std::io
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker url {} ({})", config.base_url, config.credential.label())}));
+    let _ = writeln!(out, "{}", json!({"type": "trace", "text": format!("worker {} {} ({})", resolved.name, resolved.config.base_url, resolved.config.credential.label())}));
     let _ = out.flush();
-    let llm = AnthropicLlm::new(config);
-    let result = run_turn(&llm, root, &previous, task, &mut |event| {
+    let llm = resolved.llm();
+    let result = run_turn(llm.as_ref(), root, &previous, task, &mut |event| {
         let value = match event {
             AgentEvent::Text(text) => json!({"type": "text", "text": text}),
             AgentEvent::ToolCall { name, input } => {
