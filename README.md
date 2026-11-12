@@ -84,9 +84,17 @@ The header shows the active provider and model.
 `env` is active until you switch. It reads the environment as described above.
 
 Add custom providers, such as a LiteLLM proxy, to `~/.config/ram-code/providers.json`.
-`RAM_CODE_CONFIG_DIR` moves that folder. An entry with a preset's name replaces the preset.
-`format` is `anthropic` (the default) or `openai`. `key_env` names the variable that holds the
-key. The file never holds a key.
+`RAM_CODE_CONFIG_DIR` moves that folder. `format` is `anthropic` (the default) or `openai`.
+`key_env` names the variable that holds the key. The file never holds a key.
+
+- An entry with a preset's name changes only the fields it sets. For example,
+  `{"name": "openai", "model": "gpt-team"}` gives `openai` a default model.
+- Every custom provider needs `key_env`. Only `env`, and `claude` at `https://api.anthropic.com`,
+  use the Anthropic credential order, so an Anthropic key or login never goes to another host.
+- `base_url` must use `https`. Plain `http` works only for `localhost` and `127.0.0.1`.
+- A `base_url` with a path, such as `https://host/v1beta/openai`, gets `/chat/completions`.
+  A bare host gets `/v1/chat/completions`.
+- `/provider` removes thinking blocks from the conversation, because another model rejects them.
 
 ```json
 {

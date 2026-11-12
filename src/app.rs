@@ -115,6 +115,8 @@ pub struct App {
     pub provider: String,
     /// The `/model` choice for this session.
     pub session_model: Option<String>,
+    /// `provider · model` for the header, kept current so a frame does no file work.
+    provider_line: String,
     worker: Option<Worker>,
     loader: Option<Loader>,
     task_seq: u64,
@@ -145,6 +147,7 @@ impl App {
             providers: Providers::empty(PathBuf::new()),
             provider: crate::providers::ENV.to_string(),
             session_model: None,
+            provider_line: String::new(),
             worker: None,
             loader: None,
             task_seq: 0,
@@ -166,6 +169,14 @@ impl App {
             }
         };
         self.provider = self.providers.active_name(self.env.as_ref());
+        self.refresh_provider_line();
+    }
+
+    fn refresh_provider_line(&mut self) {
+        self.provider_line = match self.resolve_config() {
+            Ok(config) => format!("{} · {}", self.provider, config.model),
+            Err(_) => format!("{} · not ready", self.provider),
+        };
     }
 
     /// The active provider's configuration, or the fix when it cannot run.
@@ -201,8 +212,12 @@ impl App {
             self.push(Role::Error, error);
             return;
         }
+        if self.provider != name {
+            crate::agent::strip_thinking(&mut self.history);
+        }
         self.provider = name.to_string();
         self.session_model = None;
+        self.refresh_provider_line();
         let detail = match self.resolve_config() {
             Ok(config) => format!("provider {name} · {}", config.model),
             Err(error) => format!("provider {name} · {error}"),
@@ -834,6 +849,7 @@ impl App {
                     self.push(Role::Info, "usage: /model <id>");
                 } else {
                     self.session_model = Some(rest.to_string());
+                    self.refresh_provider_line();
                     self.push(Role::Info, format!("model {rest} for this session"));
                 }
             }
@@ -946,7 +962,7 @@ impl App {
             ),
             Span::raw(format!("  {name}  {path}")),
             Span::styled(
-                format!("  {}", self.provider_status()),
+                format!("  {}", self.provider_line),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -970,13 +986,6 @@ impl App {
             Style::default().fg(Color::DarkGray),
         )));
         Paragraph::new(lines).render(area, buf);
-    }
-
-    fn provider_status(&self) -> String {
-        match self.resolve_config() {
-            Ok(config) => format!("{} · {}", self.provider, config.model),
-            Err(_) => format!("{} · not ready", self.provider),
-        }
     }
 
     fn render_transcript(&self, area: Rect, buf: &mut Buffer) {

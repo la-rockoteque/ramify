@@ -3,7 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ram_code::agent::{auth_headers, messages_url, run_task, AgentConfig, Credential};
 use ram_code::app::{App, MessageKind, Role, Screen};
-use ram_code::openai::{from_chat, to_chat};
+use ram_code::agent::strip_thinking;
+use ram_code::openai::{chat_url, from_chat, to_chat};
 use ram_code::providers::{resolve, Format, Providers};
 use ram_code::ramify::{CommandOutput, CommandSpec, Runner};
 use serde_json::{json, Value};
@@ -152,14 +153,21 @@ fn no_providers_file_keeps_env_behaviour() {
         ("ANTHROPIC_AUTH_TOKEN", "proxy-token"),
         ("ANTHROPIC_BASE_URL", "http://127.0.0.1:15721"),
     ]);
-    let app = app(&dir, vars.clone());
+    let app = app(&dir, vars);
     assert_eq!(app.provider, "env");
     let config = app.resolve_config().expect("config");
-    let before = AgentConfig::from_env(getter(&vars)).expect("the #53 config");
-    assert_eq!(config.base_url, before.base_url);
-    assert_eq!(config.credential, before.credential);
-    assert_eq!(config.model, before.model);
-    assert_eq!(config.max_tokens, before.max_tokens);
+    // The values #53 sends for a proxy token.
+    assert_eq!(config.base_url, "http://127.0.0.1:15721");
+    assert_eq!(config.credential, Credential::AuthToken("proxy-token".into()));
+    assert_eq!(config.model, "deepseek-v4.1-flash");
+    assert_eq!(config.max_tokens, 8192);
+    assert_eq!(
+        auth_headers(&config.credential).unwrap(),
+        vec![
+            ("authorization", "Bearer proxy-token".to_string()),
+            ("x-api-key", "proxy-token".to_string()),
+        ]
+    );
 }
 
 // ── Q3 ───────────────────────────────────────────────────────────────────────
@@ -529,4 +537,169 @@ fn providers_file_never_holds_a_key() {
             assert!(!text.contains(secret), "{secret} written after /provider {name}");
         }
     }
+}
+
+// ── review fixes ─────────────────────────────────────────────────────────────
+
+#[test]
+fn partial_override_merges_with_the_preset() {
+    let dir = tmp("r1");
+    write_providers(&dir, json!({"providers": [{"name": "openai", "model": "gpt-team"}]}));
+    let vars = env(&[("OPENAI_API_KEY", "sk-o"), ("ANTHROPIC_API_KEY", "sk-ant")]);
+    let providers = Providers::load(dir).unwrap();
+    let provider = providers.find("openai").unwrap();
+    assert_eq!(provider.format, Format::OpenAi);
+    let resolved = resolve(&provider, &getter(&vars), None).unwrap();
+    assert_eq!(resolved.config.base_url, "https://api.openai.com/v1");
+    assert_eq!(resolved.config.credential, Credential::ApiKey("sk-o".into()));
+    assert_eq!(resolved.config.model, "gpt-team");
+}
+
+#[test]
+fn a_provider_without_key_env_never_gets_the_anthropic_credential() {
+    let dir = tmp("r2");
+    write_providers(
+        &dir,
+        json!({"providers": [
+            {"name": "elsewhere", "base_url": "https://llm.example.com", "model": "m"},
+            {"name": "claude", "base_url": "https://llm.example.com"}
+        ]}),
+    );
+    let vars = env(&[("ANTHROPIC_API_KEY", "sk-ant")]);
+    let providers = Providers::load(dir).unwrap();
+    for name in ["elsewhere", "claude"] {
+        let error = resolve(&providers.find(name).unwrap(), &getter(&vars), None)
+            .expect_err("an Anthropic key must not go to another host");
+        assert!(error.contains("key_env"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn a_custom_base_url_must_be_https() {
+    let dir = tmp("r3");
+    write_providers(
+        &dir,
+        json!({"providers": [{"name": "plain", "base_url": "http://llm.example.com",
+            "key_env": "K", "model": "m"}]}),
+    );
+    let vars = env(&[("K", "secret")]);
+    let providers = Providers::load(dir).unwrap();
+    let error = resolve(&providers.find("plain").unwrap(), &getter(&vars), None).unwrap_err();
+    assert!(error.contains("https"), "{error}");
+}
+
+#[test]
+fn worker_gets_the_active_provider_and_model() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tmp("r4");
+    let seen = dir.join("worker-env.txt");
+    let script = dir.join("worker.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s|%s' \"$RAM_CODE_PROVIDER\" \"$RAM_CODE_CONFIG_DIR\" \"$RAM_CODE_MODEL\" > '{}'\n\
+             printf '[]' > \"$6\"\nprintf '{{\"type\":\"finished\",\"answer\":\"ok\"}}\\n' >> \"$4\"\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut app = app(&dir, env(&[("DEEPSEEK_API_KEY", "ds")]));
+    app.worker_binary = Some(script);
+    command(&mut app, "/provider deepseek");
+    command(&mut app, "/model deepseek-v4.1-pro");
+    command(&mut app, "do it");
+    for _ in 0..300 {
+        app.poll_events();
+        if !app.running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!app.running, "the worker never finished");
+    assert_eq!(
+        fs::read_to_string(&seen).unwrap(),
+        format!("deepseek|{}|deepseek-v4.1-pro", dir.display())
+    );
+}
+
+#[test]
+fn openai_empty_reply_is_an_error() {
+    let reply = json!({"choices": [{"finish_reason": "content_filter",
+        "message": {"role": "assistant", "content": ""}}]});
+    let message = from_chat(&reply);
+    let error = message["error"]["message"].as_str().expect("an error");
+    assert!(error.contains("content_filter"), "{error}");
+}
+
+#[test]
+fn openai_refusal_becomes_text() {
+    let reply = json!({"choices": [{"finish_reason": "stop",
+        "message": {"role": "assistant", "content": null, "refusal": "not allowed"}}]});
+    let message = from_chat(&reply);
+    assert_eq!(message["content"][0]["type"], "text");
+    assert!(message["content"][0]["text"].as_str().unwrap().contains("not allowed"));
+}
+
+#[test]
+fn missing_tool_call_id_gets_one() {
+    let reply = json!({"choices": [{"finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{"type": "function", "function": {"name": "list_files", "arguments": "{}"}}]
+    }}]});
+    let message = from_chat(&reply);
+    let id = message["content"][0]["id"].as_str().expect("an id");
+    assert!(id.starts_with("call_"), "{id}");
+}
+
+#[test]
+fn chat_url_keeps_a_base_path() {
+    assert_eq!(chat_url("http://127.0.0.1:4000"), "http://127.0.0.1:4000/v1/chat/completions");
+    assert_eq!(chat_url("https://api.openai.com/v1"), "https://api.openai.com/v1/chat/completions");
+    assert_eq!(
+        chat_url("https://generativelanguage.googleapis.com/v1beta/openai"),
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    );
+    assert_eq!(
+        chat_url("https://api.openai.com/v1/chat/completions"),
+        "https://api.openai.com/v1/chat/completions"
+    );
+}
+
+#[test]
+fn an_assistant_turn_with_only_text_never_sends_null_content() {
+    let chat = to_chat(&json!({"model": "m", "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "s"}]},
+    ]}));
+    assert_eq!(chat["messages"][1]["content"], "");
+}
+
+#[test]
+fn switching_provider_strips_thinking_from_history() {
+    let dir = tmp("r5");
+    let mut app = app(&dir, env(&[("DEEPSEEK_API_KEY", "ds")]));
+    app.history = vec![
+        json!({"role": "user", "content": "hi"}),
+        json!({"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "redacted_thinking", "data": "x"},
+            {"type": "text", "text": "hello"}
+        ]}),
+    ];
+    command(&mut app, "/provider deepseek");
+    assert_eq!(app.history[1]["content"], json!([{"type": "text", "text": "hello"}]));
+    let mut same = app.history.clone();
+    strip_thinking(&mut same);
+    assert_eq!(same, app.history);
+}
+
+#[test]
+fn save_keeps_a_file_it_cannot_read() {
+    let dir = tmp("r6");
+    let bytes = [0xff, 0xfe, 0x7b];
+    fs::write(dir.join("providers.json"), bytes).unwrap();
+    let mut providers = Providers::empty(dir.clone());
+    assert!(providers.save_active("deepseek").is_err());
+    assert_eq!(fs::read(dir.join("providers.json")).unwrap(), bytes);
 }

@@ -38,13 +38,19 @@ impl Llm for OpenAiLlm {
     }
 }
 
-/// `https://host`, `https://host/v1` and `https://host/v1/chat/completions` all give
-/// `https://host/v1/chat/completions`.
+/// A bare host gets `/v1/chat/completions`. A base with a path, such as `https://host/v1` or
+/// `https://host/v1beta/openai`, gets `/chat/completions` only.
 pub fn chat_url(base_url: &str) -> String {
     let base = normalize_base(base_url);
     let base = base.strip_suffix("/chat/completions").unwrap_or(&base);
-    let base = base.strip_suffix("/v1").unwrap_or(base);
-    format!("{base}/v1/chat/completions")
+    let has_path = base
+        .split_once("://")
+        .is_some_and(|(_, rest)| rest.contains('/'));
+    if has_path {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    }
 }
 
 /// Convert an Anthropic Messages request to a Chat Completions request.
@@ -121,7 +127,8 @@ fn assistant_message(blocks: &[Value]) -> Value {
         }
     }
     let mut message = json!({"role": "assistant"});
-    message["content"] = if text.is_empty() {
+    // OpenAI takes null content only beside tool calls.
+    message["content"] = if text.is_empty() && !calls.is_empty() {
         Value::Null
     } else {
         Value::String(text.join("\n"))
@@ -185,11 +192,17 @@ pub fn from_chat(reply: &Value) -> Value {
             content.push(json!({"type": "text", "text": text}));
         }
     }
-    for call in message
+    if let Some(refusal) = message.get("refusal").and_then(Value::as_str) {
+        if !refusal.is_empty() {
+            content.push(json!({"type": "text", "text": format!("The model refused: {refusal}")}));
+        }
+    }
+    for (index, call) in message
         .get("tool_calls")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .enumerate()
     {
         let function = call.get("function").cloned().unwrap_or(json!({}));
         let raw = function
@@ -202,7 +215,12 @@ pub fn from_chat(reply: &Value) -> Value {
         };
         content.push(json!({
             "type": "tool_use",
-            "id": call.get("id").cloned().unwrap_or(Value::Null),
+            "id": call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| fresh_id(index)),
             "name": function.get("name").cloned().unwrap_or(Value::Null),
             "input": input,
         }));
@@ -210,10 +228,26 @@ pub fn from_chat(reply: &Value) -> Value {
     let finish = choice
         .and_then(|choice| choice.get("finish_reason"))
         .and_then(Value::as_str);
+    // An empty assistant turn would break the next request on every provider.
+    if content.is_empty() {
+        return json!({"error": {"message": format!(
+            "the model returned no content (finish_reason {})",
+            finish.unwrap_or("none")
+        )}});
+    }
     let stop_reason = match finish {
         Some("tool_calls") => "tool_use",
         Some("length") => "max_tokens",
         _ => "end_turn",
     };
     json!({"role": "assistant", "content": content, "stop_reason": stop_reason})
+}
+
+/// Anthropic needs an id on every tool call; some OpenAI-compatible servers leave it out.
+fn fresh_id(index: usize) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("call_{nanos}_{index}")
 }

@@ -64,9 +64,7 @@ impl AgentConfig {
             .or_else(|| get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
             .or_else(|| get("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"))
             .unwrap_or_else(|| default_model.to_string());
-        let max_tokens = get("RAM_CODE_MAX_TOKENS")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens = max_tokens_from_env(&get);
         Ok(Self {
             base_url,
             credential,
@@ -75,9 +73,28 @@ impl AgentConfig {
         })
     }
 
-    pub fn from_process_env() -> Result<Self, String> {
-        Self::from_env(|key| std::env::var(key).ok())
+}
+
+/// Remove thinking blocks from earlier turns. Their signatures are valid only for the model
+/// that wrote them, so another provider rejects them.
+pub fn strip_thinking(history: &mut [Value]) {
+    for message in history.iter_mut() {
+        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+            blocks.retain(|block| {
+                !matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            });
+        }
     }
+}
+
+/// `RAM_CODE_MAX_TOKENS`, else the default.
+pub fn max_tokens_from_env(get: &dyn Fn(&str) -> Option<String>) -> u32 {
+    get("RAM_CODE_MAX_TOKENS")
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
 pub const NO_CREDENTIAL: &str = "No credential found. Export ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, \
