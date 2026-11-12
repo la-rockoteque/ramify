@@ -149,7 +149,7 @@ pub fn run(args: &[String]) -> i32 {
             0
         }
         Some(_) => {
-            eprintln!("ramify: usage: ramify run [ask <script> [--cwd DIR] [--note TEXT] | wait <id> | go <id> | block <id> [--note TEXT] | line [root]]");
+            eprintln!("ramify: usage: ramify run [ask <script> [--cwd DIR] [--note TEXT] [--no-window] | wait <id> | go <id> | block <id> [--note TEXT] | line [root]]");
             1
         }
     }
@@ -159,9 +159,11 @@ fn ask(args: &[String]) -> i32 {
     let mut source = String::new();
     let mut cwd = std::env::current_dir().unwrap_or_default();
     let mut note = String::new();
+    let mut window = true;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            "--no-window" => window = false,
             "--cwd" => {
                 let Some(value) = args.get(index + 1) else {
                     eprintln!("ramify: --cwd needs a directory");
@@ -179,7 +181,7 @@ fn ask(args: &[String]) -> i32 {
                 index += 1;
             }
             other if other.starts_with('-') => {
-                eprintln!("ramify: usage: ramify run ask <script> [--cwd DIR] [--note TEXT]");
+                eprintln!("ramify: usage: ramify run ask <script> [--cwd DIR] [--note TEXT] [--no-window]");
                 return 1;
             }
             other => {
@@ -193,7 +195,7 @@ fn ask(args: &[String]) -> i32 {
         index += 1;
     }
     if source.is_empty() {
-        eprintln!("ramify: usage: ramify run ask <script> [--cwd DIR] [--note TEXT]");
+        eprintln!("ramify: usage: ramify run ask <script> [--cwd DIR] [--note TEXT] [--no-window]");
         return 1;
     }
     let source_path = Path::new(&source);
@@ -256,7 +258,8 @@ fn ask(args: &[String]) -> i32 {
     write_meta(&run_path, &Value::Object(meta));
     println!("run {id} waits on the human — the run window shows {} (frozen at {})", source.display(), script_path.display());
     println!("  wait for the decision: ramify run wait {id}");
-    if std::env::var("RAMIFY_POPUP").ok().as_deref() == Some("0") {
+    // `--no-window`: another interface, such as Ram Code's Run pane, shows the run.
+    if !window || std::env::var("RAMIFY_POPUP").ok().as_deref() == Some("0") {
         return 0;
     }
     if launch::open("run").is_err() {
