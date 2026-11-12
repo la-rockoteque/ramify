@@ -1,7 +1,7 @@
 //! Ram Code shows the ramify prompt line, keeps a session record of its own, and lists the live
 //! session records in the Sessions pane.
 
-use ram_code::agent::AgentConfig;
+use ram_code::agent::{AgentConfig, Credential};
 use ram_code::app::{App, Screen};
 use ram_code::ramify::{CommandOutput, CommandSpec, Runner};
 use ram_code::state::{Project, Worktree};
@@ -154,7 +154,7 @@ fn a_task_writes_a_ram_record() {
     app.worker_binary = Some(script);
     let config = AgentConfig {
         base_url: "http://127.0.0.1:1".into(),
-        token: "test".into(),
+        credential: Credential::AuthToken("test".into()),
         model: "test".into(),
         max_tokens: 10,
     };

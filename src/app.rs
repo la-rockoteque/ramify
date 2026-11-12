@@ -1,4 +1,5 @@
 use crate::agent::AgentConfig;
+use crate::providers::{missing_key, resolve, unknown, Providers};
 use crate::bonsai_art;
 use crate::panel::Panel;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
@@ -87,6 +88,9 @@ impl Drop for Loader {
     }
 }
 
+/// Reads an environment variable.
+pub type EnvFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 pub struct App {
     pub runner: Arc<dyn Runner>,
     pub root: PathBuf,
@@ -105,6 +109,15 @@ pub struct App {
     pub panel: Panel,
     pub ramify_bin: Option<PathBuf>,
     pub worker_binary: Option<PathBuf>,
+    /// Reads an environment variable. Tests replace it.
+    pub env: EnvFn,
+    pub providers: Providers,
+    /// The active provider's name.
+    pub provider: String,
+    /// The `/model` choice for this session.
+    pub session_model: Option<String>,
+    /// `provider · model` for the header, kept current so a frame does no file work.
+    provider_line: String,
     worker: Option<Worker>,
     loader: Option<Loader>,
     task_seq: u64,
@@ -127,7 +140,7 @@ pub struct App {
 
 impl App {
     pub fn new(runner: Arc<dyn Runner>, root: PathBuf) -> Self {
-        Self {
+        let mut app = Self {
             runner,
             root,
             project: None,
@@ -145,6 +158,11 @@ impl App {
             panel: Panel::new(),
             ramify_bin: None,
             worker_binary: None,
+            env: Arc::new(|key| std::env::var(key).ok()),
+            providers: Providers::empty(PathBuf::new()),
+            provider: crate::providers::ENV.to_string(),
+            session_model: None,
+            provider_line: String::new(),
             worker: None,
             loader: None,
             task_seq: 0,
@@ -159,7 +177,77 @@ impl App {
             ram_since: 0,
             health_root: None,
             health_at: None,
+        };
+        let dir = Providers::default_dir(app.env.as_ref());
+        app.load_providers(dir);
+        app
+    }
+
+    /// Read `providers.json` from `dir` and pick the active provider.
+    /// An unreadable file leaves the presets, with `env` active, and shows the error.
+    pub fn load_providers(&mut self, dir: PathBuf) {
+        self.providers = match Providers::load(dir.clone()) {
+            Ok(providers) => providers,
+            Err(error) => {
+                self.push(Role::Error, error);
+                Providers::empty(dir)
+            }
+        };
+        self.provider = self.providers.active_name(self.env.as_ref());
+        self.refresh_provider_line();
+    }
+
+    fn refresh_provider_line(&mut self) {
+        self.provider_line = match self.resolve_config() {
+            Ok(config) => format!("{} · {}", self.provider, config.model),
+            Err(_) => format!("{} · not ready", self.provider),
+        };
+    }
+
+    /// The active provider's configuration, or the fix when it cannot run.
+    pub fn resolve_config(&self) -> Result<AgentConfig, String> {
+        let provider = self
+            .providers
+            .find(&self.provider)
+            .ok_or_else(|| unknown(&self.provider, &self.providers))?;
+        resolve(&provider, self.env.as_ref(), self.session_model.as_deref())
+            .map(|resolved| resolved.config)
+    }
+
+    fn list_providers(&mut self) {
+        let mut lines = Vec::new();
+        for provider in self.providers.all() {
+            let mark = if provider.name == self.provider { "●" } else { " " };
+            let mut line = format!("{mark} {}", provider.name);
+            if let Some(var) = missing_key(&provider, self.env.as_ref()) {
+                line.push_str(&format!("  (no key: {var})"));
+            }
+            lines.push(line);
         }
+        lines.push("/provider <name> switches · /model <id> sets the model".into());
+        self.push(Role::Info, lines.join("\n"));
+    }
+
+    fn switch_provider(&mut self, name: &str) {
+        if self.providers.find(name).is_none() {
+            self.push(Role::Error, unknown(name, &self.providers));
+            return;
+        }
+        if let Err(error) = self.providers.save_active(name) {
+            self.push(Role::Error, error);
+            return;
+        }
+        if self.provider != name {
+            crate::agent::strip_thinking(&mut self.history);
+        }
+        self.provider = name.to_string();
+        self.session_model = None;
+        self.refresh_provider_line();
+        let detail = match self.resolve_config() {
+            Ok(config) => format!("provider {name} · {}", config.model),
+            Err(error) => format!("provider {name} · {error}"),
+        };
+        self.push(Role::Info, detail);
     }
 
     pub fn load(&mut self) {
@@ -433,6 +521,9 @@ impl App {
             .arg(&history)
             .current_dir(&worktree.path)
             .env("RAMIFY_ROOT", &worktree.path)
+            .env("RAM_CODE_PROVIDER", &self.provider)
+            .env("RAM_CODE_CONFIG_DIR", &self.providers.dir)
+            .envs(self.session_model.iter().map(|model| ("RAM_CODE_MODEL", model)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file))
@@ -829,7 +920,8 @@ impl App {
             self.handle_command(&text);
             return;
         }
-        self.start_task_with_text(AgentConfig::from_process_env(), text);
+        let config = self.resolve_config();
+        self.start_task_with_text(config, text);
     }
 
     fn handle_command(&mut self, text: &str) {
@@ -841,7 +933,8 @@ impl App {
             "/help" => self.push(
                 Role::Info,
                 "enter send · tab worktrees · i inspect · ↑/↓ scroll · ^C quit\n\
-                 /up /down /step /status /workflow /new <slug> /refresh /worktrees /clear /quit",
+                 /up /down /step /status /workflow /new <slug> /refresh /worktrees\n\
+                 /provider [name] /model <id> /clear /quit",
             ),
             "/up" => self.run_action_inline(Action::Up),
             "/down" => self.run_action_inline(Action::Down),
@@ -860,6 +953,22 @@ impl App {
             "/clear" => {
                 self.entries.clear();
                 self.scroll_up = 0;
+            }
+            "/provider" => {
+                if rest.is_empty() {
+                    self.list_providers();
+                } else {
+                    self.switch_provider(rest);
+                }
+            }
+            "/model" => {
+                if rest.is_empty() {
+                    self.push(Role::Info, "usage: /model <id>");
+                } else {
+                    self.session_model = Some(rest.to_string());
+                    self.refresh_provider_line();
+                    self.push(Role::Info, format!("model {rest} for this session"));
+                }
             }
             "/quit" => self.quit = true,
             other => self.push(Role::Info, format!("unknown command {other}; try /help")),
@@ -997,6 +1106,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("  {name}  {path}")),
+            Span::styled(
+                format!("  {}", self.provider_line),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
         let mut chips = Vec::new();
         if let Some(project) = &self.project {
