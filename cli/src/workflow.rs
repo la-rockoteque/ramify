@@ -14,20 +14,24 @@ pub(crate) struct Definitions {
     pub(crate) workflows: IndexMap<String, WorkflowDef>,
     #[serde(default)]
     pub(crate) steps: std::collections::HashMap<String, StepDef>,
+    #[serde(default)]
+    pub(crate) auto_ask: Option<bool>,
+    #[serde(default)]
+    pub(crate) planning_paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default, Clone)]
 pub(crate) struct RecordDef {
     #[serde(default)]
-    filename: Option<String>,
+    pub(crate) filename: Option<String>,
     #[serde(default)]
-    workflow_field: Option<String>,
+    pub(crate) workflow_field: Option<String>,
     #[serde(default)]
-    slug_field: Option<String>,
+    pub(crate) slug_field: Option<String>,
     #[serde(default)]
-    date_field: Option<String>,
+    pub(crate) date_field: Option<String>,
     #[serde(default)]
-    note_field: Option<String>,
+    pub(crate) note_field: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -54,29 +58,33 @@ pub(crate) struct StepDef {
     pub(crate) does: Option<String>,
     #[serde(default)]
     pub(crate) files: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) opens_pr: Option<bool>,
 }
 
-struct OrderMeta {
-    workflow: String,
-    lane: String,
-    branch: Option<String>,
-    story: Option<String>,
-    steps: Vec<OrderStep>,
-    ask: Option<Ask>,
+pub(crate) struct OrderMeta {
+    pub(crate) workflow: String,
+    pub(crate) lane: String,
+    pub(crate) branch: Option<String>,
+    pub(crate) story: Option<String>,
+    pub(crate) steps: Vec<OrderStep>,
+    pub(crate) ask: Option<Ask>,
 }
 
-struct OrderStep {
-    step: String,
-    na: bool,
-    date: Option<String>,
-    note: Option<String>,
+pub(crate) struct OrderStep {
+    pub(crate) step: String,
+    pub(crate) na: bool,
+    pub(crate) date: Option<String>,
+    pub(crate) note: Option<String>,
 }
 
-struct Ask {
-    step: String,
-    asked: Option<String>,
-    files: Vec<String>,
-    decision: Option<String>,
+pub(crate) struct Ask {
+    pub(crate) step: String,
+    pub(crate) asked: Option<String>,
+    pub(crate) files: Vec<String>,
+    pub(crate) decision: Option<String>,
+    pub(crate) note: Option<String>,
+    pub(crate) digests: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -177,7 +185,7 @@ pub(crate) fn definitions(cfg: &Config) -> Option<Definitions> {
     serde_yaml_ng::from_str(&text).ok()
 }
 
-fn workflows_file(cfg: &Config) -> Option<PathBuf> {
+pub(crate) fn workflows_file(cfg: &Config) -> Option<PathBuf> {
     for base in [&cfg.repo_root, &cfg.primary] {
         let path = base.join(".ramify/workflows.yml");
         if path.is_file() {
@@ -188,7 +196,7 @@ fn workflows_file(cfg: &Config) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-fn find_order(
+pub(crate) fn find_order(
     root: &Path,
     work_dir: &str,
     branch: &str,
@@ -312,11 +320,15 @@ fn extract(value: &Value, record: &RecordDef) -> Option<OrderMeta> {
                     .collect()
             })
             .unwrap_or_default();
+        let note = ask.get("note").map(scalar).filter(|value| !value.is_empty());
+        let digests = ask.get("digests").cloned();
         Some(Ask {
             step,
             asked,
             files,
             decision,
+            note,
+            digests,
         })
     });
     Some(OrderMeta {

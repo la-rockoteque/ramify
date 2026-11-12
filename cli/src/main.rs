@@ -9,6 +9,8 @@ mod setup;
 mod statusline;
 mod dash;
 mod workflow;
+mod steps;
+mod guard;
 
 use std::io::Write;
 
@@ -192,6 +194,12 @@ fn main() {
     }
     if command == "workflow" {
         std::process::exit(commands::workflow(&args[1..]));
+    }
+    if command == "step" && args.len() > 1 && args[1] != "asked" {
+        std::process::exit(steps::step(&args[1..]));
+    }
+    if command == "approve" || command == "reject" {
+        std::process::exit(steps::decide(command, &args[1..]));
     }
     if command == "step" && args.len() == 1 {
         std::process::exit(commands::step());

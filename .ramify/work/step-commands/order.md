@@ -4,7 +4,8 @@ lane: standard
 branch: fix/step-commands
 tags: []
 created: 2026-11-12
-steps: []
+steps:
+- {step: diagnose, date: '2026-11-12'}
 ---
 
 # step-commands
