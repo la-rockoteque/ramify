@@ -15,6 +15,6 @@
 | Q11 | pass | `edit_output_is_one_line_with_the_range` |
 | Q12 | pass | `both_formats_get_edit_file` |
 | Q13 | pass | `edit_writes_atomically` |
-| Q14 | waiting on the human | Needs a provider key. |
+| Q14 | pass | The human ran the case live and reported it passed in the chat on 2026-11-12. |
 
-Yield: 14 cases. 13 ran and passed, 0 failed. The audit fixed 3 gaps. Q14 waits on a live run.
+Yield: 14 cases. 14 ran and passed, 0 failed. The audit fixed 3 gaps.
