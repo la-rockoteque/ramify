@@ -381,3 +381,32 @@ fn denied_command_gets_the_hint() {
     assert!(ok(&out), "{out}");
     assert!(!out.contains("sandbox.json"), "{out}");
 }
+
+// ── audit fix ────────────────────────────────────────────────────────────────
+
+/// The Keychain daemon must be out of reach: items stored with the `security` command often let
+/// that command read them without a prompt. The test makes a throwaway keychain in the worktree,
+/// unlocked, with one dummy item, and never touches the user's keychains or search list.
+#[cfg(target_os = "macos")]
+#[test]
+fn keychain_is_out_of_reach() {
+    let base = base("kc");
+    let root = base.join("wt");
+    let keychain = root.join("probe.keychain-db");
+    let security = |args: &[&str]| {
+        let status = Command::new("/usr/bin/security").args(args).status().unwrap();
+        assert!(status.success(), "security {args:?} failed");
+    };
+    let path = keychain.to_str().unwrap();
+    security(&["create-keychain", "-p", "probe-pw", path]);
+    security(&["unlock-keychain", "-p", "probe-pw", path]);
+    security(&["add-generic-password", "-a", "probe", "-s", "ram-code-probe", "-w", "dummy-value-123", path]);
+    let tools = tools(&base, &root);
+    let out = run(
+        &tools,
+        &format!("/usr/bin/security find-generic-password -s ram-code-probe -w '{path}'"),
+    );
+    let _ = Command::new("/usr/bin/security").args(["delete-keychain", path]).status();
+    assert!(!out.contains("dummy-value-123"), "the sandbox read a keychain item: {out}");
+    assert!(!ok(&out), "{out}");
+}

@@ -351,8 +351,21 @@ const SERVICES: &[&str] = &[
     "com.apple.diagnosticd",
     "com.apple.system.notification_center",
     "com.apple.trustd.agent",
-    "com.apple.SecurityServer",
     "com.apple.bsd.dirhelper",
+];
+
+/// Keychain services, denied after the allows. An item stored with the `security` command often
+/// lets that command read it without a prompt, so a sandboxed `security find-generic-password -w`
+/// would put the secret in the transcript.
+const KEYCHAIN_SERVICES: &[&str] = &[
+    "com.apple.SecurityServer",
+    "com.apple.securityd",
+    "com.apple.securityd.xpc",
+    "com.apple.secd",
+    "com.apple.security.agent",
+    "com.apple.security.agent.login",
+    "com.apple.security.keychain-circle-notification",
+    "com.apple.security.cloudkeychainproxy3",
 ];
 
 fn subpath(path: &Path) -> String {
@@ -448,6 +461,8 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
 {writes})
 (deny appleevent-send)
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
+(deny mach-lookup
+{keychain})
 (deny process-exec
   (literal "/usr/bin/open")
   (literal "/usr/bin/osascript")
@@ -458,6 +473,11 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
 (deny file-write* (regex #"/\.git(/|$)"))
 "#,
         services = services.join("\n"),
+        keychain = KEYCHAIN_SERVICES
+            .iter()
+            .map(|name| format!("  (global-name \"{name}\")"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         reads = reads.join("\n"),
         writes = writes.join("\n"),
     )
