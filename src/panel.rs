@@ -86,6 +86,8 @@ pub struct RunEntry {
     pub root: Option<PathBuf>,
     pub worktree: String,
     pub output: String,
+    /// The frozen script, from `<runs_dir>/<id>/script`.
+    pub script: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +133,8 @@ pub struct Panel {
     gates: Vec<Gate>,
     scratch: Vec<ScratchItem>,
     runs: Vec<RunEntry>,
+    /// Where `ramify run` keeps its runs; each holds its frozen `script`.
+    pub runs_dir: PathBuf,
     sessions: Vec<SessionEntry>,
     open_group: Option<String>,
     agents: Vec<AgentEntry>,
@@ -158,6 +162,7 @@ impl Panel {
             gates: Vec::new(),
             scratch: Vec::new(),
             runs: Vec::new(),
+            runs_dir: runs_dir(),
             sessions: Vec::new(),
             open_group: None,
             agents: Vec::new(),
@@ -219,7 +224,13 @@ impl Panel {
             Pane::Dashboard => self.projects = self.json(runner, root, &["dash", "--json"]),
             Pane::Approvals => self.gates = gates(self.json(runner, root, &["gates", "--json"])),
             Pane::Scratch => self.scratch = scratch_items(&scratch_dir()),
-            Pane::Run => self.runs = runs(self.json(runner, root, &["runs", "--json"])),
+            Pane::Run => {
+                self.runs = runs(self.json(runner, root, &["runs", "--json"]));
+                for entry in &mut self.runs {
+                    entry.script = std::fs::read_to_string(self.runs_dir.join(&entry.id).join("script"))
+                        .unwrap_or_default();
+                }
+            }
             Pane::Sessions => {
                 self.sessions = sessions();
                 let projects: Vec<String> = self
@@ -322,6 +333,13 @@ impl Panel {
             self.selected = 0;
         } else if self.selected >= length {
             self.selected = length - 1;
+        }
+    }
+
+    /// Select the run `id` in the Run pane, when it is listed.
+    pub fn select_run(&mut self, id: &str) {
+        if let Some(index) = self.runs.iter().position(|entry| entry.id == id) {
+            self.selected = index;
         }
     }
 
@@ -807,6 +825,16 @@ impl Panel {
                         ),
                     ));
                 }
+                if let Some(entry) = self.runs.get(self.selected).filter(|e| !e.script.is_empty()) {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("script {} · g run · b block", entry.id),
+                        Style::default().fg(Color::Gray),
+                    )));
+                    for line in entry.script.lines().take(SCRIPT_LINES) {
+                        lines.push(crate::shell::highlight(line));
+                    }
+                }
             }
         }
         if let Some((kind, text)) = &self.prompt {
@@ -1097,8 +1125,21 @@ fn runs(values: Vec<Value>) -> Vec<RunEntry> {
             root: value["root"].as_str().map(PathBuf::from),
             worktree: value["worktree"].as_str().unwrap_or("").into(),
             output: value["output"].as_str().unwrap_or("").into(),
+            script: String::new(),
         })
         .collect()
+}
+
+const SCRIPT_LINES: usize = 40;
+
+/// `RAMIFY_RUNS_DIR`, else `$CLAUDE_CONFIG_DIR/ramify/runs`, else `~/.claude/ramify/runs`, as in ramify.
+fn runs_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("RAMIFY_RUNS_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("CLAUDE_CONFIG_DIR")
+        .unwrap_or_else(|_| format!("{}/.claude", std::env::var("HOME").unwrap_or_default()));
+    PathBuf::from(base).join("ramify/runs")
 }
 
 fn scratch_dir() -> PathBuf {
