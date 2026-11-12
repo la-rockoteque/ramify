@@ -132,8 +132,15 @@ The model works with these tools. Every path is relative to the worktree and sta
 | `code_map` | Outline each file's classes, types, functions and methods with their lines. Covers Rust, TypeScript, JavaScript, Python and Java. Other files show their line count. At most 40,000 characters. |
 | `run_command` | Run a shell command in the worktree. |
 
-`grep`, `glob` and `code_map` skip what `.gitignore` ignores, the `.git` folder and binary files.
-They do not follow a symlink.
+`grep`, `glob` and `code_map` skip what `.gitignore` ignores, the `.git` folder, binary files
+and files over 10 MB. They do not follow a symlink.
+
+- A `path` under `.git`, or one that `.gitignore` ignores, is an error.
+- A glob pattern without `/` matches file names at any depth, such as `*.rs`. A pattern with `/`
+  matches the path from `path`, such as `src/**/*.rs`. `grep`'s `glob` uses the same rule.
+- `glob` needs a folder as its `path`.
+- `code_map` always shows the first file, cut at a line when it is too long. It lists a file over
+  10 MB as skipped. `grep` names the files it skipped for size.
 
 Run one task without the interface:
 

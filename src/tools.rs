@@ -52,13 +52,14 @@ impl Tools {
             json!({
                 "name": "grep",
                 "description": "Search file contents in the worktree with a regular expression. \
-Skips .gitignore'd, .git and binary files. Returns `path:line: text`, at most 200 matches.",
+Skips .gitignore'd, .git and binary files, and files over 10 MB. A path under .git or ignored by \
+.gitignore is an error. Returns `path:line: text`, at most 200 matches.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "pattern": {"type": "string", "description": "Regular expression (Rust regex syntax)"},
                         "path": {"type": "string", "description": "Relative file or folder, default '.'"},
-                        "glob": {"type": "string", "description": "Only files matching this glob, such as '*.rs'"},
+                        "glob": {"type": "string", "description": "Only files matching this glob. Without '/', it matches file names at any depth, such as '*.rs'. With '/', it matches the path from `path`, such as 'src/**/*.rs'."},
                         "ignore_case": {"type": "boolean", "description": "Match without case, default false"}
                     },
                     "required": ["pattern"]
@@ -66,13 +67,14 @@ Skips .gitignore'd, .git and binary files. Returns `path:line: text`, at most 20
             }),
             json!({
                 "name": "glob",
-                "description": "Find files in the worktree by a glob pattern such as 'src/**/*.rs'. \
-Skips .gitignore'd files. Returns sorted relative paths, at most 500.",
+                "description": "Find files in the worktree by a glob pattern. A pattern without '/' \
+matches file names at any depth, such as '*.rs'. A pattern with '/' matches the path from `path`, \
+such as 'src/**/*.rs'. Skips .gitignore'd files and .git. Returns sorted relative paths, at most 500.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string", "description": "Glob pattern, relative to path"},
-                        "path": {"type": "string", "description": "Relative folder to search from, default '.'"}
+                        "pattern": {"type": "string", "description": "Glob pattern"},
+                        "path": {"type": "string", "description": "Relative folder to search from, default '.'. A file is an error."}
                     },
                     "required": ["pattern"]
                 }
@@ -81,7 +83,8 @@ Skips .gitignore'd files. Returns sorted relative paths, at most 500.",
                 "name": "code_map",
                 "description": "Outline the code in a file or folder: each class, type, function and \
 method with its line, without bodies. Covers Rust, TypeScript, JavaScript, Python and Java; \
-other files show their line count. Use it before reading whole files.",
+other files show their line count. Files over 10 MB are listed as skipped. A path under .git or \
+ignored by .gitignore is an error. Use it before reading whole files.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
