@@ -52,6 +52,8 @@ impl Fixture {
         let (home, project) = (base.join("home"), base.join("project"));
         std::env::set_var("RAMIFY_HOME", base.join("no-ramify"));
         std::env::set_var("RAMIFY_STATE_DIR", base.join("state"));
+        // A task reads the user's AGENTS.md and CLAUDE.md: point it at the fixture's home.
+        std::env::set_var("RAM_CODE_INSTRUCTIONS_HOME", &home);
         let log = base.join("log");
         std::fs::create_dir_all(&log).unwrap();
         Fixture {

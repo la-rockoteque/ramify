@@ -176,7 +176,8 @@ fn an_import_brings_the_file_in() {
 fn a_home_import_reads_from_home() {
     let fixture = Fixture::new("home-import");
     fixture.write(&fixture.home.join("shared.md"), "FROM HOME");
-    fixture.write(&fixture.repo.join("CLAUDE.md"), "@~/shared.md");
+    // The user's own CLAUDE.md may import from home.
+    fixture.write(&fixture.home.join(".claude/CLAUDE.md"), "@~/shared.md");
     assert!(fixture.system().contains("FROM HOME"));
 }
 
@@ -310,6 +311,12 @@ fn shown(fixture: &Fixture) -> Vec<String> {
     app.screen = Screen::Main;
     app.input = "/instructions".into();
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // The listing comes from a thread.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.entries.is_empty() && std::time::Instant::now() < deadline {
+        app.poll_events();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     app.entries.iter().map(|entry| entry.text.clone()).collect()
 }
 
@@ -338,7 +345,7 @@ fn the_ramify_repo_reads_its_agents_md_once() {
     let fixture = Fixture::new("ramify");
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let agents = std::fs::read_to_string(repo.join("AGENTS.md")).expect("the repo has AGENTS.md");
-    let found = load(repo, &fixture.home);
+    let found = load(repo, Some(&fixture.home));
     let system = found.system_prompt(SYSTEM_PROMPT);
     let first_line = agents.lines().find(|line| !line.trim().is_empty()).unwrap();
     assert_eq!(system.matches(first_line).count(), 1, "{system}");
@@ -348,4 +355,139 @@ fn the_ramify_repo_reads_its_agents_md_once() {
             .trim(),
         "@AGENTS.md"
     );
+}
+
+#[test]
+fn a_project_cannot_import_outside_itself() {
+    let fixture = Fixture::new("escape");
+    let outside = fixture.home.parent().unwrap().join("outside.txt");
+    fixture.write(&outside, "OUTSIDE SECRET");
+    fixture.write(&fixture.home.join("secret.txt"), "HOME SECRET");
+    fixture.write(
+        &fixture.repo.join("CLAUDE.md"),
+        &format!("a @~/secret.txt b @{} c @../outside.txt", outside.display()),
+    );
+    let (system, notes) = fixture.system_in(&fixture.repo);
+    assert!(!system.contains("SECRET"), "{system}");
+    assert!(system.contains("a @~/secret.txt b @"), "{system}");
+    assert_eq!(notes.len(), 3, "{notes:?}");
+}
+
+#[test]
+fn a_linked_claude_md_outside_the_project_is_skipped() {
+    let fixture = Fixture::new("escape-link");
+    let outside = fixture.home.join(".aws/credentials");
+    fixture.write(&outside, "AWS SECRET");
+    std::os::unix::fs::symlink(&outside, fixture.repo.join("CLAUDE.md")).unwrap();
+    let (system, notes) = fixture.system_in(&fixture.repo);
+    assert!(!system.contains("AWS SECRET"));
+    assert_eq!(notes, ["instructions: skipped CLAUDE.md: it is outside the project"]);
+}
+
+#[test]
+fn a_repo_under_home_is_named_from_its_top() {
+    let fixture = Fixture::new("under-home");
+    let repo = fixture.home.join("dev/repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+    fixture.write(&repo.join("AGENTS.md"), "rule");
+    let (system, _) = fixture.system_in(&repo);
+    assert!(system.contains("Instructions from AGENTS.md:"), "{system}");
+}
+
+#[test]
+fn an_import_is_cut_on_its_own() {
+    let fixture = Fixture::new("import-cut");
+    for index in 0..3 {
+        fixture.write(&fixture.repo.join(format!("i{index}.md")), &format!("START{index}{}", "x".repeat(20 * 1024)));
+    }
+    fixture.write(&fixture.repo.join("CLAUDE.md"), "@i0.md @i1.md @i2.md");
+    let system = fixture.system();
+    for index in 0..3 {
+        assert!(system.contains(&format!("START{index}")), "START{index} missing");
+    }
+}
+
+#[test]
+fn the_listing_shows_what_the_limits_did() {
+    let fixture = Fixture::new("limits");
+    fixture.write(&fixture.repo.join("AGENTS.md"), &"a".repeat(40 * 1024));
+    for (file, letter) in [("CLAUDE.md", "b"), (".claude/CLAUDE.md", "c"), ("CLAUDE.local.md", "d")] {
+        fixture.write(&fixture.repo.join(file), &letter.repeat(31 * 1024));
+    }
+    fixture.write(&fixture.repo.join("sub/AGENTS.md"), &"e".repeat(31 * 1024));
+    fixture.write(&fixture.repo.join("sub/CLAUDE.md"), &"f".repeat(31 * 1024));
+    let found = load(&fixture.repo.join("sub"), Some(&fixture.home));
+    let lines = found.listing();
+    assert_eq!(lines[0], "AGENTS.md (40.0 KiB, cut at 32 KiB)");
+    assert_eq!(lines[4], "sub/AGENTS.md (31.0 KiB, cut at 128 KiB)");
+    assert_eq!(lines[5], "sub/CLAUDE.md (31.0 KiB, left out: over 128 KiB)");
+    assert!(found.notes.iter().any(|note| note.contains("left out sub/CLAUDE.md")), "{:?}", found.notes);
+    assert!(found.system_prompt(SYSTEM_PROMPT).len() <= SYSTEM_PROMPT.len() + 2 + TOTAL_LIMIT);
+}
+
+#[test]
+fn no_home_reads_only_the_project() {
+    let fixture = Fixture::new("no-home");
+    fixture.write(&fixture.home.join(".ram/AGENTS.md"), "user rule");
+    fixture.write(&fixture.repo.join("AGENTS.md"), "project rule");
+    let found = load(&fixture.repo, None);
+    let system = found.system_prompt(SYSTEM_PROMPT);
+    assert!(system.contains("project rule") && !system.contains("user rule"), "{system}");
+}
+
+#[test]
+fn a_cut_keeps_whole_characters() {
+    let fixture = Fixture::new("unicode");
+    fixture.write(&fixture.repo.join("AGENTS.md"), &"é".repeat(20 * 1024));
+    let system = fixture.system();
+    assert!(system.ends_with("[cut at 32 KiB]"));
+}
+
+#[test]
+fn agents_md_has_no_imports_and_an_email_is_no_import() {
+    let fixture = Fixture::new("no-import");
+    fixture.write(&fixture.repo.join("rules.md"), "RULES");
+    fixture.write(&fixture.repo.join("AGENTS.md"), "see @rules.md");
+    fixture.write(&fixture.repo.join("CLAUDE.md"), "mail me@rules.md");
+    let system = fixture.system();
+    assert!(system.contains("see @rules.md") && system.contains("mail me@rules.md"), "{system}");
+    assert!(!system.contains("RULES"));
+}
+
+#[test]
+fn a_tilde_fence_closes_only_on_a_tilde_fence() {
+    let fixture = Fixture::new("fence");
+    fixture.write(&fixture.repo.join("rules.md"), "RULES");
+    fixture.write(&fixture.repo.join("CLAUDE.md"), "~~~\n```\n@rules.md\n~~~\nafter @rules.md");
+    let system = fixture.system();
+    assert!(system.contains("```\n@rules.md\n~~~"), "{system}");
+    assert!(system.contains("after RULES"), "{system}");
+}
+
+#[test]
+fn a_linked_worktree_reads_its_own_files() {
+    let fixture = Fixture::new("worktree");
+    fixture.write(&fixture.repo.join("AGENTS.md"), "main rule");
+    let git = |args: &[&str], dir: &Path| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["add", "."], &fixture.repo);
+    git(&["commit", "-qm", "init"], &fixture.repo);
+    let tree = fixture.home.parent().unwrap().join("tree");
+    git(&["worktree", "add", "-q", tree.to_str().unwrap()], &fixture.repo);
+    std::fs::write(tree.join("AGENTS.md"), "tree rule").unwrap();
+    let (system, _) = fixture.system_in(&tree);
+    assert!(system.contains("Instructions from AGENTS.md:\n\ntree rule"), "{system}");
+    assert!(!system.contains("main rule"), "{system}");
 }

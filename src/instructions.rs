@@ -26,24 +26,26 @@ pub struct Read {
     pub bytes: usize,
     /// Imported by another file.
     pub imported: bool,
+    /// What the limits did to the file: `cut at 32 KiB`, `cut at 128 KiB` or `left out: over 128 KiB`.
+    pub limit: Option<&'static str>,
 }
 
 /// What the instruction files hold.
 #[derive(Debug, Default)]
 pub struct Instructions {
     pub files: Vec<Read>,
-    /// One `Instructions from <name>:` section per top file, in order.
+    /// One `Instructions from <name>:` section per top file, in order, inside the total limit.
     pub sections: Vec<String>,
-    /// One line per file that could not be used.
+    /// One line per file or import that could not be used.
     pub notes: Vec<String>,
 }
 
-/// `RAM_CODE_INSTRUCTIONS_HOME`, else `HOME`.
-pub fn home() -> PathBuf {
+/// `RAM_CODE_INSTRUCTIONS_HOME`, else `HOME`. None when neither is set.
+pub fn home() -> Option<PathBuf> {
     std::env::var_os("RAM_CODE_INSTRUCTIONS_HOME")
         .or_else(|| std::env::var_os("HOME"))
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_default()
 }
 
 /// The git top level of `root`, or `root` outside git.
@@ -77,41 +79,62 @@ fn folders(root: &Path) -> Vec<PathBuf> {
     chain
 }
 
+/// Where a file and its imports may read: a project file stays inside the project, so a cloned
+/// repository cannot send the user's other files to the model.
+#[derive(Clone, Copy)]
+enum Scope<'a> {
+    User,
+    Project(&'a Path),
+}
+
 struct Reader<'a> {
-    home: &'a Path,
+    home: Option<&'a Path>,
     top: PathBuf,
     seen: Vec<PathBuf>,
     out: Instructions,
+    /// The files of each section: its top file, then its imports.
+    section_files: Vec<std::ops::Range<usize>>,
 }
 
 impl Reader<'_> {
     fn name(&self, path: &Path) -> String {
-        if let Ok(rest) = path.strip_prefix(self.home) {
+        if let Ok(rest) = path.strip_prefix(&self.top) {
+            return rest.display().to_string();
+        }
+        if let Some(rest) = self.home.and_then(|home| path.strip_prefix(home).ok()) {
             return format!("~/{}", rest.display());
         }
-        path.strip_prefix(&self.top)
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        path.display().to_string()
     }
 
-    /// Reads a file once: None when it is missing, already read, or not UTF-8.
-    fn read(&mut self, path: &Path, imported: bool) -> Option<String> {
+    /// Reads a file once, cut at the file limit: None when it is missing, already read, outside
+    /// its scope, or not UTF-8.
+    fn read(&mut self, path: &Path, imported: bool, scope: Scope) -> Option<String> {
         let real = path.canonicalize().ok()?;
         if !real.is_file() || self.seen.contains(&real) {
             return None;
         }
+        let name = self.name(path);
+        if let Scope::Project(top) = scope {
+            if !real.starts_with(top) {
+                self.out.notes.push(format!(
+                    "instructions: skipped {name}: it is outside the project"
+                ));
+                return None;
+            }
+        }
         self.seen.push(real);
         let bytes = std::fs::read(path).ok()?;
-        let name = self.name(path);
         match String::from_utf8(bytes) {
             Ok(text) => {
+                let limit = (text.len() > FILE_LIMIT).then_some("cut at 32 KiB");
                 self.out.files.push(Read {
                     name,
                     bytes: text.len(),
                     imported,
+                    limit,
                 });
-                Some(text)
+                Some(cut(&text, FILE_LIMIT, "[cut at 32 KiB]"))
             }
             Err(_) => {
                 self.out
@@ -122,37 +145,44 @@ impl Reader<'_> {
         }
     }
 
-    /// One top file: its text, its imports when it is a `CLAUDE.md`, cut at the file limit.
-    fn top_file(&mut self, path: &Path) {
-        let Some(text) = self.read(path, false) else {
+    /// One top file: its text, with its imports when it is a `CLAUDE.md`.
+    fn top_file(&mut self, path: &Path, scope: Scope) {
+        let first = self.out.files.len();
+        let Some(text) = self.read(path, false, scope) else {
             return;
         };
         let claude = path
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("CLAUDE"));
         let text = if claude {
-            self.expand(&text, path.parent().unwrap_or(Path::new(".")), 1)
+            self.expand(&text, path.parent().unwrap_or(Path::new(".")), 1, scope)
         } else {
             text
         };
         let name = self.name(path);
-        self.out.sections.push(format!(
-            "Instructions from {name}:\n\n{}",
-            cut(&text, FILE_LIMIT, "[cut at 32 KiB]")
-        ));
+        self.out
+            .sections
+            .push(format!("Instructions from {name}:\n\n{text}"));
+        self.section_files.push(first..self.out.files.len());
     }
 
     /// Replaces each `@path` outside code with the text of that file.
-    fn expand(&mut self, text: &str, folder: &Path, depth: usize) -> String {
+    // ponytail: line-based markdown; a fence must close with the same marker, a code span ends at
+    // the next backtick, and `\ ` escapes in paths are not read. A real parser if users need them.
+    fn expand(&mut self, text: &str, folder: &Path, depth: usize, scope: Scope) -> String {
         let mut out = Vec::new();
-        let mut fenced = false;
+        let mut fence: Option<&str> = None;
         for line in text.split('\n') {
-            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-                fenced = !fenced;
-                out.push(line.to_string());
-                continue;
+            let trimmed = line.trim_start();
+            let marker = ["```", "~~~"]
+                .into_iter()
+                .find(|marker| trimmed.starts_with(marker));
+            match (fence, marker) {
+                (None, Some(marker)) => fence = Some(marker),
+                (Some(open), Some(marker)) if open == marker => fence = None,
+                _ => {}
             }
-            if fenced {
+            if fence.is_some() || marker.is_some() {
                 out.push(line.to_string());
                 continue;
             }
@@ -164,7 +194,7 @@ impl Reader<'_> {
                     if index % 2 == 1 {
                         part.to_string()
                     } else {
-                        self.imports(part, folder, depth)
+                        self.imports(part, folder, depth, scope)
                     }
                 })
                 .collect();
@@ -173,7 +203,7 @@ impl Reader<'_> {
         out.join("\n")
     }
 
-    fn imports(&mut self, part: &str, folder: &Path, depth: usize) -> String {
+    fn imports(&mut self, part: &str, folder: &Path, depth: usize, scope: Scope) -> String {
         let mut out = String::new();
         let mut rest = part;
         while let Some(at) = rest.find('@') {
@@ -185,11 +215,16 @@ impl Reader<'_> {
             let path = word.trim_end_matches(['.', ',', ';', ':', ')', '!', '?']);
             let tail = &word[path.len()..];
             let text = (starts_word && !path.is_empty() && depth <= IMPORT_DEPTH)
-                .then(|| self.resolve(path, folder))
+                .then(|| self.resolve(path, folder, scope))
                 .flatten()
                 .and_then(|file| {
-                    let text = self.read(&file, true)?;
-                    Some(self.expand(&text, file.parent().unwrap_or(Path::new(".")), depth + 1))
+                    let text = self.read(&file, true, scope)?;
+                    Some(self.expand(
+                        &text,
+                        file.parent().unwrap_or(Path::new(".")),
+                        depth + 1,
+                        scope,
+                    ))
                 });
             match text {
                 Some(text) => {
@@ -207,9 +242,18 @@ impl Reader<'_> {
         out
     }
 
-    fn resolve(&self, path: &str, folder: &Path) -> Option<PathBuf> {
+    /// The file an import names. A project file may name only a path relative to itself; `~/`
+    /// and absolute paths are for the user's own files.
+    fn resolve(&mut self, path: &str, folder: &Path, scope: Scope) -> Option<PathBuf> {
+        let outside = path.starts_with("~/") || path.starts_with('/');
+        if outside && matches!(scope, Scope::Project(_)) {
+            self.out
+                .notes
+                .push(format!("instructions: skipped the import @{path}: a project file imports only from the project"));
+            return None;
+        }
         let file = match path.strip_prefix("~/") {
-            Some(rest) => self.home.join(rest),
+            Some(rest) => self.home?.join(rest),
             None if path.starts_with('/') => PathBuf::from(path),
             None => folder.join(path),
         };
@@ -230,32 +274,67 @@ fn cut(text: &str, limit: usize, note: &str) -> String {
 }
 
 /// Reads the user's files, then the project's, for a task that works in `root`.
-pub fn load(root: &Path, home: &Path) -> Instructions {
+pub fn load(root: &Path, home: Option<&Path>) -> Instructions {
     let chain = folders(root);
+    let top = chain.first().cloned().unwrap_or_else(|| root.to_path_buf());
     let mut reader = Reader {
         home,
-        top: chain.first().cloned().unwrap_or_else(|| root.to_path_buf()),
+        top: top.clone(),
         seen: Vec::new(),
         out: Instructions::default(),
+        section_files: Vec::new(),
     };
-    reader.top_file(&home.join(".ram/AGENTS.md"));
-    reader.top_file(&home.join(".claude/CLAUDE.md"));
+    if let Some(home) = home {
+        reader.top_file(&home.join(".ram/AGENTS.md"), Scope::User);
+        reader.top_file(&home.join(".claude/CLAUDE.md"), Scope::User);
+    }
     for folder in &chain {
         for file in PROJECT_FILES {
-            reader.top_file(&folder.join(file));
+            reader.top_file(&folder.join(file), Scope::Project(&top));
         }
     }
+    reader.fit();
     reader.out
 }
 
+impl Reader<'_> {
+    /// Keeps the sections inside the total limit, in order. The section that crosses it is cut,
+    /// and the later ones are left out; their files say so in `/instructions`.
+    // ponytail: the nearest files go first when the total is over; they are the most specific,
+    // but the user's own files are small. Drop from the far end if that ever bites.
+    fn fit(&mut self) {
+        let mut left = TOTAL_LIMIT;
+        let mut kept = Vec::new();
+        for (section, files) in self.out.sections.drain(..).zip(self.section_files.drain(..)) {
+            let size = section.len() + 2;
+            if size <= left {
+                left -= size;
+                kept.push(section);
+                continue;
+            }
+            let top = &mut self.out.files[files.start];
+            const NOTE: &str = "[cut at 128 KiB]";
+            if left > 64 {
+                // The note and its line break count inside the limit.
+                kept.push(cut(&section, left - 2 - NOTE.len() - 1, NOTE));
+                top.limit = Some("cut at 128 KiB");
+                left = 0;
+            } else {
+                top.limit = Some("left out: over 128 KiB");
+                self.out.notes.push(format!("instructions: left out {}: over 128 KiB", top.name));
+            }
+        }
+        self.out.sections = kept;
+    }
+}
+
 impl Instructions {
-    /// Ram Code's own prompt, then each file's section, cut at the total limit.
+    /// Ram Code's own prompt, then each file's section.
     pub fn system_prompt(&self, base: &str) -> String {
         if self.sections.is_empty() {
             return base.to_string();
         }
-        let all = self.sections.join("\n\n");
-        format!("{base}\n\n{}", cut(&all, TOTAL_LIMIT, "[cut at 128 KiB]"))
+        format!("{base}\n\n{}", self.sections.join("\n\n"))
     }
 
     /// The lines of `/instructions`.
@@ -267,7 +346,8 @@ impl Instructions {
             .iter()
             .map(|file| {
                 let mark = if file.imported { "  ↳ " } else { "" };
-                format!("{mark}{} ({})", file.name, size(file.bytes))
+                let limit = file.limit.map(|limit| format!(", {limit}")).unwrap_or_default();
+                format!("{mark}{} ({}{limit})", file.name, size(file.bytes))
             })
             .collect()
     }

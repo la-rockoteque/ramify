@@ -66,6 +66,22 @@ for any agent.
 - AC13: The README documents the files, the order, the imports, the limits and
   `/instructions`.
 
+## Amendment: review (2026-11-12)
+
+10. A project file, and each file it imports, must have a real path inside the git top level.
+    Ram Code refuses `@~/…`, `@/…` and an import that leaves the project, and a project file that
+    links outside it. Each refusal leaves the text as written and adds one transcript line. The
+    user's own files may import from anywhere. Claude Code asks before such imports; Ram Code has
+    no dialog, so it refuses them.
+11. A project file is named relative to the git top level, even when the repository is in the
+    home folder.
+12. Each file is cut at 32 KiB when it is read, so an import has its own limit. For the total,
+    the section that crosses 128 KiB is cut and the later sections are left out, with a note.
+    `/instructions` shows what the limits did to each file.
+13. With no home folder, Ram Code reads only the project's files.
+14. `/instructions` reads the files on a thread. The other test files point
+    `RAM_CODE_INSTRUCTIONS_HOME` at a temp folder.
+
 ## Out of scope
 
 - Files in subfolders below the folder Ram Code works in, which Claude Code reads when it opens

@@ -25,4 +25,19 @@ both crates and `cargo clippy --all-targets` pass.
 | Q18 | pass | audit: README section |
 | Q19 | waived | No model provider is set up on this machine. The user waived the live task. Q1–Q16 check the system prompt that each task sends. |
 
-**Yield:** 19 cases. 18 ran, 18 passed, 0 failed. The user waived Q19.
+Cases added at the review:
+
+| Case | Result | Evidence |
+|---|---|---|
+| Q20 | pass | `a_project_cannot_import_outside_itself` |
+| Q21 | pass | `a_linked_claude_md_outside_the_project_is_skipped` |
+| Q22 | pass | `a_repo_under_home_is_named_from_its_top` |
+| Q23 | pass | `an_import_is_cut_on_its_own` |
+| Q24 | pass | `the_listing_shows_what_the_limits_did` |
+| Q25 | pass | `no_home_reads_only_the_project` |
+| Q26 | pass | `a_cut_keeps_whole_characters` |
+| Q27 | pass | `agents_md_has_no_imports_and_an_email_is_no_import` |
+| Q28 | pass | `a_tilde_fence_closes_only_on_a_tilde_fence` |
+| Q29 | pass | `a_linked_worktree_reads_its_own_files` |
+
+**Yield:** 29 cases. 28 ran, 28 passed, 0 failed. The user waived Q19.

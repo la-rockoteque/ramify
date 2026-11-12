@@ -27,11 +27,29 @@ A fake model records each request, so a test reads the `system` text that a task
 | Q18 | AC13 | low | The README documents the files, the order, the imports, the limits and `/instructions` | audit |
 | Q19 | AC1–AC9 | medium | Live: in the ramify worktree, `ram --task "Quote the first line of your instructions from AGENTS.md"` with a configured provider; the answer quotes it. Needs a provider: the user may waive it | qa |
 
+Cases added at the review:
+
+| Case | AC | Risk | Check | Settled by |
+|---|---|---|---|---|
+| Q20 | AC5 | high | `a_project_cannot_import_outside_itself` | build |
+| Q21 | AC4 | high | `a_linked_claude_md_outside_the_project_is_skipped` | build |
+| Q22 | AC2 | medium | `a_repo_under_home_is_named_from_its_top` | build |
+| Q23 | AC8 | medium | `an_import_is_cut_on_its_own` | build |
+| Q24 | AC11 | medium | `the_listing_shows_what_the_limits_did` | build |
+| Q25 | AC1 | low | `no_home_reads_only_the_project` | build |
+| Q26 | AC8 | low | `a_cut_keeps_whole_characters` | build |
+| Q27 | AC5 | low | `agents_md_has_no_imports_and_an_email_is_no_import` | build |
+| Q28 | AC5 | low | `a_tilde_fence_closes_only_on_a_tilde_fence` | build |
+| Q29 | AC3 | low | `a_linked_worktree_reads_its_own_files` | build |
+
 ## Write set
 
 ```
 src/**
 tests/qa_instructions.rs
+tests/qa_plan.rs
+tests/qa_providers.rs
+tests/qa_hooks.rs
 README.md
 AGENTS.md
 CLAUDE.md

@@ -295,7 +295,7 @@ pub fn run_turn_hooked(
     let tools = Tools::new(root);
     let definitions = Tools::definitions();
     let mut messages: Vec<Value> = history.to_vec();
-    let instructions = crate::instructions::load(root, &crate::instructions::home());
+    let instructions = crate::instructions::load(root, crate::instructions::home().as_deref());
     for note in &instructions.notes {
         on_event(AgentEvent::Hook(note.clone()));
     }
