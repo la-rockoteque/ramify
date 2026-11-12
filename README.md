@@ -165,23 +165,40 @@ need:
     `/opt/homebrew` and `/Applications/Xcode.app`;
   - the worktree, the task's temp folder (`$TMPDIR`), and the main repository's Git folder of
     a linked worktree;
-  - the per-user temp and cache folders under `/private/var/folders`;
-  - toolchains in the home folder: `~/.cargo`, `~/.rustup`, `~/.asdf`, `~/.nvm`, `~/.pyenv`,
+  - the per-user cache folder under `/private/var/folders`, and `xcrun`'s cache file in the
+    per-user temp folder;
+  - toolchains in the home folder: `~/.cargo/bin`, `~/.cargo/registry`, `~/.cargo/git`,
+    `~/.cargo/env`, `~/.cargo/config.toml`, `~/.rustup`, `~/.asdf`, `~/.nvm`, `~/.pyenv`,
     `~/.volta`, `~/.local/share/mise`, `~/.npm` and `~/.tool-versions`;
-  - Git settings: `~/.gitconfig`, the files whose name starts with it, and `~/.config/git`.
+  - Git settings: `~/.gitconfig`, the files whose name starts with it, and `config`, `ignore`
+    and `attributes` in `~/.config/git`.
 - Other files, such as `~/Documents`, your other repositories and your dotfiles, stay
   unreadable. A command can still see that a path exists.
 - A command writes only in the worktree, in the task's temp folder, and to `/dev/null`.
-  Two more places let `ar`, `xcrun` and `clang` work: files directly in the per-user temp
-  folder, and clang's cache. Other programs use these places too, so a command could leave a
-  file there that another program reads later.
+  `xcrun` resets `TMPDIR` to the per-user temp folder, so `ar` makes `ar.XXXXXX` there. That
+  name is the only one a command can create there. `xcrun` cannot write its cache and prints
+  `couldn't create cache file` on each call; the build goes on, and this warning gets no hint.
+- Each command gets its own clang module cache (`CLANG_MODULE_CACHE_PATH`) in the task's temp
+  folder. The shared clang cache stays read-only, so no command can plant a module that a build
+  outside the sandbox uses.
+- The task's temp folder is fixed when the task starts. A command cannot remove, rename or
+  replace it with a link. If something else replaces it, Ram Code runs no more commands in it.
 - A command never reads credentials in the home folder: `~/.ssh`, `~/.aws`,
   `~/.azure`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.config/gh`,
   `~/.config/hub`, `~/.config/anthropic`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`,
-  `~/.pypirc`, `~/.cargo/credentials.toml`, `~/.vault-token`, `~/.terraform.d`, `~/.orbstack`,
-  `~/.colima`, the shell histories and `~/Library/Keychains`. It never writes them either.
-  What a command reads goes to the provider in the transcript.
+  `~/.pypirc`, `~/.cargo/credentials.toml`, `~/.config/git/credentials`, `~/.vault-token`,
+  `~/.terraform.d`, `~/.orbstack`, `~/.colima`, the shell histories and `~/Library/Keychains`.
+  It never writes them either. The rule also covers the real path behind a link, such as a
+  `~/.config` that a dotfile manager links to `~/dotfiles/config`. What a command reads goes to
+  the provider in the transcript.
+- Some tokens stay visible, because the tools must read the file that holds them. Cargo stops
+  when `~/.cargo/config.toml` exists and cannot be read, so keep a registry token in
+  `~/.cargo/credentials.toml`. A token in a `~/.gitconfig` URL, such as an `insteadOf` rule, is
+  visible too; keep Git tokens in a credential helper.
+- A command can see that a path exists, and its size, through file metadata. It cannot read the
+  file.
 - A command never writes Ram Code's configuration folder, so it cannot widen its own sandbox.
+  This also holds when that folder is behind a link.
 - A command never writes Git metadata: a `.git` file or folder anywhere in the worktree. Git runs
   hooks and `core.fsmonitor` from there later, outside the sandbox. `git init` and
   `git commit` fail in the sandbox.
