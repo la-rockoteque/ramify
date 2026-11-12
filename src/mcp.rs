@@ -105,6 +105,8 @@ pub struct ServerEntry {
     /// so a changed entry asks again, and no expanded secret reaches the approvals file.
     pub hash: String,
     pub error: Option<String>,
+    /// `env` as written in the file, before expansion, for the approval prompt.
+    pub written_env: Vec<(String, String)>,
 }
 
 impl ServerEntry {
@@ -172,22 +174,80 @@ fn parse_entry(
     source: Source,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> ServerEntry {
-    let hash = hex(&Sha256::digest(raw.to_string().as_bytes()));
+    let written_env = raw
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut entry = ServerEntry {
         name: name.to_string(),
         source,
         transport: Transport::Invalid,
-        hash,
+        hash: hex(&Sha256::digest(raw.to_string().as_bytes())),
         error: None,
+        written_env,
     };
-    match read_transport(raw, get) {
-        Ok(transport) => entry.transport = transport,
+    // A project file comes with the repository, so it may not pull a secret out of the user's
+    // environment into a server, its arguments or the prompt. The user's own file may.
+    let key_envs = project_key_envs(get);
+    let refuse = |name: &str, value: &str| {
+        source == Source::Project && crate::sandbox::is_secret(name, value, &key_envs)
+    };
+    match read_transport(raw, get, &refuse) {
+        Ok(transport) => {
+            // A project approval holds what the entry expands to as well, so a changed
+            // variable changes the command and asks again. Secrets are refused above.
+            if source == Source::Project {
+                let expanded = format!("{}\0{:?}", raw, expanded_of(&transport));
+                entry.hash = hex(&Sha256::digest(expanded.as_bytes()));
+            }
+            entry.transport = transport;
+        }
         Err(error) => entry.error = Some(error),
     }
     entry
 }
 
-fn read_transport(raw: &Value, get: &dyn Fn(&str) -> Option<String>) -> Result<Transport, String> {
+/// The `key_env` names in `providers.json`, which count as secrets too.
+fn project_key_envs(get: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    Providers::load(Providers::default_dir(get))
+        .map(|providers| {
+            providers
+                .all()
+                .into_iter()
+                .filter_map(|provider| provider.key_env)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn expanded_of(transport: &Transport) -> Vec<String> {
+    match transport {
+        Transport::Stdio { command, args, env, timeout } => {
+            let mut out = vec![command.clone(), timeout.to_string()];
+            out.extend(args.iter().cloned());
+            out.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
+            out
+        }
+        Transport::Http { url, headers } => {
+            let mut out = vec![url.clone()];
+            out.extend(headers.iter().map(|(k, v)| format!("{k}={v}")));
+            out
+        }
+        Transport::Invalid => Vec::new(),
+    }
+}
+
+fn read_transport(
+    raw: &Value,
+    get: &dyn Fn(&str) -> Option<String>,
+    refuse: &dyn Fn(&str, &str) -> bool,
+) -> Result<Transport, String> {
+    let expand = |text: &str, get: &dyn Fn(&str) -> Option<String>| expand_guarded(text, get, refuse);
     let pairs = |key: &str| -> Result<Vec<(String, String)>, String> {
         let mut out = Vec::new();
         if let Some(map) = raw.get(key).and_then(Value::as_object) {
@@ -231,6 +291,15 @@ fn read_transport(raw: &Value, get: &dyn Fn(&str) -> Option<String>) -> Result<T
 /// Expand `${VAR}` and `${VAR:-default}`. An unset variable with no default is an error that
 /// names it.
 pub fn expand(text: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+    expand_guarded(text, get, &|_, _| false)
+}
+
+/// `expand`, refusing a variable that `refuse` names as a secret.
+fn expand_guarded(
+    text: &str,
+    get: &dyn Fn(&str) -> Option<String>,
+    refuse: &dyn Fn(&str, &str) -> bool,
+) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find("${") {
@@ -245,7 +314,14 @@ pub fn expand(text: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<String
             Some((name, default)) => (name, Some(default)),
             None => (inner, None),
         };
-        match get(name).filter(|value| !value.is_empty()) {
+        let value = get(name).filter(|value| !value.is_empty());
+        if refuse(name, value.as_deref().unwrap_or_default()) {
+            return Err(format!(
+                "a project server may not read the secret variable {name}; move the server to \
+                 ~/.config/ram-code/mcp.json"
+            ));
+        }
+        match value {
             Some(value) => out.push_str(&value),
             None => match default {
                 Some(default) => out.push_str(default),
@@ -344,11 +420,15 @@ pub fn prompt_text(entry: &ServerEntry) -> String {
         format!("MCP server `{}` from .mcp.json wants to start:", entry.name),
         format!("  {}", entry.command_line()),
     ];
-    if let Transport::Stdio { command, env, .. } = &entry.transport {
-        if !env.is_empty() {
-            let names: Vec<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
-            lines.push(format!("  env: {}", names.join(", ")));
-        }
+    if !entry.written_env.is_empty() {
+        let pairs: Vec<String> = entry
+            .written_env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+        lines.push(format!("  env: {}", pairs.join(" ")));
+    }
+    if let Transport::Stdio { command, .. } = &entry.transport {
         let program = Path::new(command)
             .file_name()
             .and_then(|name| name.to_str())
@@ -903,7 +983,7 @@ fn convert(result: &Value) -> Result<String, String> {
             parts.push(structured.to_string());
         }
     }
-    let mut text = parts.join("\n");
+    let mut text = visible(&parts.join("\n"));
     if text.chars().count() > MAX_RESULT {
         text = text.chars().take(MAX_RESULT).collect();
         text.push_str(&format!("\n[cut: the result passed {MAX_RESULT} characters]"));
@@ -913,6 +993,25 @@ fn convert(result: &Value) -> Result<String, String> {
     } else {
         Ok(text)
     }
+}
+
+/// Control characters as caret or `\u{..}` text, so a server cannot drive the terminal or the
+/// transcript. New lines and tabs stay.
+fn visible(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 => {
+                out.push('^');
+                out.push(char::from(c as u8 + 0x40));
+            }
+            '\u{7f}' => out.push_str("^?"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The decoded size of base64 text.

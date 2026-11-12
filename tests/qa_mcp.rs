@@ -94,6 +94,8 @@ for line in sys.stdin:
                 {"type": "text", "text": "partly broken"},
                 {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="},
                 {"type": "resource_link", "uri": "file:///tmp/x.txt", "name": "x"}]}
+        elif name == "ansi":
+            result = {"content": [{"type": "text", "text": "\u001b[2J\u001b[31mred\u0007bell\rback\u009b1m"}]}
         elif name == "big":
             result = {"content": [{"type": "text", "text": "y" * 50000}]}
         else:
@@ -678,6 +680,7 @@ fn no_server_outlives_the_task() {
 
 #[test]
 fn pretooluse_hook_can_deny_an_mcp_call() {
+    let _lock = HOOK_ENV.lock().unwrap_or_else(|e| e.into_inner());
     let fx = Fixture::new("q21");
     let calllog = fx.path("calls");
     fx.user(json!({"fake": fx.server("fake", json!({"tools": ["delete"], "calllog": calllog}))}));
@@ -778,4 +781,158 @@ fn http_entry_is_not_supported_yet() {
     let shown = transcript(&app);
     assert!(shown.contains("docs") && shown.contains("not supported yet"), "{shown}");
     let _ = Role::Info;
+}
+
+// ── audit ────────────────────────────────────────────────────────────────────
+
+/// Q21 and the hook test below set process-wide variables; they must not run at once.
+static HOOK_ENV: Mutex<()> = Mutex::new(());
+
+#[test]
+fn project_entry_cannot_read_secret_variables() {
+    let fx = Fixture::new("a1");
+    let mut entry = fx.server("fake", json!({}));
+    entry["env"] = json!({"LEAK": "${ANTHROPIC_API_KEY}"});
+    let mut by_arg = fx.server("fake2", json!({}));
+    by_arg["args"].as_array_mut().unwrap().push(json!("${MY_SERVICE_TOKEN}"));
+    fx.project(json!({"fake": entry, "fake2": by_arg}));
+    let env = fx.env(&[("ANTHROPIC_API_KEY", "sk-ant-secret-1"), ("MY_SERVICE_TOKEN", "tok-secret-2")]);
+    let config = mcp::load(&fx.root, &getter(env.clone()));
+    for server in &config.servers {
+        let error = server.error.clone().unwrap_or_default();
+        assert!(error.contains("secret"), "{} was not refused: {error:?}", server.name);
+        let prompt = mcp::prompt_text(server);
+        assert!(!prompt.contains("secret-1") && !prompt.contains("secret-2"), "{prompt}");
+    }
+    fx.approve("fake", Choice::Network);
+    let mut session = Session::start(&fx.root, env);
+    assert!(!names(&session).iter().any(|n| n.starts_with("mcp__")));
+    session.shutdown();
+}
+
+#[test]
+fn user_entry_may_read_its_own_secrets() {
+    let fx = Fixture::new("a2");
+    let envfile = fx.path("env.json");
+    let mut entry = fx.server("fake", json!({"envfile": envfile}));
+    entry["env"] = json!({"SERVICE_TOKEN": "${MY_SERVICE_TOKEN}"});
+    fx.user(json!({"fake": entry}));
+    let mut session = fx.session(&[("MY_SERVICE_TOKEN", "tok-user")]);
+    session.shutdown();
+    let seen: Value = serde_json::from_str(&fs::read_to_string(&envfile).unwrap()).unwrap();
+    assert_eq!(seen["SERVICE_TOKEN"], "tok-user");
+}
+
+#[test]
+fn project_approval_binds_expanded_values() {
+    let fx = Fixture::new("a3");
+    let mut entry = fx.server("fake", json!({}));
+    entry["args"].as_array_mut().unwrap().push(json!("${TARGET}"));
+    fx.project(json!({"fake": entry}));
+    let first = mcp::load(&fx.root, &getter(fx.env(&[("TARGET", "one")])));
+    let mut approvals = Approvals::load(&fx.config, &fx.root);
+    approvals.set(&first.servers[0], Choice::Sandbox).unwrap();
+    let same = mcp::load(&fx.root, &getter(fx.env(&[("TARGET", "one")])));
+    assert_eq!(approvals.get(&same.servers[0]), Some(Choice::Sandbox));
+    let changed = mcp::load(&fx.root, &getter(fx.env(&[("TARGET", "two")])));
+    assert_eq!(approvals.get(&changed.servers[0]), None, "a new expansion kept the approval");
+}
+
+#[test]
+fn prompt_shows_env_as_written() {
+    let fx = Fixture::new("a4");
+    let mut entry = fx.server("fake", json!({}));
+    entry["env"] = json!({"REGION": "${MY_REGION:-eu}"});
+    fx.project(json!({"fake": entry}));
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let prompt = mcp::prompt_text(&config.servers[0]);
+    assert!(prompt.contains("REGION=${MY_REGION:-eu}"), "{prompt}");
+}
+
+#[test]
+fn mcp_results_escape_control_characters() {
+    let fx = Fixture::new("a5");
+    fx.user(json!({"fake": fx.server("fake", json!({"tools": ["ansi"]}))}));
+    let mut session = fx.session(&[]);
+    let out = call(&session, "mcp__fake__ansi", json!({})).unwrap();
+    session.shutdown();
+    assert!(
+        !out.chars().any(|c| c.is_control() && c != '\n' && c != '\t'),
+        "a control character reached the model and the transcript: {out:?}"
+    );
+    assert!(out.contains("red") && out.contains("bell") && out.contains("back"), "{out:?}");
+}
+
+#[test]
+fn hooks_see_mcp_tool_name_and_input() {
+    let _lock = HOOK_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let fx = Fixture::new("a6");
+    fx.user(json!({"fake": fx.server("fake", json!({"tools": ["echo"]}))}));
+    let home = fx.base.join("home");
+    fs::create_dir_all(home.join(".ram")).unwrap();
+    let pre = fx.base.join("pre.json");
+    let post = fx.base.join("post.json");
+    let record = |out: &Path, name: &str| {
+        let script = fx.base.join(name);
+        fs::write(&script, format!("#!/bin/sh\ncat > '{}'\n", out.display())).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script.display().to_string()
+    };
+    let hooks_json = json!({"hooks": {
+        "PreToolUse": [{"matcher": "mcp__fake__echo", "hooks": [{"type": "command", "command": record(&pre, "pre.sh")}]}],
+        "PostToolUse": [{"matcher": "mcp__fake__echo", "hooks": [{"type": "command", "command": record(&post, "post.sh")}]}]
+    }});
+    fs::write(home.join(".ram/settings.json"), hooks_json.to_string()).unwrap();
+    std::env::set_var("RAMIFY_HOME", fx.base.join("no-ramify"));
+    std::env::set_var("RAMIFY_STATE_DIR", fx.base.join("state"));
+    std::env::set_var("RAM_CODE_INSTRUCTIONS_HOME", &home);
+    let hooks = Hooked::load_from(&fx.root, "ram-test", &home);
+    let mut session = fx.session(&[]);
+    let llm = FakeLlm::new(vec![json!({"content": [{"type": "tool_use", "id": "t1",
+        "name": "mcp__fake__echo", "input": {"text": "hello-hook"}}]})]);
+    run_turn_with(&llm, &fx.root, &[], "go", &hooks, &session, &mut |_| {}).unwrap();
+    session.shutdown();
+    let pre: Value = serde_json::from_str(&fs::read_to_string(&pre).expect("no PreToolUse input")).unwrap();
+    assert_eq!(pre["tool_name"], "mcp__fake__echo");
+    assert_eq!(pre["tool_input"]["text"], "hello-hook");
+    let post: Value = serde_json::from_str(&fs::read_to_string(&post).expect("no PostToolUse input")).unwrap();
+    assert_eq!(post["tool_name"], "mcp__fake__echo");
+    assert!(post.to_string().contains("echo: hello-hook"), "{post}");
+}
+
+/// The Keychain daemon stays out of reach in both sandbox variants. A throwaway keychain in the
+/// worktree holds one dummy item; the user's keychains and search list are not touched.
+#[cfg(target_os = "macos")]
+#[test]
+fn keychain_is_out_of_reach_for_servers() {
+    use ram_code::sandbox::Sandbox;
+    let fx = Fixture::new("a7");
+    let keychain = fx.root.join("probe.keychain-db");
+    let path = keychain.to_str().unwrap().to_string();
+    let security = |args: &[&str]| {
+        assert!(Command::new("/usr/bin/security").args(args).status().unwrap().success(), "{args:?}");
+    };
+    security(&["create-keychain", "-p", "probe-pw", &path]);
+    security(&["unlock-keychain", "-p", "probe-pw", &path]);
+    security(&["add-generic-password", "-a", "probe", "-s", "ram-mcp-probe", "-w", "dummy-value-456", &path]);
+    let temp = fx.base.join("tmp");
+    fs::create_dir_all(&temp).unwrap();
+    let mut outputs = Vec::new();
+    for network in [false, true] {
+        let mut cmd = Sandbox::detect()
+            .command_with_network(
+                &fx.root,
+                &temp,
+                None,
+                &format!("/usr/bin/security find-generic-password -s ram-mcp-probe -w '{path}'"),
+                network,
+            )
+            .expect("a sandbox");
+        let out = cmd.current_dir(&fx.root).output().unwrap();
+        outputs.push((network, String::from_utf8_lossy(&out.stdout).to_string()));
+    }
+    let _ = Command::new("/usr/bin/security").args(["delete-keychain", &path]).status();
+    for (network, out) in outputs {
+        assert!(!out.contains("dummy-value-456"), "network={network}: the sandbox read a keychain item");
+    }
 }
