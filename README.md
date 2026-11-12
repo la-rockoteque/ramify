@@ -344,6 +344,7 @@ SPA that proxies to whichever API it got, and Storybook.
 | `RAMIFY_MAX_SLOT` / `RAMIFY_SKIP` / `RAMIFY_AUTOSTART` | `5` / none / `1` | Slot count (stacks running at once), services to leave out, hook autostart |
 | `RAMIFY_AUTO_ALLOW` | `1` | `0` turns off the hook that runs plain `ramify` commands without a prompt |
 | `RAMIFY_SESSION_NAMES` | `trees` | The theme of session names: `trees`, `birds`, a list of words, or `off`. See [Session names](#session-names) |
+| `RAMIFY_MOCKUPS` / `RAMIFY_MOCKUP_URL` | `penpot` / `http://localhost:9001` | Where the `spec` step draws mockups of a changed screen: `penpot` at that URL, or `off` |
 
 ### Processes
 

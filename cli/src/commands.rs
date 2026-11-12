@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, MOCKUP_PROVIDERS};
 use crate::dash::{env_get, health_ok, listening};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,18 @@ pub fn config(args: &[String]) -> i32 {
                 config.home.display()
             );
         }
+    }
+    if config.mockups == "penpot" {
+        println!("mockups     {}   {}", config.mockups, config.mockup_url);
+    } else {
+        println!("mockups     {}", config.mockups);
+    }
+    if !MOCKUP_PROVIDERS.contains(&config.mockups.as_str()) {
+        println!(
+            "  warning: no mockup provider named '{}' (known: {})",
+            config.mockups,
+            MOCKUP_PROVIDERS.join(", ")
+        );
     }
     println!("state       {}", config.state_dir.display());
     0
