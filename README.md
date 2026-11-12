@@ -120,6 +120,38 @@ Add custom providers, such as a LiteLLM proxy, to `~/.config/ram-code/providers.
 `RAM_CODE_PROVIDER` picks the provider for one run, and leaves the saved choice as it is.
 `RAM_CODE_MODEL` overrides the model of every provider.
 
+### Streaming and Esc
+
+Ram Code streams each reply. The text shows in the transcript as it arrives.
+
+- Both formats stream: Anthropic Messages server-sent events and OpenAI Chat Completions
+  chunks. A tool input is read whole before the tool runs. Input that is not JSON is a tool
+  error, and the task goes on.
+- A stream fails when no byte arrives for 90 seconds. `RAM_CODE_IDLE_TIMEOUT` sets the limit in
+  seconds. A reply read whole still stops after 120 seconds.
+- `max_tokens` is 64,000 for `claude` and 8,192 for other providers. A provider entry sets its
+  own with `"max_tokens"`. `RAM_CODE_MAX_TOKENS` overrides every provider.
+- When the model refuses `max_tokens` as too large, Ram Code tries once more with the model's
+  limit. It says so in the transcript, and later tasks of the session use that limit.
+- A server that answers with `application/json` is read whole. A provider entry with
+  `"stream": false`, or `RAM_CODE_STREAM=0`, sends no `stream` field.
+
+Esc stops a running task. The transcript shows `stopping…`, then `interrupted`.
+
+- The stream stops, and so does a running `run_command`: Ram Code kills its process group.
+- A `ramify run` wait stops too. The run stays pending in the Run pane.
+- The history keeps every finished turn and the text the model wrote so far. A complete tool
+  call gets the result `interrupted by the user`. A cut tool call or thinking block is dropped.
+  With no tool call kept, the turn's thinking is dropped too.
+- When the task has not stopped after 3 seconds, Ram Code ends it, with every process it
+  started, hooks included. The history is then as it was before the task.
+- Esc with no task does nothing. Ctrl+C still quits.
+
+In a headless run (`--task`), Ctrl+C stops the task in the same way, prints `interrupted`, and
+exits with code 130. A second Ctrl+C ends the run at once. A stream error keeps the partial
+text in the transcript and the history, and shows the error. A reply that fails before any text
+or tool call leaves the history as it was before the task, so the same task can be sent again.
+
 ### Tools
 
 The model works with these tools. Every path is relative to the worktree and stays inside it.

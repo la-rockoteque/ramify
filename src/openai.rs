@@ -2,31 +2,89 @@
 //! request is converted to Chat Completions and each reply is converted back.
 
 use crate::agent::{
-    normalize_base, post_json, AgentConfig, Credential, Llm, INVALID_ARGUMENTS,
+    normalize_base, post_json, AgentConfig, Credential, Llm, Reply, ReplyEnd, INVALID_ARGUMENTS,
+    WHOLE_REPLY_TIMEOUT,
 };
+use crate::cancel::Cancel;
+use crate::stream::{post_stream, reply_end, OpenAiAssembler};
 use serde_json::{json, Map, Value};
+use std::time::Duration;
 
 pub struct OpenAiLlm {
     pub config: AgentConfig,
+    pub whole_timeout: Duration,
 }
 
 impl OpenAiLlm {
     pub fn new(config: AgentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            whole_timeout: WHOLE_REPLY_TIMEOUT,
+        }
+    }
+}
+
+impl OpenAiLlm {
+    fn headers(&self) -> Result<Vec<(&'static str, String)>, String> {
+        match &self.config.credential {
+            Credential::ApiKey(key) | Credential::AuthToken(key) => {
+                Ok(vec![("authorization", format!("Bearer {key}"))])
+            }
+            Credential::Login => {
+                Err("an OpenAI-format provider cannot use the Anthropic login".into())
+            }
+        }
     }
 }
 
 impl Llm for OpenAiLlm {
     fn complete(&self, request: &Value) -> Result<Value, String> {
-        let key = match &self.config.credential {
-            Credential::ApiKey(key) | Credential::AuthToken(key) => key.clone(),
-            Credential::Login => {
-                return Err("an OpenAI-format provider cannot use the Anthropic login".into())
-            }
-        };
-        let headers = [("authorization", format!("Bearer {key}"))];
-        let reply = post_json(&chat_url(&self.config.base_url), &headers, &to_chat(request))?;
+        let reply = post_json(
+            &chat_url(&self.config.base_url),
+            &self.headers()?,
+            &to_chat(request),
+            self.whole_timeout,
+        )?;
         Ok(from_chat(&reply))
+    }
+
+    fn stream(&self, request: &Value, cancel: &Cancel, on_text: &mut dyn FnMut(&str)) -> Reply {
+        if !self.config.stream {
+            return Reply::whole(self.complete(request));
+        }
+        let headers = match self.headers() {
+            Ok(headers) => headers,
+            Err(error) => return Reply::failed(error),
+        };
+        let mut body = to_chat(request);
+        body["stream"] = json!(true);
+        let mut assembler = OpenAiAssembler::default();
+        let ended = post_stream(
+            &chat_url(&self.config.base_url),
+            &headers,
+            &body,
+            Duration::from_secs(self.config.idle_timeout),
+            cancel,
+            &mut |event| assembler.event(&event, on_text),
+        );
+        // The connection closed with no finish_reason and no [DONE]: the reply is cut.
+        let end = match reply_end(
+            ended,
+            assembler.error.as_deref(),
+            assembler.over(),
+            "the model stream ended before a finish_reason or [DONE]",
+        ) {
+            Ok(end) => end,
+            Err(whole) => return Reply::whole(Ok(from_chat(&whole))),
+        };
+        let message = assembler.message();
+        // A finished stream with nothing in it is an error, as `from_chat` treats a whole reply.
+        if end == ReplyEnd::Complete
+            && message["content"].as_array().is_some_and(Vec::is_empty)
+        {
+            return Reply::failed("the model returned no content".into());
+        }
+        Reply { message, end }
     }
 
     fn model(&self) -> &str {

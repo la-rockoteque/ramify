@@ -346,6 +346,11 @@ impl Panel {
     }
 
     /// Select the run `id` in the Run pane, when it is listed.
+    /// True while the panel's own prompt (a block note, a reject reason) takes the keys.
+    pub fn has_prompt(&self) -> bool {
+        self.prompt.is_some()
+    }
+
     pub fn select_run(&mut self, id: &str) {
         if let Some(index) = self.runs.iter().position(|entry| entry.id == id) {
             self.selected = index;

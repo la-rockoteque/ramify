@@ -2,6 +2,7 @@
 //! runs. Remote (`http`) servers are listed but not started yet.
 
 use crate::agent::ToolSource;
+use crate::cancel::Cancel;
 use crate::providers::Providers;
 use crate::sandbox::{checked_temp, load_extras, scrub, Paths, Sandbox};
 use crate::tools::Tools;
@@ -1219,6 +1220,16 @@ impl ToolSource for Session {
     }
 
     fn call(&self, name: &str, input: &Value) -> Result<String, String> {
+        self.call_inner(name, input, None)
+    }
+
+    fn call_cancellable(&self, name: &str, input: &Value, cancel: &Cancel) -> Result<String, String> {
+        self.call_inner(name, input, Some(cancel))
+    }
+}
+
+impl Session {
+    fn call_inner(&self, name: &str, input: &Value, cancel: Option<&Cancel>) -> Result<String, String> {
         let mut guard = self.inner.borrow_mut();
         let inner = guard.as_mut().ok_or("no MCP server runs")?;
         let offered = inner
@@ -1251,13 +1262,27 @@ impl ToolSource for Session {
         let params = CallToolRequestParams::new(tool).with_arguments(arguments);
         let outcome = {
             let client = server.client.as_ref().ok_or("the server is not running")?;
-            rt.block_on(tokio::time::timeout(
-                server.timeout,
-                client.peer().call_tool(params),
-            ))
+            // The call runs in short slices, so a cancel ends it without waiting for the timeout.
+            let mut call = Box::pin(client.peer().call_tool(params));
+            let deadline = std::time::Instant::now() + server.timeout;
+            loop {
+                if cancel.is_some_and(Cancel::is_set) {
+                    break None;
+                }
+                match rt.block_on(tokio::time::timeout(CANCEL_SLICE, &mut call)) {
+                    Ok(result) => break Some(Ok(result)),
+                    Err(_) if std::time::Instant::now() >= deadline => break Some(Err(())),
+                    Err(_) => {}
+                }
+            }
+        };
+        let Some(outcome) = outcome else {
+            // The server may still work on the call: stop it, so nothing runs after the task.
+            stop(rt, server);
+            return Err(crate::agent::INTERRUPTED.to_string());
         };
         match outcome {
-            Err(_) => Err(format!(
+            Err(()) => Err(format!(
                 "the call to MCP server {label} timed out after {} s",
                 server.timeout.as_secs()
             )),
@@ -1282,6 +1307,9 @@ impl ToolSource for Session {
         }
     }
 }
+
+/// How often a running call checks for a cancel.
+const CANCEL_SLICE: Duration = Duration::from_millis(50);
 
 /// A `tools/call` result as text for the model. `isError` gives an error.
 fn convert(result: &Value) -> Result<String, String> {

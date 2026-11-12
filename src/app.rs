@@ -1,4 +1,5 @@
 use crate::agent::AgentConfig;
+use crate::cancel::Cancel;
 use crate::providers::{missing_key, resolve, unknown, Providers};
 use crate::bonsai_art;
 use crate::panel::{Pane, Panel};
@@ -65,13 +66,61 @@ struct Worker {
     offset: u64,
     pending: Vec<u8>,
     saw_text: bool,
+    /// When the user pressed Esc: the worker has 3 seconds to stop on its own.
+    stop_at: Option<Instant>,
 }
+
+/// How long a stopped worker may take to finish before Ram Code kills it.
+const STOP_GRACE: Duration = Duration::from_secs(3);
 
 impl Drop for Worker {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
+            // Hooks and commands run in their own process groups, so killing the worker alone
+            // leaves them running with no parent to stop them.
+            kill_descendants(self.child.id() as i32);
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+    }
+}
+
+/// The processes under `pid`, children first, from `pgrep -P`.
+fn descendants(pid: i32) -> Vec<i32> {
+    let mut found = Vec::new();
+    let mut queue = vec![pid];
+    while let Some(parent) = queue.pop() {
+        let Ok(output) = std::process::Command::new("pgrep")
+            .arg("-P")
+            .arg(parent.to_string())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            break;
+        };
+        for child in String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .filter_map(|text| text.parse::<i32>().ok())
+        {
+            found.push(child);
+            queue.push(child);
+        }
+    }
+    found
+}
+
+/// Kill every process under `pid`, and the process group each one leads. The interface's own
+/// group is never a target.
+fn kill_descendants(pid: i32) {
+    // SAFETY: getpgrp, getpgid, killpg and kill only read a process id or send a signal.
+    unsafe {
+        let own = libc::getpgrp();
+        for child in descendants(pid) {
+            let group = libc::getpgid(child);
+            if group == child && group != own {
+                libc::killpg(group, libc::SIGKILL);
+            }
+            libc::kill(child, libc::SIGKILL);
         }
     }
 }
@@ -138,6 +187,12 @@ pub struct App {
     loader: Option<Loader>,
     task_seq: u64,
     picker_from: usize,
+    /// The transcript entry that streamed text grows, until the reply's text block is whole.
+    streaming: Option<usize>,
+    /// The model's output limit, once a task learned it: later tasks use it too.
+    session_max_tokens: Option<u32>,
+    /// True when the screen may have changed since the last draw.
+    dirty: bool,
     /// The `ramify prompt` line of the selected worktree, and when and where it was read.
     status_line: String,
     status_root: Option<PathBuf>,
@@ -198,6 +253,9 @@ impl App {
             loader: None,
             task_seq: 0,
             picker_from: 0,
+            streaming: None,
+            session_max_tokens: None,
+            dirty: true,
             status_line: String::new(),
             status_root: None,
             status_at: None,
@@ -565,6 +623,11 @@ impl App {
             .env("RAM_CODE_NO_WINDOW", "1")
             .env("RAM_CODE_CONFIG_DIR", &self.providers.dir)
             .envs(self.session_model.iter().map(|model| ("RAM_CODE_MODEL", model)))
+            .envs(
+                self.session_max_tokens
+                    .iter()
+                    .map(|limit| ("RAM_CODE_MAX_TOKENS", limit.to_string())),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr_file));
@@ -585,6 +648,7 @@ impl App {
                     offset: 0,
                     pending: Vec::new(),
                     saw_text: false,
+                    stop_at: None,
                 });
             }
             Err(error) => {
@@ -595,6 +659,14 @@ impl App {
     }
 
     pub fn poll_events(&mut self) {
+        let before = self.fingerprint();
+        self.poll_events_inner();
+        if self.fingerprint() != before {
+            self.dirty = true;
+        }
+    }
+
+    fn poll_events_inner(&mut self) {
         self.poll_loader();
         if let Some(found) = self.update_slot.lock().ok().and_then(|mut slot| slot.take()) {
             self.update_found = Some(found);
@@ -621,6 +693,32 @@ impl App {
 
         for value in parsed {
             self.apply_worker_value(value);
+        }
+        let stuck = !saw_finished
+            && self
+                .worker
+                .as_ref()
+                .and_then(|worker| worker.stop_at)
+                .is_some_and(|at| at.elapsed() >= STOP_GRACE);
+        if stuck {
+            // Dropping the worker kills it and what it started. The history stays as it was
+            // before the task.
+            let directory = self
+                .worker
+                .as_ref()
+                .and_then(|worker| worker.history.parent().map(|path| path.to_path_buf()));
+            self.worker = None;
+            if let Some(directory) = directory {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+            self.running = false;
+            self.streaming = None;
+            self.task_ended();
+            self.push(
+                Role::Info,
+                "the task did not stop within 3 seconds; Ram Code ended it, and the history is as before the task",
+            );
+            return;
         }
         if saw_finished {
             self.finish_task();
@@ -696,7 +794,25 @@ impl App {
     }
 
     fn apply_worker_value(&mut self, value: Value) {
-        match value.get("type").and_then(Value::as_str) {
+        let kind = value.get("type").and_then(Value::as_str);
+        if !matches!(kind, Some("text_delta" | "text" | "trace")) {
+            self.streaming = None;
+        }
+        match kind {
+            Some("text_delta") => {
+                let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+                if let Some(worker) = self.worker.as_mut() {
+                    worker.saw_text = true;
+                }
+                match self.streaming.and_then(|index| self.entries.get_mut(index)) {
+                    Some(entry) => entry.text.push_str(text),
+                    None => {
+                        self.push(Role::Assistant, text);
+                        self.streaming = Some(self.entries.len() - 1);
+                    }
+                }
+                self.scroll_up = 0;
+            }
             Some("text") => {
                 let text = value
                     .get("text")
@@ -706,7 +822,17 @@ impl App {
                 if let Some(worker) = self.worker.as_mut() {
                     worker.saw_text = true;
                 }
-                self.push(Role::Assistant, text);
+                // The whole block replaces the text that streamed in, so it never shows twice.
+                match self.streaming.take().and_then(|index| self.entries.get_mut(index)) {
+                    Some(entry) => entry.text = text,
+                    None => self.push(Role::Assistant, text),
+                }
+            }
+            Some("interrupted") => self.push(Role::Info, "interrupted"),
+            Some("max_tokens") => {
+                if let Some(limit) = value.get("value").and_then(Value::as_u64) {
+                    self.session_max_tokens = u32::try_from(limit).ok();
+                }
             }
             Some("tool_call") => {
                 let name = value.get("name").and_then(Value::as_str).unwrap_or("");
@@ -865,7 +991,7 @@ impl App {
         let (cwd, session, dir) = (self.hooks_cwd(), self.session_id.clone(), self.start_dir.take());
         let (done, wait) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let hooks = Hooked::for_task(&cwd, &session, dir.as_deref());
+            let hooks = Hooked::for_task(&cwd, &session, dir.as_deref(), &Cancel::new());
             let _ = hooks.fire("SessionEnd", "", serde_json::json!({"reason": "exit"}));
             if let Some(dir) = dir {
                 let _ = std::fs::remove_dir_all(dir);
@@ -939,11 +1065,39 @@ impl App {
         }
     }
 
+    /// True when the screen may have changed since the last call.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// What `poll_events` compares to tell whether the screen changed.
+    fn fingerprint(&self) -> (usize, usize, bool, Screen, usize, bool, bool) {
+        (
+            self.entries.len(),
+            self.entries.last().map_or(0, |entry| entry.text.len()),
+            self.running,
+            self.screen,
+            self.message.len(),
+            self.loader.is_some(),
+            self.update_found.is_some(),
+        )
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.dirty = true;
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c'))
         {
             self.quit = true;
+            return;
+        }
+        // Esc stops a running task. The panel's own prompt still takes Esc first.
+        if key.code == KeyCode::Esc
+            && self.running
+            && self.screen == Screen::Main
+            && !(self.panel.open && self.panel.has_prompt())
+        {
+            self.interrupt();
             return;
         }
         if self.screen == Screen::Main
@@ -987,6 +1141,22 @@ impl App {
             },
             _ => {}
         }
+    }
+
+    /// Ask the worker to stop: `SIGINT`, then a kill after 3 seconds if it has not finished.
+    pub fn interrupt(&mut self) {
+        let Some(worker) = self.worker.as_mut() else {
+            return;
+        };
+        if worker.stop_at.is_some() {
+            return;
+        }
+        worker.stop_at = Some(Instant::now());
+        // SAFETY: SIGINT to the worker process this app started.
+        unsafe {
+            libc::kill(worker.child.id() as i32, libc::SIGINT);
+        }
+        self.push(Role::Info, "stopping…");
     }
 
     fn key_chat(&mut self, key: KeyEvent) {
@@ -1490,7 +1660,7 @@ impl App {
         } else if self.running && self.waiting_run.is_some() {
             " waiting for your OK in the Run pane · g run · b block · ^C quit "
         } else if self.running {
-            " working… · ↑/↓ scroll · ^C quit "
+            " working… · esc stop · ↑/↓ scroll · ^C quit "
         } else {
             " enter send · tab worktrees · ^O inspect · /help · ^C quit "
         };
@@ -1623,8 +1793,8 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        for entry in &self.entries {
-            let text = entry.text.lines().take(40);
+        for (index, entry) in self.entries.iter().enumerate() {
+            let text = entry_lines(&entry.text, self.streaming == Some(index)).into_iter();
             match entry.role {
                 Role::User => lines.push(Line::from(vec![
                     Span::styled(
@@ -1906,5 +2076,28 @@ fn shadow_rows(art: &[&str]) -> Vec<String> {
 impl Drop for App {
     fn drop(&mut self) {
         self.end_session();
+    }
+}
+
+
+/// How long a running task's spinner waits between frames, and how long an idle screen does.
+const SPIN_FRAME: Duration = Duration::from_millis(250);
+const IDLE_FRAME: Duration = Duration::from_secs(1);
+
+/// True when the interface should draw: something changed, the spinner moves, or a slow refresh
+/// for what changes on its own, such as the panel.
+pub fn needs_redraw(dirty: bool, since_draw: Duration, running: bool) -> bool {
+    dirty || since_draw >= if running { SPIN_FRAME } else { IDLE_FRAME }
+}
+
+/// The lines of a transcript entry, at most 40. An entry that still streams shows its last
+/// lines, so the text keeps growing on screen.
+pub fn entry_lines(text: &str, streaming: bool) -> Vec<&str> {
+    const MOST: usize = 40;
+    let lines: Vec<&str> = text.lines().collect();
+    if streaming && lines.len() > MOST {
+        lines[lines.len() - MOST..].to_vec()
+    } else {
+        lines.into_iter().take(MOST).collect()
     }
 }

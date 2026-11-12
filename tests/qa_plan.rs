@@ -606,6 +606,8 @@ fn worker_events_reach_the_transcript() {
         credential: Credential::AuthToken("test".into()),
         model: "test".into(),
         max_tokens: 10,
+        stream: false,
+        idle_timeout: 90,
     };
     app.start_task_with_text(Ok(config), "go".into());
     for _ in 0..200 {

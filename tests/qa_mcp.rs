@@ -1222,3 +1222,54 @@ fn shutdown_stops_servers_in_parallel() {
     let took = started.elapsed();
     assert!(took < Duration::from_secs(3), "shutdown took {took:?}");
 }
+
+// ── merge with streaming ─────────────────────────────────────────────────────
+
+#[test]
+fn esc_during_an_mcp_call_interrupts_promptly() {
+    use ram_code::agent::{run_turn_cancellable_with, TurnEnd, INTERRUPTED};
+    use ram_code::cancel::Cancel;
+    let fx = Fixture::new("esc");
+    let pidfile = fx.path("pid");
+    let mut entry = fx.server("fake", json!({"tools": ["hang"], "pidfile": pidfile}));
+    entry["timeout_seconds"] = json!(30);
+    fx.user(json!({"fake": entry}));
+    let mut session = fx.session(&[]);
+    let started = pids(&pidfile);
+    assert_eq!(started.len(), 1, "{:?}", session.notes());
+    let llm = FakeLlm::new(vec![json!({
+        "content": [{"type": "tool_use", "id": "t1", "name": "mcp__fake__hang", "input": {}}],
+        "stop_reason": "tool_use"
+    })]);
+    let cancel = Cancel::new();
+    let stopper = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        stopper.cancel();
+    });
+    let begun = Instant::now();
+    let turn = run_turn_cancellable_with(
+        &llm,
+        &fx.root,
+        &[],
+        "go",
+        &Hooked::none(&fx.root),
+        &session,
+        &cancel,
+        &mut |_| {},
+    );
+    assert!(begun.elapsed() < Duration::from_secs(2), "took {:?}", begun.elapsed());
+    assert_eq!(turn.end, TurnEnd::Interrupted);
+    let results: Vec<&Value> = turn
+        .history
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|b| b["type"] == "tool_result")
+        .collect();
+    assert_eq!(results.len(), 1, "{:?}", turn.history);
+    assert_eq!(results[0]["content"], INTERRUPTED);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!alive(started[0]), "the server still runs after the interrupt");
+    session.shutdown();
+}

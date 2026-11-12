@@ -1,3 +1,4 @@
+use crate::cancel::Cancel;
 use crate::providers::Providers;
 use crate::sandbox::{load_extras, scrub, Paths, Sandbox, DENIED_HINT};
 use serde_json::{json, Value};
@@ -33,6 +34,8 @@ pub struct Tools {
     pub no_window: bool,
     /// How long a command outside the sandbox waits for the human, in seconds.
     pub run_wait: u64,
+    /// Set when the user stops the task: a running command or wait ends at once.
+    pub cancel: Cancel,
     temp: PathBuf,
 }
 
@@ -76,8 +79,15 @@ impl Tools {
                 .and_then(|value| value.trim().parse().ok())
                 .unwrap_or(DEFAULT_RUN_WAIT),
             env,
+            cancel: Cancel::new(),
             temp,
         }
+    }
+
+    /// These tools, stopped by `cancel`.
+    pub fn with_cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// The task's temp folder, created on first use. `TMPDIR` points here in a command.
@@ -341,7 +351,7 @@ the human reads the command and decides whether it runs.",
             // A module cache per task: the shared one under the user cache folder feeds builds
             // outside the sandbox, so a planted module there could change them.
             .env("CLANG_MODULE_CACHE_PATH", temp.join("clang-module-cache"));
-        let mut output = run_with_timeout(cmd, timeout)?;
+        let mut output = run_with_timeout(cmd, timeout, &self.cancel)?;
         // `xcrun` cannot write its cache in the sandbox and says so on every call. That warning
         // is expected, so it does not earn the hint.
         let denied = output
@@ -406,11 +416,61 @@ the human reads the command and decides whether it runs.",
             "--timeout".into(),
             self.run_wait.to_string(),
         ];
-        let (ok, text) = self.ramify_output(&wait)?;
+        let Some((ok, text)) = self.ramify_wait(&wait)? else {
+            return Ok(format!(
+                "{}; the run stays pending in the Run pane",
+                crate::agent::INTERRUPTED
+            ));
+        };
         if !ok && text.contains("is still") {
             return Ok(NO_DECISION.to_string());
         }
         Ok(truncate(text, MAX_COMMAND))
+    }
+
+    /// `ramify run wait`, stopped when the user stops the task. `None` means stopped: the wait
+    /// ends, and the run stays pending, since neither `run go` nor `run block` is called.
+    fn ramify_wait(&self, args: &[String]) -> Result<Option<(bool, String)>, String> {
+        let mut child = Command::new(&self.ramify)
+            .args(args)
+            .current_dir(&self.root)
+            .env_clear()
+            .envs(scrub(&self.env, &self.key_envs))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not run {}: {e}", self.ramify))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stdout, out_thread) = drain(child.stdout.take(), MAX_COMMAND, stop.clone());
+        let (stderr, err_thread) = drain(child.stderr.take(), MAX_COMMAND, stop.clone());
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if self.cancel.is_set() => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(error) => return Err(format!("could not wait for {}: {error}", self.ramify)),
+            }
+        };
+        stop.store(true, Ordering::SeqCst);
+        let _ = out_thread.join();
+        let _ = err_thread.join();
+        let Some(status) = status else {
+            return Ok(None);
+        };
+        let take = |buffer: &Captured| {
+            buffer
+                .lock()
+                .map(|b| String::from_utf8_lossy(&b.0).into_owned())
+                .unwrap_or_default()
+        };
+        let mut text = take(&stdout);
+        text.push_str(&take(&stderr));
+        Ok(Some((status.success(), text)))
     }
 
     fn ramify_output(&self, args: &[String]) -> Result<(bool, String), String> {
@@ -511,7 +571,7 @@ fn drain<R: Read + std::os::fd::AsRawFd + Send + 'static>(
 
 /// Run `cmd` in a new session: its own process group, with no controlling terminal. On a
 /// timeout, kill the whole group and keep the output.
-fn run_with_timeout(mut cmd: Command, timeout: u64) -> Result<String, String> {
+fn run_with_timeout(mut cmd: Command, timeout: u64, cancel: &Cancel) -> Result<String, String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -530,9 +590,14 @@ fn run_with_timeout(mut cmd: Command, timeout: u64) -> Result<String, String> {
     let (stdout, out_thread) = drain(child.stdout.take(), MAX_COMMAND, stop.clone());
     let (stderr, err_thread) = drain(child.stderr.take(), MAX_COMMAND, stop.clone());
     let deadline = Instant::now() + Duration::from_secs(timeout);
+    let mut interrupted = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
+            Ok(None) if cancel.is_set() => {
+                interrupted = true;
+                break None;
+            }
             Ok(None) if Instant::now() >= deadline => break None,
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => return Err(format!("could not wait for the command: {error}")),
@@ -568,6 +633,7 @@ fn run_with_timeout(mut cmd: Command, timeout: u64) -> Result<String, String> {
     }
     let text = match status {
         Some(status) => format!("exit {}\n{text}", status.code().unwrap_or(-1)),
+        None if interrupted => format!("{text}\n{}", crate::agent::INTERRUPTED),
         None => format!("{text}\ntimed out after {timeout} s"),
     };
     Ok(truncate(text, MAX_COMMAND))
