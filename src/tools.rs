@@ -5,7 +5,7 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -343,36 +343,79 @@ pub fn timeout_of(input: &Value) -> u64 {
         .map_or(DEFAULT_TIMEOUT, |seconds| seconds.clamp(1, MAX_TIMEOUT))
 }
 
-/// Run `cmd` in its own process group. On a timeout, kill the whole group and keep the output.
+/// How long to keep reading after the command ends, for output a background job still writes.
+const DRAIN: Duration = Duration::from_secs(1);
+
+/// The bytes kept from one pipe, and whether more came than the cap allows.
+type Captured = Arc<Mutex<(Vec<u8>, bool)>>;
+
+/// Read `pipe` until it closes or `stop` is set. Keep at most `cap` bytes; read and drop the
+/// rest, so the writer never blocks on a full pipe. The pipe is non-blocking, so the thread
+/// sees `stop` even when a descendant that left the group keeps the pipe open.
+fn drain<R: Read + std::os::fd::AsRawFd + Send + 'static>(
+    pipe: Option<R>,
+    cap: usize,
+    stop: Arc<AtomicBool>,
+) -> (Captured, std::thread::JoinHandle<()>) {
+    let buffer = Arc::new(Mutex::new((Vec::new(), false)));
+    let sink = buffer.clone();
+    let handle = std::thread::spawn(move || {
+        let Some(mut pipe) = pipe else {
+            return;
+        };
+        // SAFETY: fcntl on a file descriptor this thread owns.
+        unsafe {
+            let fd = pipe.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if let Ok(mut sink) = sink.lock() {
+                        let room = cap.saturating_sub(sink.0.len());
+                        sink.0.extend_from_slice(&chunk[..read.min(room)]);
+                        if read > room {
+                            sink.1 = true;
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    });
+    (buffer, handle)
+}
+
+/// Run `cmd` in a new session: its own process group, with no controlling terminal. On a
+/// timeout, kill the whole group and keep the output.
 fn run_with_timeout(mut cmd: Command, timeout: u64) -> Result<String, String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    // SAFETY: setsid is async-signal-safe, which is all pre_exec may call.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let mut child = cmd.spawn().map_err(|e| format!("could not run command: {e}"))?;
     let group = child.id() as i32;
-    let collect = |pipe: Option<Box<dyn Read + Send>>| {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let sink = buffer.clone();
-        let handle = std::thread::spawn(move || {
-            if let Some(mut pipe) = pipe {
-                let mut chunk = [0u8; 8192];
-                while let Ok(read) = pipe.read(&mut chunk) {
-                    if read == 0 {
-                        break;
-                    }
-                    if let Ok(mut sink) = sink.lock() {
-                        sink.extend_from_slice(&chunk[..read]);
-                    }
-                }
-            }
-        });
-        (buffer, handle)
-    };
-    let (stdout, out_thread) =
-        collect(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let (stderr, err_thread) =
-        collect(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (stdout, out_thread) = drain(child.stdout.take(), MAX_COMMAND, stop.clone());
+    let (stderr, err_thread) = drain(child.stderr.take(), MAX_COMMAND, stop.clone());
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let status = loop {
         match child.try_wait() {
@@ -390,13 +433,26 @@ fn run_with_timeout(mut cmd: Command, timeout: u64) -> Result<String, String> {
     if status.is_none() {
         let _ = child.wait();
     }
+    // A descendant that left the group can hold the pipes open. Stop reading after a short drain.
+    let drained = Instant::now() + DRAIN;
+    while !(out_thread.is_finished() && err_thread.is_finished()) && Instant::now() < drained {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop.store(true, Ordering::SeqCst);
     let _ = out_thread.join();
     let _ = err_thread.join();
-    let mut text = String::from_utf8_lossy(&stdout.lock().map(|b| b.clone()).unwrap_or_default())
-        .into_owned();
-    text.push_str(&String::from_utf8_lossy(
-        &stderr.lock().map(|b| b.clone()).unwrap_or_default(),
-    ));
+    let take = |buffer: &Captured| {
+        buffer
+            .lock()
+            .map(|b| (String::from_utf8_lossy(&b.0).into_owned(), b.1))
+            .unwrap_or_default()
+    };
+    let (mut text, out_cut) = take(&stdout);
+    let (err_text, err_cut) = take(&stderr);
+    text.push_str(&err_text);
+    if out_cut || err_cut {
+        text.push_str("\n[truncated]");
+    }
     let text = match status {
         Some(status) => format!("exit {}\n{text}", status.code().unwrap_or(-1)),
         None => format!("{text}\ntimed out after {timeout} s"),
