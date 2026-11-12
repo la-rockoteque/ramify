@@ -9,7 +9,7 @@
 | Q5 | pass | `git_works_in_the_sandbox` |
 | Q6 | pass | `common_tools_work_in_the_sandbox` |
 | Q7 | pass | `reads_outside_the_roots_fail` |
-| Q8 | pass | `tests/qa_sandbox.rs` passes, unchanged against `main` |
+| Q8 | pass, with one fixture moved | `tests/qa_sandbox.rs` passes. In `sandbox_hides_secret_files`, the ordinary file moved from the fake home to the worktree. It was readable only because the fake home sat under the per-user temp folder, which review finding 4 closed. Every assertion stays. |
 | Q9 | pass | `cannot_signal_outside` |
 | Q10 | pass | `linked_worktree_git_reads_common_dir` |
 | Q11 | pass | `sandbox_json_adds_paths` |

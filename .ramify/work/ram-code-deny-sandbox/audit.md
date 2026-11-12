@@ -5,7 +5,7 @@
 | AC1 | met | `src/sandbox.rs` `seatbelt_profile_for` starts with `(deny default)` | `profile_starts_with_deny_default`, `unlisted_operation_fails` |
 | AC2 | met | `SYSTEM_READS`, `HOME_READS`, `HOME_FILES`, `SERVICES`, `ar`'s temp name in the per-user temp folder, a per-task clang module cache | `toolchains_work_in_the_sandbox`, `c_build_script_works_in_the_sandbox`, `git_works_in_the_sandbox`, `common_tools_work_in_the_sandbox` |
 | AC3 | met | read roots only | `reads_outside_the_roots_fail` |
-| AC4 | met | the #62 denials come last | `tests/qa_sandbox.rs` passes with no change against `main` |
+| AC4 | met | the #62 denials come last | `tests/qa_sandbox.rs` passes. After the review, one fixture file moved (see below) |
 | AC5 | met | `(allow signal (target same-sandbox))` | `cannot_signal_outside` |
 | AC6 | met | a linked worktree's common Git folder is readable, and `.git` writes stay denied | `linked_worktree_git_reads_common_dir` |
 | AC7 | met | `sandbox.json` in `RAM_CODE_CONFIG_DIR` only; secrets and `.git` stay denied | `sandbox_json_adds_paths`, `sandbox_json_cannot_unhide_secrets`, `project_sandbox_json_is_ignored` |
@@ -41,3 +41,11 @@ The README describes deny-by-default, the read roots, `sandbox.json`, the per-us
 ## Checks
 
 `cargo test`: 240 passed, 0 failed. `cargo clippy --all-targets`: no warnings. `ramify write-set .ramify/work/ram-code-deny-sandbox/write-set.txt`: the diff stays inside the write set. By hand, under the profile printed from the code: `cargo test --lib`, `git status`/`log`/`diff`, `make`, `python3`, `node`, `npm`, `grep`, `sed`, `awk`, `sh`, `bash` and `zsh` work.
+
+## After the review
+
+Review finding 4 removed reads of the per-user temp folder. Two tests had put files there and passed only through that read:
+
+- In `tests/qa_sandbox.rs` `sandbox_hides_secret_files`, the ordinary file the sandbox must read moved from the fake home to the worktree. Under deny-by-default, a home file outside the read roots is unreadable anyway. Every assertion stays.
+- In `tests/qa_hooks.rs` `post_workflow_gets_details_and_output`, the fake `ramify` moved from the fixture folder into the test worktree.
+

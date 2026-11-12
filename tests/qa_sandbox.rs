@@ -571,7 +571,9 @@ fn sandbox_hides_secret_files() {
     fs::write(home.join(".ssh/id_test"), "ssh-secret").unwrap();
     fs::write(home.join(".aws/credentials"), "aws-secret").unwrap();
     fs::write(home.join(".netrc"), "netrc-secret").unwrap();
-    fs::write(home.join("notes.txt"), "plain").unwrap();
+    // An ordinary file the sandbox reads. It sits in the worktree: under deny-by-default, a home
+    // file outside the read roots is unreadable too.
+    fs::write(root.join("notes.txt"), "plain").unwrap();
     let home_text = home.to_str().unwrap().to_string();
     let mut env: Vec<(String, String)> = base_env()
         .into_iter()
@@ -584,7 +586,7 @@ fn sandbox_hides_secret_files() {
         assert!(!out.contains("secret"), "{file} was readable: {out}");
         assert!(!out.starts_with("exit 0"), "{file}: {out}");
     }
-    let out = run(&tools, json!({"command": "cat \"$HOME/notes.txt\""}));
+    let out = run(&tools, json!({"command": "cat notes.txt"}));
     assert!(out.starts_with("exit 0") && out.contains("plain"), "{out}");
 }
 
