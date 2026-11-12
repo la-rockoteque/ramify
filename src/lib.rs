@@ -2,6 +2,7 @@ pub mod agent;
 pub mod app;
 pub mod bonsai_art;
 pub mod cancel;
+pub mod edit;
 /// Claude Code's hook mechanics, shared with the ramify CLI.
 #[path = "../cli/src/hooks.rs"]
 pub mod hooks;
@@ -17,6 +18,7 @@ pub mod state;
 pub mod stream;
 pub mod search;
 pub mod tools;
+pub mod write;
 pub mod update;
 
 pub use agent::{AgentConfig, AgentEvent};

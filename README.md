@@ -158,7 +158,8 @@ The model works with these tools. Every path is relative to the worktree and sta
 
 | Tool | What it does |
 | --- | --- |
-| `read_file`, `write_file`, `list_files` | Read, write or list one file or folder. |
+| `read_file`, `write_file`, `list_files` | Read, write or list one file or folder. `write_file` creates a file or replaces all of it. |
+| `edit_file` | Replace an exact string in a file. Takes `path`, `old_string`, `new_string` and `replace_all`. Returns one line with the changed line range. |
 | `grep` | Search file contents with a regular expression. Takes `path`, `glob` and `ignore_case`. Returns `path:line: text`, at most 200 matches. |
 | `glob` | Find files by a pattern such as `src/**/*.rs`. Returns sorted paths, at most 500. |
 | `code_map` | Outline each file's classes, types, functions and methods with their lines. Covers Rust, TypeScript, JavaScript, Python and Java. Other files show their line count. At most 40,000 characters. |
@@ -173,6 +174,26 @@ and files over 10 MB. They do not follow a symlink.
 - `glob` needs a folder as its `path`.
 - `code_map` always shows the first file, cut at a line when it is too long. It lists a file over
   10 MB as skipped. `grep` names the files it skipped for size.
+
+`edit_file` changes part of a file, so the model does not rewrite the whole file.
+
+- `old_string` must occur once. With more matches, the error gives the count and up to 10 lines,
+  and `replace_all` replaces all of them.
+- A CRLF file keeps CRLF endings, even when the model sends LF. In a file with mixed endings, the
+  new text takes the ending of the line where the match starts. The trailing newline and the
+  file mode stay as they were.
+- It refuses a missing or binary file, a file that is not UTF-8, and a file over 10 MB. An empty
+  `old_string` is an error: `write_file` creates files.
+
+`write_file` and `edit_file` share one write path:
+
+- They refuse Git metadata: a `.git` file or folder anywhere in the worktree, in any case, also
+  through a symlink.
+- A symlink in the path must lead to a place inside the worktree. A symlink whose target does
+  not exist is refused, because the write would create the target wherever it points.
+- A file with other hard links is refused, because one of its other names may be in `.git`.
+- They write a new temporary file with a random name next to the original, then rename it over
+  the original. A failed write never leaves half a file, and an existing file keeps its mode.
 
 Run one task without the interface:
 

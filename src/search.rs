@@ -121,6 +121,25 @@ fn read_text(path: &Path) -> Content {
     }
 }
 
+/// The strict UTF-8 text of a file, or why it cannot be edited: missing, over 10 MB, binary, or
+/// not UTF-8. The edit tool shares these rules with the search tools.
+pub(crate) fn read_utf8(path: &Path) -> Result<String, String> {
+    let shown = path.display();
+    let file = File::open(path).map_err(|e| format!("could not open {shown}: {e}"))?;
+    let size = file.metadata().map_err(|e| format!("could not read {shown}: {e}"))?.len();
+    if size > MAX_FILE {
+        return Err(format!("{shown} is over {} MB", MAX_FILE / (1024 * 1024)));
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    BufReader::new(file)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("could not read {shown}: {e}"))?;
+    if bytes[..bytes.len().min(BINARY_PROBE)].contains(&0) {
+        return Err(format!("{shown} is a binary file"));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{shown} is not UTF-8"))
+}
+
 /// The line count of a text file, read in chunks. `None` for a binary or unreadable file.
 fn count_lines(path: &Path) -> Option<usize> {
     let mut reader = BufReader::new(File::open(path).ok()?);
