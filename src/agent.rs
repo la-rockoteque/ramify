@@ -13,7 +13,7 @@ const MAX_TURNS: usize = 32;
 /// A `tool_use` input under this key holds arguments that did not parse as JSON.
 pub const INVALID_ARGUMENTS: &str = "__invalid_arguments";
 
-const SYSTEM_PROMPT: &str = "You are Ram Code, a coding agent working inside one git worktree. \
+pub const SYSTEM_PROMPT: &str = "You are Ram Code, a coding agent working inside one git worktree. \
 Use the tools to inspect and change files. Keep changes small and focused on the task. \
 Every path is relative to the worktree root. When the task is done, reply with a short summary \
 of what changed and why. Do not ask for permission; finish the task.";
@@ -295,6 +295,11 @@ pub fn run_turn_hooked(
     let tools = Tools::new(root);
     let definitions = Tools::definitions();
     let mut messages: Vec<Value> = history.to_vec();
+    let instructions = crate::instructions::load(root, &crate::instructions::home());
+    for note in &instructions.notes {
+        on_event(AgentEvent::Hook(note.clone()));
+    }
+    let system = instructions.system_prompt(SYSTEM_PROMPT);
 
     let submitted = hooks.fire("UserPromptSubmit", "", json!({"prompt": task}));
     notes(&submitted, on_event);
@@ -317,7 +322,7 @@ pub fn run_turn_hooked(
         let request = json!({
             "model": llm.model(),
             "max_tokens": llm.max_tokens(),
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "messages": messages,
             "tools": definitions,
         });

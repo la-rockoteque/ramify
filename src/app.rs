@@ -1031,7 +1031,7 @@ impl App {
                 Role::Info,
                 "enter send · tab worktrees · i inspect · ↑/↓ scroll · ^C quit\n\
                  /up /down /step /status /workflow /new <slug> /refresh /worktrees\n\
-                 /provider [name] /model <id> /clear /quit",
+                 /provider [name] /model <id> /instructions /clear /quit",
             ),
             "/up" => self.run_action_inline(Action::Up),
             "/down" => self.run_action_inline(Action::Down),
@@ -1047,6 +1047,13 @@ impl App {
             }
             "/refresh" => self.load_async(),
             "/worktrees" => self.screen = Screen::Picker,
+            "/instructions" => {
+                let root = self.hooks_cwd();
+                let found = crate::instructions::load(&root, &crate::instructions::home());
+                for line in found.listing().into_iter().chain(found.notes) {
+                    self.push(Role::Info, line);
+                }
+            }
             "/clear" => {
                 self.entries.clear();
                 self.history.clear();

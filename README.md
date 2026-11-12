@@ -129,6 +129,29 @@ RAMIFY_ROOT=/path/to/worktree cargo run -- --task "Add a --version flag"
 The tests are `cargo test`; they cover the acceptance criteria in
 `.ramify/work/ram-code/spec.md`.
 
+### Instructions: AGENTS.md and CLAUDE.md
+
+Before each task, Ram Code reads the instruction files that Codex and Claude Code read, and adds
+them to its system prompt. It reads them in this order, and skips a missing file:
+
+1. `~/.ram/AGENTS.md`, then `~/.claude/CLAUDE.md`.
+2. In each folder from the git top level down to the folder of the task: `AGENTS.md`,
+   `CLAUDE.md`, `.claude/CLAUDE.md`, then `CLAUDE.local.md`.
+
+A later file is more specific, so it comes last. A file that two names reach, such as a
+`CLAUDE.md` link to `AGENTS.md`, is read one time.
+
+In a `CLAUDE.md`, `@path` imports a file, as in Claude Code. The path is relative to the
+importing file, or starts with `~/`. An import in a code span or a code block stays as text,
+and so does an import of a missing file. Imports go 5 levels deep, and a file is never read
+twice, so a loop ends. `AGENTS.md` has no imports, as in Codex.
+
+Each file is cut at 32 KiB, and all the files together at 128 KiB. A file that is not UTF-8 is
+skipped with one line in the transcript. `/instructions` lists the files the next task reads,
+with their sizes. `RAM_CODE_INSTRUCTIONS_HOME` replaces `~` for the user's files.
+
+This repository has an `AGENTS.md` with its own rules, and a `CLAUDE.md` that imports it.
+
 ## Install
 
 ```bash
