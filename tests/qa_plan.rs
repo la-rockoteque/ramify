@@ -348,6 +348,8 @@ fn terminal_app_runs_without_electron() {
         )
         .env("TERM", "xterm-256color")
         .env("HOME", &root)
+        // Ram Code finds ramify's hooks/ram.json next to its binary: keep this test free of hooks.
+        .env("RAMIFY_HOME", &root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

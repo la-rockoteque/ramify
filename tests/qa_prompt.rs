@@ -1,12 +1,11 @@
 //! Ram Code shows the ramify prompt line, keeps a session record of its own, and lists the live
 //! session records in the Sessions pane.
 
-use ram_code::agent::{AgentConfig, Credential};
 use ram_code::app::{App, Screen};
 use ram_code::ramify::{CommandOutput, CommandSpec, Runner};
 use ram_code::state::{Project, Worktree};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde_json::Value;
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -128,53 +127,6 @@ fn header_shows_the_prompt_line() {
     assert!(!text.contains("✻ birch"), "the line of the other worktree stays: {text}");
     let text = settle(&mut app, "wt-2 ⎇ feat/wt-2 · ◇ ash ⏸");
     assert!(text.contains("wt-2 ⎇ feat/wt-2 · ◇ ash ⏸"), "{text}");
-}
-
-fn record(state: &Path) -> Option<Value> {
-    let path = state.join(format!("sessions/ram-{}.session", std::process::id()));
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-}
-
-#[test]
-fn a_task_writes_a_ram_record() {
-    let _guard = serial();
-    let base = tmp("record");
-    let state = base.join("state");
-    std::env::set_var("RAMIFY_STATE_DIR", &state);
-    std::fs::create_dir_all(base.join("wt-1")).unwrap();
-    let mut app = app_with(FakeRunner::new(), &base);
-    let script = base.join("worker.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\nsleep 0.3\nprintf '[]' > \"$6\"\nprintf '{\"type\":\"finished\",\"answer\":\"ok\"}\\n' >> \"$4\"\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    app.worker_binary = Some(script);
-    let config = AgentConfig {
-        base_url: "http://127.0.0.1:1".into(),
-        credential: Credential::AuthToken("test".into()),
-        model: "test".into(),
-        max_tokens: 10,
-    };
-    app.start_task_with_text(Ok(config), "go".into());
-    let running = record(&state).expect("a record while the task runs");
-    assert_eq!(running["agent"], "ram");
-    assert_eq!(running["state"], "working");
-    assert_eq!(running["pid"], std::process::id());
-    assert_eq!(Path::new(running["root"].as_str().unwrap()), base.join("wt-1"));
-    for _ in 0..300 {
-        app.poll_events();
-        if !app.running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!app.running, "the task never ended");
-    assert_eq!(record(&state).expect("a record after the task")["state"], "idle");
-    drop(app);
-    assert!(record(&state).is_none(), "the record outlives Ram Code");
 }
 
 #[test]

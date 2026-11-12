@@ -97,7 +97,7 @@ fn expand_user(path: &str) -> String {
 
 /// `shlex.shlex(command, posix=True, punctuation_chars=";&|()")` with `whitespace_split`: words
 /// split on blanks, quotes join, and a run of `;&|()` is a token of its own.
-fn split_shell(command: &str) -> Result<Vec<String>, ()> {
+pub(crate) fn split_shell(command: &str) -> Result<Vec<String>, ()> {
     let mut tokens = Vec::new();
     let mut chars = command.chars().peekable();
     let mut current = String::new();
@@ -177,7 +177,7 @@ fn split_shell(command: &str) -> Result<Vec<String>, ()> {
     Ok(tokens)
 }
 
-fn shell_groups(tokens: &[String]) -> Vec<Vec<String>> {
+pub(crate) fn shell_groups(tokens: &[String]) -> Vec<Vec<String>> {
     let mut groups = Vec::new();
     let mut current = Vec::new();
     for token in tokens {
