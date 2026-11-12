@@ -25,10 +25,12 @@ fn env_with(base: &Path, extra: &[(&str, String)]) -> Vec<(String, String)> {
         .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
         .filter(|(key, _)| !extra.iter().any(|(name, _)| name == key))
         .collect();
-    env.push((
-        "RAM_CODE_CONFIG_DIR".into(),
-        base.join("config").display().to_string(),
-    ));
+    if !extra.iter().any(|(name, _)| *name == "RAM_CODE_CONFIG_DIR") {
+        env.push((
+            "RAM_CODE_CONFIG_DIR".into(),
+            base.join("config").display().to_string(),
+        ));
+    }
     env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.clone())));
     env
 }
@@ -409,4 +411,158 @@ fn keychain_is_out_of_reach() {
     let _ = Command::new("/usr/bin/security").args(["delete-keychain", path]).status();
     assert!(!out.contains("dummy-value-123"), "the sandbox read a keychain item: {out}");
     assert!(!ok(&out), "{out}");
+}
+
+// ── review fixes ─────────────────────────────────────────────────────────────
+
+/// A folder from `getconf`, by its real path.
+#[cfg(target_os = "macos")]
+fn getconf(name: &str) -> PathBuf {
+    let out = Command::new("getconf").arg(name).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    fs::canonicalize(text.trim()).unwrap()
+}
+
+/// A fake home folder under `base`, by its real path.
+fn fake_home(base: &Path) -> PathBuf {
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::canonicalize(&home).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn temp_folder_cannot_be_repointed() {
+    let b = base("r1");
+    let outside = b.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let tools = tools(&b, &b.join("wt"));
+    // Command 1 swaps the task temp folder for a link to a folder outside.
+    let first = run(
+        &tools,
+        &format!("rm -rf \"$TMPDIR\" && ln -s '{}' \"$TMPDIR\"", outside.display()),
+    );
+    // Command 2 must not write through it.
+    let second = run(&tools, "echo pwned > \"$TMPDIR/x\"");
+    assert!(
+        !outside.join("x").exists(),
+        "a write reached the outside folder: first={first} second={second}"
+    );
+    assert!(!ok(&second), "the second command ran: {second}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn git_and_cargo_credentials_stay_hidden() {
+    let b = base("r2");
+    let home = fake_home(&b);
+    fs::create_dir_all(home.join(".config/git")).unwrap();
+    fs::write(home.join(".config/git/credentials"), "https://u:git-secret@example.com\n").unwrap();
+    fs::write(home.join(".config/git/config"), "[user]\n\tname = t\n").unwrap();
+    fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+    fs::write(home.join(".cargo/config.toml"), "[registry]\ntoken = \"cargo-secret\"\n").unwrap();
+    let tools = Tools::with_env(
+        &b.join("wt"),
+        env_with(&b, &[("HOME", home.display().to_string())]),
+    );
+    let creds = run(&tools, "cat \"$HOME/.config/git/credentials\"");
+    assert!(!creds.contains("git-secret"), "git credentials readable: {creds}");
+    let cargo = run(&tools, "cat \"$HOME/.cargo/config.toml\"");
+    assert!(!cargo.contains("cargo-secret"), "cargo config readable: {cargo}");
+    let config = run(&tools, "cat \"$HOME/.config/git/config\"");
+    assert!(ok(&config), "git config should stay readable: {config}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn symlinked_secret_and_config_paths_stay_denied() {
+    let b = base("r3");
+    let home = fake_home(&b);
+    let real_config = home.join("dotfiles/config");
+    fs::create_dir_all(real_config.join("gh")).unwrap();
+    fs::create_dir_all(real_config.join("ram-code")).unwrap();
+    fs::write(real_config.join("gh/hosts.yml"), "oauth_token: gh-secret\n").unwrap();
+    std::os::unix::fs::symlink(&real_config, home.join(".config")).unwrap();
+    let sandbox_json = real_config.join("ram-code/sandbox.json");
+    // A dotfile user lets commands read and write their dotfiles folder.
+    let original = "{\"read\": [\"~/dotfiles\"], \"write\": [\"~/dotfiles\"]}\n";
+    fs::write(&sandbox_json, original).unwrap();
+    let env = env_with(
+        &b,
+        &[
+            ("HOME", home.display().to_string()),
+            ("RAM_CODE_CONFIG_DIR", home.join(".config/ram-code").display().to_string()),
+        ],
+    );
+    let tools = Tools::with_env(&b.join("wt"), env);
+    let read = run(&tools, "cat \"$HOME/.config/gh/hosts.yml\"");
+    assert!(!read.contains("gh-secret"), "a symlinked secret was readable: {read}");
+    let widen = run(
+        &tools,
+        "echo '{\"read\":[\"/\"],\"write\":[\"/\"]}' > \"$HOME/.config/ram-code/sandbox.json\"",
+    );
+    assert_eq!(
+        fs::read_to_string(&sandbox_json).unwrap(),
+        original,
+        "the command rewrote sandbox.json: {widen}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn per_user_temp_is_create_only() {
+    let t = getconf("DARWIN_USER_TEMP_DIR");
+    let tag = format!("ramcode-probe-{}", std::process::id());
+    let other = t.join(format!("{tag}-app"));
+    let existing = t.join(format!("{tag}-existing"));
+    let created = t.join(format!("{tag}-new"));
+    let moved = t.join(format!("{tag}-moved"));
+    let link = t.join(format!("{tag}-link"));
+    let cleanup = || {
+        let _ = fs::remove_dir_all(&other);
+        for p in [&existing, &created, &moved, &link] {
+            let _ = fs::remove_file(p);
+        }
+    };
+    cleanup();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("secret.txt"), "app-secret").unwrap();
+    fs::write(&existing, "existing").unwrap();
+
+    let b = base("r4");
+    let tools = tools(&b, &b.join("wt"));
+    let read_other = run(&tools, &format!("cat '{}'", other.join("secret.txt").display()));
+    let read_existing = run(&tools, &format!("cat '{}'", existing.display()));
+    let mv = run(&tools, &format!("mv '{}' '{}'", existing.display(), moved.display()));
+    let rm = run(&tools, &format!("rm -f '{}'", existing.display()));
+    let ln = run(&tools, &format!("ln -s '{}' '{}'", b.join("wt").display(), link.display()));
+    let create = run(&tools, &format!("echo hi > '{}'", created.display()));
+    let existing_left = existing.exists();
+    let created_text = fs::read_to_string(&created).unwrap_or_default();
+    let link_made = fs::symlink_metadata(&link).is_ok();
+    cleanup();
+
+    assert!(!read_other.contains("app-secret"), "another app's file was readable: {read_other}");
+    assert!(!read_existing.contains("existing"), "an existing entry was readable: {read_existing}");
+    assert!(existing_left, "an existing entry was moved or removed: mv={mv} rm={rm}");
+    assert!(!link_made, "a link was planted in the user temp folder: {ln}");
+    assert!(ok(&create) && created_text == "hi\n", "a new file could not be made: {create}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn shared_clang_cache_is_not_writable() {
+    let c = getconf("DARWIN_USER_CACHE_DIR");
+    let probe = c.join(format!("clang/ramcode-probe-{}", std::process::id()));
+    let b = base("r5");
+    let tools = tools(&b, &b.join("wt"));
+    let out = run(&tools, &format!("mkdir -p '{}' && echo x > '{}/f'", probe.display(), probe.display()));
+    let made = probe.exists();
+    let _ = fs::remove_dir_all(&probe);
+    assert!(!made, "the shared clang cache was writable: {out}");
+    let env = run(&tools, "printf %s \"$CLANG_MODULE_CACHE_PATH\"");
+    let tmp = run(&tools, "printf %s \"$TMPDIR\"");
+    let cache = env.lines().nth(1).unwrap_or("").to_string();
+    let temp = tmp.lines().nth(1).unwrap_or("").to_string();
+    assert!(!cache.is_empty() && cache.starts_with(&temp), "module cache is not per task: {env} / {tmp}");
 }

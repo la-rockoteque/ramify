@@ -43,8 +43,13 @@ impl Sandbox {
             Sandbox::Bwrap(program) => {
                 // SAFETY: getuid has no preconditions and cannot fail.
                 let uid = unsafe { libc::getuid() };
+                // A link is skipped: `secret_paths` lists its real path too, and bwrap cannot
+                // mount over a link.
                 let exists = |path: &Path| -> Option<bool> {
-                    std::fs::symlink_metadata(path).ok().map(|meta| meta.is_dir())
+                    std::fs::symlink_metadata(path)
+                        .ok()
+                        .filter(|meta| !meta.file_type().is_symlink())
+                        .map(|meta| meta.is_dir())
                 };
                 let (dirs, files) = linux_hidden(&paths.secrets, uid, &exists);
                 let mut cmd = Command::new(program);
@@ -162,13 +167,50 @@ pub fn bwrap_args(
     args
 }
 
-/// The secret paths under `home`, by their real path, since Seatbelt matches real paths.
+/// The secret paths under `home`. Seatbelt matches real paths, and a dotfile manager often makes
+/// `~/.config` a link, so each path comes as given and, when it differs, by its real path.
 pub fn secret_paths(home: Option<&Path>) -> Vec<PathBuf> {
     let Some(home) = home else {
         return Vec::new();
     };
     let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    SECRETS.iter().map(|name| home.join(name)).collect()
+    SECRETS
+        .iter()
+        .flat_map(|name| given_and_real(&home.join(name)))
+        .collect()
+}
+
+/// The path, and its real path when that differs.
+fn given_and_real(path: &Path) -> Vec<PathBuf> {
+    let resolved = real_through(path);
+    if resolved == path {
+        vec![path.to_path_buf()]
+    } else {
+        vec![path.to_path_buf(), resolved]
+    }
+}
+
+/// The real path of the nearest existing ancestor, then the rest, so a path that does not exist
+/// yet under a linked folder still resolves.
+fn real_through(path: &Path) -> PathBuf {
+    let mut probe = path.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(found) = probe.canonicalize() {
+            let mut full = found;
+            for part in rest.iter().rev() {
+                full.push(part);
+            }
+            return full;
+        }
+        match (probe.parent(), probe.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                probe = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// The paths one sandboxed command may use. Each path is a real path, because Seatbelt
@@ -441,7 +483,8 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
         denials.push_str(&format!("(deny file-write*\n{})\n", rules.join("\n")));
     }
     if let Some(config) = &paths.config {
-        denials.push_str(&format!("(deny file-write*\n{})\n", subpath(config)));
+        let rules: Vec<String> = given_and_real(config).iter().map(|p| subpath(p)).collect();
+        denials.push_str(&format!("(deny file-write*\n{})\n", rules.join("\n")));
     }
 
     format!(
