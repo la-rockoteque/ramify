@@ -30,6 +30,15 @@ if cfg.get("envfile"):
         json.dump(dict(os.environ), f)
 tools = cfg.get("tools", ["echo"])
 pages = cfg.get("pages", 1)
+if cfg.get("spawnsetsid"):
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        with open(cfg["spawnsetsid"], "a") as f:
+            f.write("%d\n" % os.getpid())
+        import time
+        time.sleep(60)
+        os._exit(0)
 
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -75,6 +84,8 @@ for line in sys.stdin:
         result = {"tools": [{"name": n, "description": "the " + n + " tool",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}}
             for n in chunk]}
+        if cfg.get("rawtools") is not None:
+            result = {"tools": cfg["rawtools"]}
         if page + 1 < pages:
             result["nextCursor"] = str(page + 1)
         send({"jsonrpc": "2.0", "id": ident, "result": result})
@@ -98,6 +109,8 @@ for line in sys.stdin:
             result = {"content": [{"type": "text", "text": "\u001b[2J\u001b[31mred\u0007bell\rback\u009b1m"}]}
         elif name == "big":
             result = {"content": [{"type": "text", "text": "y" * 50000}]}
+        elif name == "huge":
+            result = {"content": [{"type": "text", "text": "z" * (9 * 1024 * 1024)}]}
         else:
             result = {"content": [{"type": "text", "text": "echo: " + str(args.get("text", ""))}]}
         send({"jsonrpc": "2.0", "id": ident, "result": result})
@@ -105,6 +118,9 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": ident, "result": {}})
     elif ident is not None:
         send({"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "no such method"}})
+if cfg.get("ignoreeof"):
+    import time
+    time.sleep(30)
 "#;
 
 struct Fixture {
@@ -935,4 +951,267 @@ fn keychain_is_out_of_reach_for_servers() {
     for (network, out) in outputs {
         assert!(!out.contains("dummy-value-456"), "network={network}: the sandbox read a keychain item");
     }
+}
+
+// ── review fixes ─────────────────────────────────────────────────────────────
+
+/// A copy of the fake server inside the worktree, run by a relative path.
+fn repo_server(fx: &Fixture, behaviour: Value) -> Value {
+    fs::create_dir_all(fx.root.join("tools")).unwrap();
+    fs::write(fx.root.join("tools/mcp.py"), FAKE).unwrap();
+    fs::write(fx.root.join("tools/cfg.json"), behaviour.to_string()).unwrap();
+    json!({"command": "python3", "args": ["tools/mcp.py", "tools/cfg.json"]})
+}
+
+#[test]
+fn project_server_cannot_run_outside_the_sandbox() {
+    let fx = Fixture::new("r1a");
+    fx.project(json!({"fake": fx.server("fake", json!({}))}));
+    let mut app = app(&fx);
+    send(&mut app, "do it");
+    let shown = transcript(&app);
+    assert!(!shown.contains("u: approve"), "the prompt offers u for a project server:\n{shown}");
+    key(&mut app, KeyCode::Char('u'));
+    assert!(!app.running, "u started the task");
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let approvals = Approvals::load(&fx.config, &fx.root);
+    assert_eq!(approvals.get(&config.servers[0]), None, "u was stored for a project server");
+    assert!(transcript(&app).contains("mcp.json"), "{}", transcript(&app));
+    app.entries.clear();
+    key(&mut app, KeyCode::Esc);
+    send(&mut app, "/mcp approve fake u");
+    let shown = transcript(&app);
+    assert!(shown.contains("~/.config/ram-code/mcp.json"), "{shown}");
+    let approvals = Approvals::load(&fx.config, &fx.root);
+    assert_eq!(approvals.get(&config.servers[0]), None);
+    let mut approvals = Approvals::load(&fx.config, &fx.root);
+    assert!(approvals.set(&config.servers[0], Choice::Outside).is_err());
+    // A user server keeps `u`.
+    let fx = Fixture::new("r1b");
+    fx.user(json!({"mine": fx.server("mine", json!({}))}));
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let mut approvals = Approvals::load(&fx.config, &fx.root);
+    assert!(approvals.set(&config.servers[0], Choice::Outside).is_ok());
+}
+
+#[test]
+fn approval_covers_repo_files_the_server_runs() {
+    let fx = Fixture::new("r1c");
+    fx.project(json!({"fake": repo_server(&fx, json!({}))}));
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let prompt = mcp::prompt_text(&config.servers[0]);
+    assert!(
+        prompt.contains("runs a file from this repository: tools/mcp.py"),
+        "{prompt}"
+    );
+    fx.approve("fake", Choice::Sandbox);
+    let mut session = fx.session(&[]);
+    assert!(names(&session).contains(&"mcp__fake__echo".to_string()), "{:?}", session.notes());
+    session.shutdown();
+    let mut script = fs::read_to_string(fx.root.join("tools/mcp.py")).unwrap();
+    script.push_str("\n# changed by the model\n");
+    fs::write(fx.root.join("tools/mcp.py"), script).unwrap();
+    let mut session = fx.session(&[]);
+    assert!(
+        !names(&session).iter().any(|n| n.starts_with("mcp__")),
+        "a changed repo file ran under the old approval"
+    );
+    assert!(session.notes().join("\n").contains("approval"), "{:?}", session.notes());
+    session.shutdown();
+}
+
+#[test]
+fn approval_records_what_the_human_saw() {
+    let fx = Fixture::new("r2");
+    fx.project(json!({"fake": fx.server("fake", json!({}))}));
+    let mut app = app(&fx);
+    send(&mut app, "do it");
+    // The file changes while the human reads the prompt.
+    let mut entry = fx.server("fake", json!({}));
+    entry["args"].as_array_mut().unwrap().push(json!("--swapped"));
+    fx.project(json!({"fake": entry}));
+    app.entries.clear();
+    key(&mut app, KeyCode::Char('a'));
+    assert!(!app.running, "the task started with an entry the human never saw");
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let approvals = Approvals::load(&fx.config, &fx.root);
+    assert_eq!(approvals.get(&config.servers[0]), None, "the unseen entry was approved");
+    assert!(transcript(&app).contains("--swapped"), "{}", transcript(&app));
+}
+
+#[test]
+fn prompt_shows_the_resolved_command_and_flags_risky_env() {
+    let fx = Fixture::new("r3");
+    fx.project(json!({"fake": fx.server("fake", json!({}))}));
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let prompt = mcp::prompt_text(&config.servers[0]);
+    let python = Command::new("sh").args(["-c", "command -v python3"]).output().unwrap();
+    let python = String::from_utf8_lossy(&python.stdout).trim().to_string();
+    assert!(python.starts_with('/'));
+    assert!(prompt.contains(&format!("runs: {python}")), "{prompt}");
+    for key in [
+        "PATH",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "RUBYOPT",
+        "PERL5OPT",
+        "MY_LIBPATH",
+        "DYLD_INSERT_LIBRARIES",
+        "LD_PRELOAD",
+        "npm_config_registry",
+        "BASH_ENV",
+        "ENV",
+    ] {
+        let mut entry = fx.server("fake", json!({}));
+        entry["env"] = json!({key: "x"});
+        fx.project(json!({"fake": entry}));
+        let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+        let error = config.servers[0].error.clone().unwrap_or_default();
+        assert!(error.contains(key) && error.contains("mcp.json"), "{key}: {error:?}");
+    }
+    // The user's own file may set them.
+    let mut entry = fx.server("fake", json!({}));
+    entry["env"] = json!({"NODE_OPTIONS": "x"});
+    fx.user(json!({"mine": entry}));
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let mine = config.servers.iter().find(|s| s.name == "mine").unwrap();
+    assert!(mine.error.is_none(), "{:?}", mine.error);
+}
+
+#[test]
+fn bad_tool_schemas_are_dropped_and_lists_capped() {
+    let fx = Fixture::new("r4");
+    let schema = json!({"type": "object", "properties": {"text": {"type": "string"}}});
+    let mut tools: Vec<Value> = (0..130)
+        .map(|i| json!({"name": format!("t{i}"), "description": "d", "inputSchema": schema}))
+        .collect();
+    tools.insert(0, json!({"name": "foo_type", "description": "d", "inputSchema": {"type": "foo"}}));
+    tools.insert(0, json!({"name": "no_type", "description": "d", "inputSchema": {"properties": {}}}));
+    let long = format!("{}\u{202e}{}", "w".repeat(3000), "\u{1b}[31m");
+    tools.insert(0, json!({"name": "long", "description": long, "inputSchema": schema}));
+    fx.user(json!({"fake": fx.server("fake", json!({"rawtools": tools}))}));
+    let mut session = fx.session(&[]);
+    use ram_code::agent::ToolSource;
+    let definitions = session.definitions();
+    let offered: Vec<&Value> = definitions
+        .iter()
+        .filter(|d| d["name"].as_str().unwrap_or("").starts_with("mcp__"))
+        .collect();
+    assert_eq!(offered.len(), 128, "{:?}", session.notes());
+    for definition in &offered {
+        assert_eq!(definition["input_schema"]["type"], "object", "{definition}");
+        let description = definition["description"].as_str().unwrap();
+        assert!(description.chars().count() <= 2_000, "{}", description.len());
+        assert!(!description.contains('\u{202e}') && !description.contains('\u{1b}'));
+    }
+    let names: Vec<&str> = offered.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(!names.contains(&"mcp__fake__foo_type") && !names.contains(&"mcp__fake__no_type"));
+    let notes = session.notes().join("\n");
+    assert!(notes.contains("foo_type") && notes.contains("no_type"), "{notes}");
+    assert!(notes.contains("128"), "{notes}");
+    session.shutdown();
+}
+
+#[test]
+fn server_descendants_die_with_the_task() {
+    let fx = Fixture::new("r5");
+    let pidfile = fx.path("pid");
+    let escaped = fx.path("escaped");
+    fx.user(json!({"fake": fx.server("fake", json!({"pidfile": pidfile, "spawnsetsid": escaped}))}));
+    let mut session = fx.session(&[]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pids(&escaped).is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let children = pids(&escaped);
+    assert_eq!(children.len(), 1, "{:?}", session.notes());
+    session.shutdown();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while children.iter().any(|&pid| alive(pid)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for pid in children {
+        assert!(!alive(pid), "the server's setsid child {pid} outlived the task");
+    }
+}
+
+#[test]
+fn prompt_text_is_escaped() {
+    let fx = Fixture::new("r6");
+    let mut entry = fx.server("fake", json!({}));
+    entry["args"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("a\nd: deny"), json!("\u{1b}[31mred"), json!("git\u{200b}hub")]);
+    entry["env"] = json!({"K": "v\u{202e}x"});
+    fx.project(json!({"ev\u{202e}il\nname": entry}));
+    let config = mcp::load(&fx.root, &getter(fx.env(&[])));
+    let prompt = mcp::prompt_text(&config.servers[0]);
+    let approvals = Approvals::load(&fx.config, &fx.root);
+    let status = mcp::status_lines(&config, &approvals).join("\n");
+    for (label, text) in [("prompt", &prompt), ("status", &status)] {
+        for bad in ['\u{1b}', '\u{202e}', '\u{200b}'] {
+            assert!(!text.contains(bad), "{label} holds {:?}:\n{text}", bad);
+        }
+        assert!(!text.lines().any(|line| line.starts_with("d: deny")), "{label}:\n{text}");
+    }
+    assert!(prompt.contains("\\n"), "{prompt}");
+    // Notes from a failing server with an odd name.
+    let mut bad = fx.server("fake", json!({}));
+    bad["command"] = json!("${UNSET_\u{1b}VAR}");
+    fx.user(json!({"x\u{1b}]0;title\u{7}": bad}));
+    let mut session = fx.session(&[]);
+    let notes = session.notes().join("\n");
+    assert!(!notes.contains('\u{1b}') && !notes.contains('\u{7}'), "{notes:?}");
+    session.shutdown();
+}
+
+#[test]
+fn duplicate_tool_names_are_refused() {
+    let fx = Fixture::new("r7");
+    let schema = json!({"type": "object", "properties": {"text": {"type": "string"}}});
+    let tools = json!([
+        {"name": "dup", "description": "1", "inputSchema": schema},
+        {"name": "dup", "description": "2", "inputSchema": schema},
+        {"name": "a b", "description": "3", "inputSchema": schema},
+        {"name": "a_b", "description": "4", "inputSchema": schema},
+        {"name": "ok", "description": "5", "inputSchema": schema}
+    ]);
+    fx.user(json!({"fake": fx.server("fake", json!({"rawtools": tools}))}));
+    let mut session = fx.session(&[]);
+    let offered: Vec<String> = names(&session)
+        .into_iter()
+        .filter(|n| n.starts_with("mcp__"))
+        .collect();
+    assert_eq!(offered, vec!["mcp__fake__ok".to_string()], "{:?}", session.notes());
+    let notes = session.notes().join("\n");
+    assert!(notes.contains("dup") && notes.contains("a b"), "{notes}");
+    session.shutdown();
+}
+
+#[test]
+fn huge_server_message_is_bounded() {
+    let fx = Fixture::new("r8a");
+    fx.user(json!({"fake": fx.server("fake", json!({"tools": ["huge", "echo"]}))}));
+    let mut session = fx.session(&[]);
+    let out = call(&session, "mcp__fake__huge", json!({}));
+    assert!(out.is_err(), "a 9 MiB message was read whole: {:?}", out.map(|t| t.len()));
+    session.shutdown();
+}
+
+#[test]
+fn shutdown_stops_servers_in_parallel() {
+    let fx = Fixture::new("r8b");
+    fx.user(json!({
+        "one": fx.server("one", json!({"ignoreeof": true})),
+        "two": fx.server("two", json!({"ignoreeof": true}))
+    }));
+    let mut session = fx.session(&[]);
+    assert_eq!(names(&session).iter().filter(|n| n.starts_with("mcp__")).count(), 2);
+    let started = Instant::now();
+    session.shutdown();
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(3), "shutdown took {took:?}");
 }

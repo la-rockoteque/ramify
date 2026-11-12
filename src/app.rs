@@ -99,6 +99,8 @@ struct McpPrompt {
     task: String,
     root: PathBuf,
     names: Vec<String>,
+    /// The hash of the entry on screen. A key stores a decision only for that entry.
+    shown: Option<String>,
 }
 
 pub struct App {
@@ -1089,6 +1091,7 @@ impl App {
             task: task.to_string(),
             root,
             names,
+            shown: None,
         });
         self.show_mcp_prompt();
         true
@@ -1103,10 +1106,17 @@ impl App {
         };
         let get = self.mcp_get();
         let config = mcp::load(&prompt.root, &get);
-        if let Some(entry) = config.servers.iter().find(|entry| entry.name == name) {
-            let text = mcp::prompt_text(entry);
+        // A project server runs only in the sandbox, so the prompt offers no `u`.
+        let shown = config
+            .servers
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| (mcp::prompt_text(entry), entry.hash.clone()));
+        if let Some(prompt) = self.mcp_pending.as_mut() {
+            prompt.shown = shown.as_ref().map(|(_, hash)| hash.clone());
+        }
+        if let Some((text, _)) = shown {
             self.push(Role::Info, text);
-            self.push(Role::Error, mcp::OUTSIDE_CHOICE);
         }
     }
 
@@ -1128,17 +1138,31 @@ impl App {
         let Some(choice) = choice else {
             return;
         };
-        let Some(prompt) = self.mcp_pending.as_mut() else {
+        let Some(prompt) = self.mcp_pending.as_ref() else {
             return;
         };
-        let name = prompt.names.remove(0);
+        let Some(name) = prompt.names.first().cloned() else {
+            return;
+        };
         let root = prompt.root.clone();
-        let more = !prompt.names.is_empty();
-        if let Err(error) = self.record_mcp(&root, &name, choice) {
+        let shown = prompt.shown.clone();
+        // A refused key or a changed entry keeps the prompt: the human decides again.
+        if let Err(error) = self.record_mcp_seen(&root, &name, choice, shown.as_deref()) {
             self.push(Role::Error, error);
-        } else {
-            self.push(Role::Info, format!("MCP server {name}: {}", choice.label()));
+            self.show_mcp_prompt();
+            return;
         }
+        self.push(
+            Role::Info,
+            format!("MCP server {}: {}", mcp::visible_line(&name), choice.label()),
+        );
+        let more = match self.mcp_pending.as_mut() {
+            Some(prompt) => {
+                prompt.names.remove(0);
+                !prompt.names.is_empty()
+            }
+            None => false,
+        };
         if more {
             self.show_mcp_prompt();
             return;
@@ -1150,13 +1174,31 @@ impl App {
     }
 
     fn record_mcp(&self, root: &std::path::Path, name: &str, choice: mcp::Choice) -> Result<(), String> {
+        self.record_mcp_seen(root, name, choice, None)
+    }
+
+    /// Store `choice` for `name`. With `shown`, only when the entry still has the hash the
+    /// human read: a file that changed during the prompt is shown again, not approved.
+    fn record_mcp_seen(
+        &self,
+        root: &std::path::Path,
+        name: &str,
+        choice: mcp::Choice,
+        shown: Option<&str>,
+    ) -> Result<(), String> {
         let get = self.mcp_get();
         let config = mcp::load(root, &get);
         let entry = config
             .servers
             .iter()
             .find(|entry| entry.name == name)
-            .ok_or_else(|| format!("no MCP server named {name}"))?;
+            .ok_or_else(|| format!("no MCP server named {}", mcp::visible_line(name)))?;
+        if shown.is_some_and(|hash| hash != entry.hash) {
+            return Err(format!(
+                "MCP server {} changed while its prompt was on screen. Read it again.",
+                mcp::visible_line(name)
+            ));
+        }
         let mut approvals = mcp::Approvals::load(&self.providers.dir, root);
         approvals.set(entry, choice)
     }
@@ -1181,12 +1223,18 @@ impl App {
                     .filter(|choice| *choice != mcp::Choice::Deny)
                     .unwrap_or(mcp::Choice::Sandbox);
                 match self.record_mcp(&root, name, choice) {
-                    Ok(()) => self.push(Role::Info, format!("MCP server {name}: {}", choice.label())),
+                    Ok(()) => self.push(
+                        Role::Info,
+                        format!("MCP server {}: {}", mcp::visible_line(name), choice.label()),
+                    ),
                     Err(error) => self.push(Role::Error, error),
                 }
             }
             ["deny", name] => match self.record_mcp(&root, name, mcp::Choice::Deny) {
-                Ok(()) => self.push(Role::Info, format!("MCP server {name}: denied")),
+                Ok(()) => self.push(
+                    Role::Info,
+                    format!("MCP server {}: denied", mcp::visible_line(name)),
+                ),
                 Err(error) => self.push(Role::Error, error),
             },
             _ => self.push(Role::Info, "usage: /mcp, /mcp approve <name> [a|n|u], /mcp deny <name>"),
