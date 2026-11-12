@@ -765,3 +765,26 @@ fn no_workflow_hooks_no_classifier() {
     );
     assert_eq!(fixture.logged("classify").len(), 1);
 }
+
+#[test]
+fn continue_false_ends_the_task() {
+    let fixture = Fixture::new("continue");
+    let stop = r#"echo '{"continue":false,"stopReason":"out of budget"}'"#;
+    fixture.ram(json!({"PostToolUse": group("run_command", &fixture.script("post", stop))}));
+    let (requests, notes) = turn(
+        &fixture,
+        &fixture.hooked(),
+        vec![tool("run_command", json!({"command": "true"})), text("never asked")],
+    );
+    assert_eq!(requests.len(), 1, "the model got another turn");
+    assert!(notes.iter().any(|note| note.contains("out of budget")), "{notes:?}");
+}
+
+#[test]
+fn system_message_shows_in_the_transcript() {
+    let fixture = Fixture::new("system");
+    let message = r#"echo '{"systemMessage":"lint is slow today"}'"#;
+    fixture.ram(json!({"PreToolUse": group("", &fixture.script("pre", message))}));
+    let (_, notes) = turn(&fixture, &fixture.hooked(), vec![tool("run_command", json!({"command": "true"}))]);
+    assert_eq!(notes, ["hook PreToolUse: lint is slow today"]);
+}

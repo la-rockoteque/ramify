@@ -21,7 +21,12 @@ for it.
    5. The `hooks` of each Claude Code plugin that `~/.claude/settings.json` enables
       (`enabledPlugins`), from the plugin's `.claude-plugin/plugin.json` or `hooks/hooks.json`.
       `${CLAUDE_PLUGIN_ROOT}` is the plugin's folder.
-   6. `<RAMIFY_HOME>/hooks/ram.json`: ramify's hooks for Ram Code (see 14).
+      A plugin that ships `hooks/ram.json` uses it, not its Claude Code hooks: their matchers
+      name Claude Code's tools. (Added in the build.)
+   6. `<RAMIFY_HOME>/hooks/ram.json`: ramify's hooks for Ram Code (see 14). It is skipped when
+      the ramify plugin was read in 5, so ramify's hooks never run twice. (Added in the build.)
+   `RAMIFY_HOOKS_HOME` replaces `~` for these files, and `ramify hooks list` prints every hook
+   they hold. (Added in the build.)
 2. `<project>` is the primary checkout of the project that Ram Code opened.
 3. The format is Claude Code's: `{"hooks": {"<Event>": [{"matcher": "<regex>", "hooks":
    [{"type": "command", "command": "...", "timeout": <seconds>}]}]}}`. A hook of another type
