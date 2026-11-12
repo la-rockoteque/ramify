@@ -120,6 +120,21 @@ Add custom providers, such as a LiteLLM proxy, to `~/.config/ram-code/providers.
 `RAM_CODE_PROVIDER` picks the provider for one run, and leaves the saved choice as it is.
 `RAM_CODE_MODEL` overrides the model of every provider.
 
+### Tools
+
+The model works with these tools. Every path is relative to the worktree and stays inside it.
+
+| Tool | What it does |
+| --- | --- |
+| `read_file`, `write_file`, `list_files` | Read, write or list one file or folder. |
+| `grep` | Search file contents with a regular expression. Takes `path`, `glob` and `ignore_case`. Returns `path:line: text`, at most 200 matches. |
+| `glob` | Find files by a pattern such as `src/**/*.rs`. Returns sorted paths, at most 500. |
+| `code_map` | Outline each file's classes, types, functions and methods with their lines. Covers Rust, TypeScript, JavaScript, Python and Java. Other files show their line count. At most 40,000 characters. |
+| `run_command` | Run a shell command in the worktree. |
+
+`grep`, `glob` and `code_map` skip what `.gitignore` ignores, the `.git` folder and binary files.
+They do not follow a symlink.
+
 Run one task without the interface:
 
 ```bash
