@@ -1898,3 +1898,120 @@ fn run_steps(
     }
     command.output().expect("command runs")
 }
+
+/// A fixture for the Rust binary alone: a work order with `steps` as given, and the bundled
+/// workflows, with `auto_ask: yes` when asked.
+fn order_fixture(name: &str, steps: &str, auto_ask: bool) -> PathBuf {
+    let fixture = temp(name);
+    git(&["init", "-q", "-b", "main"], &fixture);
+    fs::write(fixture.join(".ramify.conf"), "RAMIFY_SERVICES=\"\"\n").unwrap();
+    fs::create_dir_all(fixture.join(".ramify/work/demo")).unwrap();
+    fs::write(
+        fixture.join(".ramify/work/demo/order.md"),
+        format!("---\nworkflow: feature\nlane: standard\nbranch: main\ntags: []\ncreated: 2026-11-01\n{steps}---\n\n# demo\n"),
+    )
+    .unwrap();
+    fs::write(fixture.join(".ramify/work/demo/spec.md"), "The spec.\n").unwrap();
+    fs::write(fixture.join(".ramify/work/demo/qa-plan.md"), "The plan.\n").unwrap();
+    if auto_ask {
+        let workflows = fs::read_to_string(repo_root().join("workflows.yml")).unwrap();
+        fs::write(fixture.join(".ramify/workflows.yml"), format!("auto_ask: yes\n{workflows}")).unwrap();
+    }
+    git(&["add", "."], &fixture);
+    git(&["commit", "-qm", "init"], &fixture);
+    fixture.canonicalize().unwrap()
+}
+
+fn rust_steps(fixture: &Path, args: &[&str], input: Option<&str>) -> (Option<i32>, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ramify"));
+    command
+        .args(args)
+        .env("RAMIFY_ROOT", fixture)
+        .env("RAMIFY_STATE_DIR", fixture.join(".state"))
+        .env("RAMIFY_HOME", repo_root())
+        .env("RAMIFY_POPUP", "0")
+        .env_remove("RAMIFY_SHELL")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(input.unwrap_or("").as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    (output.status.code(), String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn a_multi_line_note_keeps_the_order_readable() {
+    let fixture = order_fixture("note-lines", "steps: []\n", false);
+    let note = "Redo the intro\n---\nand the list: all of it";
+    assert_eq!(rust_steps(&fixture, &["step", "ask", "spec"], None).0, Some(0));
+    assert_eq!(rust_steps(&fixture, &["reject", "spec", "--note", note], None).0, Some(0));
+    let (code, out) = rust_steps(&fixture, &["step", "wait", "spec"], None);
+    assert_eq!((code, out), (Some(0), format!("rejected: {note}\n")));
+    assert_eq!(rust_steps(&fixture, &["step", "gate", "--pr"], None).0, Some(1), "the PR gate still holds");
+    assert_eq!(rust_steps(&fixture, &["step", "ask", "spec"], None).0, Some(0));
+    assert_eq!(rust_steps(&fixture, &["approve", "spec", "--note", note], None).0, Some(0));
+    let (code, out) = rust_steps(&fixture, &["step", "wait", "spec"], None);
+    assert_eq!((code, out), (Some(0), format!("approved: {note}\n")));
+}
+
+#[test]
+fn step_done_keeps_hand_written_steps() {
+    for (name, steps) in [
+        ("steps-flow", "steps: [{step: spec, date: 2026-11-01}]\n"),
+        ("steps-indented", "steps:\n  - step: spec\n    date: 2026-11-01\n"),
+    ] {
+        let fixture = order_fixture(name, steps, false);
+        let (code, out) = rust_steps(&fixture, &["step", "done", "qa-plan", "--approved"], None);
+        assert_eq!(code, Some(0), "{name}: {out}");
+        let (_, shown) = rust_steps(&fixture, &["step"], None);
+        assert!(shown.contains("✓ spec") && shown.contains("✓ qa-plan"), "{name}:\n{shown}");
+        assert_eq!(rust_steps(&fixture, &["step", "gate", "--pr"], None).0, Some(1), "{name}");
+    }
+}
+
+#[test]
+fn a_note_that_reads_as_a_number_stays_text() {
+    let fixture = order_fixture("note-number", "steps: []\n", false);
+    for note in ["1e3", "0o17", "+.5"] {
+        let fixture = order_fixture(&format!("note-number-{note}"), "steps: []\n", false);
+        rust_steps(&fixture, &["approve", "spec", "--note", note], None);
+        let (_, out) = rust_steps(&fixture, &["step", "wait", "spec"], None);
+        assert_eq!(out, format!("approved: {note}\n"));
+    }
+    drop(fixture);
+}
+
+#[test]
+fn wait_with_an_infinite_timeout_does_not_panic() {
+    let fixture = order_fixture("wait-inf", "steps: []\n", false);
+    rust_steps(&fixture, &["approve", "spec"], None);
+    let (code, out) = rust_steps(&fixture, &["step", "wait", "spec", "--timeout", "inf"], None);
+    assert_eq!((code, out.as_str()), (Some(0), "approved\n"));
+}
+
+#[test]
+fn auto_ask_yes_holds_edits() {
+    let fixture = order_fixture("auto-yes", "steps: []\n", true);
+    let edit = format!(
+        "{{\"tool_name\":\"Edit\",\"cwd\":\"{0}\",\"tool_input\":{{\"file_path\":\"{0}/src/main.rs\"}}}}",
+        fixture.display()
+    );
+    let (code, out) = rust_steps(&fixture, &["step", "guard"], Some(&edit));
+    assert_eq!(code, Some(0));
+    assert!(out.contains("\"permissionDecision\": \"deny\""), "{out}");
+    assert_eq!(rust_steps(&fixture, &["step", "gate", "--pr"], None).0, Some(1));
+}
+
+#[test]
+fn a_write_on_the_next_line_is_not_a_read() {
+    let fixture = order_fixture("guard-lines", "steps: []\n", true);
+    for command in ["cat x\ntouch src/x", "cat x # look\ntouch src/x", "ls; touch src/x"] {
+        let payload = serde_json::json!({"tool_name": "Bash", "cwd": fixture, "tool_input": {"command": command}});
+        let (_, out) = rust_steps(&fixture, &["step", "guard"], Some(&payload.to_string()));
+        assert!(out.contains("\"permissionDecision\": \"deny\""), "{command:?} passed: {out}");
+    }
+    let payload = serde_json::json!({"tool_name": "Bash", "cwd": fixture, "tool_input": {"command": "cat x\nls"}});
+    assert_eq!(rust_steps(&fixture, &["step", "guard"], Some(&payload.to_string())).1, "");
+}

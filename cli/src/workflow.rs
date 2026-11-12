@@ -14,10 +14,28 @@ pub(crate) struct Definitions {
     pub(crate) workflows: IndexMap<String, WorkflowDef>,
     #[serde(default)]
     pub(crate) steps: std::collections::HashMap<String, StepDef>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "yaml11_bool")]
     pub(crate) auto_ask: Option<bool>,
     #[serde(default)]
     pub(crate) planning_paths: Option<Vec<String>>,
+}
+
+/// The definitions were written for YAML 1.1, where `yes`, `on` and `y` are true. A flag this
+/// reader refused would turn the gates off, so it reads them as YAML 1.1 did.
+fn yaml11_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Bool(flag)) => Some(flag),
+        Some(Value::String(text)) => match text.as_str() {
+            "yes" | "Yes" | "YES" | "on" | "On" | "ON" | "y" | "Y" | "true" | "True" | "TRUE" => Some(true),
+            "no" | "No" | "NO" | "off" | "Off" | "OFF" | "n" | "N" | "false" | "False" | "FALSE" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -58,7 +76,7 @@ pub(crate) struct StepDef {
     pub(crate) does: Option<String>,
     #[serde(default)]
     pub(crate) files: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "yaml11_bool")]
     pub(crate) opens_pr: Option<bool>,
 }
 

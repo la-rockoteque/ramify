@@ -110,12 +110,17 @@ fn split_shell(command: &str) -> Result<Vec<String>, ()> {
     };
     while let Some(c) = chars.next() {
         match c {
+            // A line break ends a command, as `;` does. native_guard.py read it as a blank, so
+            // `cat x` and a write on the next line passed as one read.
+            '\n' => {
+                flush(&mut current, &mut started, &mut tokens);
+                tokens.push(";".into());
+            }
             c if c.is_whitespace() => flush(&mut current, &mut started, &mut tokens),
             '#' if !started => {
-                for next in chars.by_ref() {
-                    if next == '\n' {
-                        break;
-                    }
+                // The line break stays: it ends the command.
+                while chars.peek().is_some_and(|next| *next != '\n') {
+                    chars.next();
                 }
             }
             '\'' => {
@@ -412,6 +417,8 @@ mod tests {
         let tokens = split_shell("cd /a && git status; echo 'x y'|wc").unwrap();
         assert_eq!(tokens, ["cd", "/a", "&&", "git", "status", ";", "echo", "x y", "|", "wc"]);
         assert!(split_shell("echo 'open").is_err());
+        let tokens = split_shell("cat x # read\ntouch src/x").unwrap();
+        assert_eq!(tokens, ["cat", "x", ";", "touch", "src/x"]);
     }
 
     #[test]

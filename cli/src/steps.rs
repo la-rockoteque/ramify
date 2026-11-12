@@ -5,6 +5,7 @@
 use crate::config::Config;
 use crate::workflow::{find_order, workflows_file, Definitions, OrderMeta, WorkflowDef};
 use serde_json::{json, Value as Json};
+use serde_yaml_ng::{Mapping, Value as Yaml};
 use std::path::{Component, Path, PathBuf};
 
 struct Fail(String);
@@ -328,18 +329,15 @@ fn record(context: &Context, args: &[String], na: bool) -> Result<(i32, bool), F
         )
         .into());
     }
-    let mut entry = vec![
-        ("step".to_string(), yaml_scalar(step, true)),
-        (context.date_field(), yaml_scalar(&today(), true)),
-    ];
+    let mut entry = step_entry(context, step);
     if na {
-        entry.push(("na".into(), "true".into()));
+        entry.insert(Yaml::from("na"), Yaml::Bool(true));
     }
     if let Some(note) = options.last("note").filter(|note| !note.is_empty()) {
-        entry.push((context.note_field(), yaml_scalar(&note, true)));
+        entry.insert(Yaml::from(context.note_field()), Yaml::from(note));
     }
     let mut head = Head::read(&order.path)?;
-    head.append_step(&entry);
+    head.append_step(entry);
     // An OK given in the chat answers the window's request too.
     if order.meta.ask.as_ref().is_some_and(|ask| ask.step == step) {
         head.set("ask", None);
@@ -472,16 +470,16 @@ fn ask_step(context: &Context, step: &str, named: Vec<String>) -> Result<(i32, b
     if !files.contains(&order_file) {
         files.push(order_file);
     }
-    let mut fields = vec![
-        ("step".to_string(), yaml_scalar(step, false)),
-        ("asked".to_string(), yaml_scalar(&now(), false)),
-        ("files".to_string(), flow_list(&files)),
-    ];
+    let mut fields = new_ask(step, &files);
     if context.auto_ask() {
-        fields.push(("digests".into(), flow_map(&digests(context, &order.path, &files)?)));
+        let mut map = Mapping::new();
+        for (file, digest) in digests(context, &order.path, &files)? {
+            map.insert(Yaml::from(file), Yaml::from(digest));
+        }
+        fields.insert(Yaml::from("digests"), Yaml::Mapping(map));
     }
     let mut head = Head::read(&order.path)?;
-    head.set("ask", Some(block_map("ask", &fields)));
+    head.set("ask", Some(Yaml::Mapping(fields)));
     head.write(context)?;
     println!("  {step} waits on the human — the approvals window shows {}", files.join(", "));
     Ok((0, true))
@@ -506,6 +504,7 @@ fn decide_step(context: &Context, args: &[String], approve: bool) -> Result<(i32
     gate_step(context, &order.meta, workflow, step)?;
     // The human decides the next gate whether or not the agent asked: a missing request is the
     // agent's slip, and it must never leave the human unable to answer.
+    let mut head = Head::read(&order.path)?;
     let mut fields = match order.meta.ask.as_ref().filter(|_| open_ask(&order.meta) == Some(step)) {
         Some(asked) => {
             if let Some(stored) = &asked.digests {
@@ -514,37 +513,25 @@ fn decide_step(context: &Context, args: &[String], approve: bool) -> Result<(i32
                     return Err("approval files changed; refresh the request before deciding".into());
                 }
             }
-            Head::read(&order.path)?.fields("ask")
-        }
-        None => vec![
-            ("step".to_string(), yaml_scalar(step, false)),
-            ("asked".to_string(), yaml_scalar(&now(), false)),
-            ("files".to_string(), "[]".to_string()),
-        ],
-    };
-    let mut head = Head::read(&order.path)?;
-    if approve {
-        let mut entry = vec![
-            ("step".to_string(), yaml_scalar(step, true)),
-            (context.date_field(), yaml_scalar(&today(), true)),
-        ];
-        if !note.is_empty() {
-            entry.push((context.note_field(), yaml_scalar(&note, true)));
-        }
-        head.append_step(&entry);
-        head.set("ask", None);
-    } else {
-        for (key, value) in [
-            ("decision", yaml_scalar("rejected", false)),
-            ("decided", yaml_scalar(&now(), false)),
-            ("note", yaml_scalar(&note, false)),
-        ] {
-            match fields.iter_mut().find(|(name, _)| name == key) {
-                Some(field) => field.1 = value,
-                None => fields.push((key.to_string(), value)),
+            match head.get("ask") {
+                Some(Yaml::Mapping(map)) => map,
+                _ => new_ask(step, &[]),
             }
         }
-        head.set("ask", Some(block_map("ask", &fields)));
+        None => new_ask(step, &[]),
+    };
+    if approve {
+        let mut entry = step_entry(context, step);
+        if !note.is_empty() {
+            entry.insert(Yaml::from(context.note_field()), Yaml::from(note.clone()));
+        }
+        head.append_step(entry);
+        head.set("ask", None);
+    } else {
+        fields.insert(Yaml::from("decision"), Yaml::from("rejected"));
+        fields.insert(Yaml::from("decided"), Yaml::from(now()));
+        fields.insert(Yaml::from("note"), Yaml::from(note.clone()));
+        head.set("ask", Some(Yaml::Mapping(fields)));
     }
     head.write(context)?;
     let shown = if note.is_empty() { String::new() } else { format!(": {note}") };
@@ -565,7 +552,10 @@ fn wait(context: &Context, args: &[String]) -> Result<(i32, bool), Fail> {
         None => 86400.0,
     };
     let poll: f64 = std::env::var("WF_POLL").ok().and_then(|text| text.parse().ok()).unwrap_or(2.0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout.max(0.0));
+    // `inf` or a huge timeout waits for ever, as it did in Python.
+    let deadline = std::time::Duration::try_from_secs_f64(timeout.max(0.0))
+        .ok()
+        .and_then(|timeout| std::time::Instant::now().checked_add(timeout));
     loop {
         let (order, _) = context.current()?;
         if let Some(entry) = order.meta.steps.iter().find(|entry| entry.step == step) {
@@ -586,7 +576,7 @@ fn wait(context: &Context, args: &[String]) -> Result<(i32, bool), Fail> {
                 .into())
             }
         }
-        if std::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             println!("no decision on {step} yet");
             return Ok((1, false));
         }
@@ -788,6 +778,8 @@ struct Head {
     path: PathBuf,
     /// Each top-level key with its lines, the key line first.
     keys: Vec<(String, Vec<String>)>,
+    /// The frontmatter, parsed: a changed key is rewritten from it, the others stay as written.
+    meta: Mapping,
     body: String,
 }
 
@@ -795,9 +787,15 @@ impl Head {
     fn read(path: &Path) -> Result<Self, Fail> {
         let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let (head, body) = split_order(&text, path)?;
+        let meta = match serde_yaml_ng::from_str::<Yaml>(&head) {
+            Ok(Yaml::Mapping(map)) => map,
+            Ok(Yaml::Null) => Mapping::new(),
+            Ok(_) => return Err(format!("{}: the frontmatter is not a map", path.display()).into()),
+            Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+        };
         let mut keys: Vec<(String, Vec<String>)> = Vec::new();
         for line in head.lines() {
-            let top = !line.starts_with(' ') && !line.starts_with('-') && !line.is_empty();
+            let top = !line.starts_with([' ', '\t', '-', '#']) && !line.is_empty();
             match (top, keys.last_mut()) {
                 (false, Some((_, lines))) => lines.push(line.to_string()),
                 _ => {
@@ -806,45 +804,48 @@ impl Head {
                 }
             }
         }
-        Ok(Head { path: path.to_path_buf(), keys, body })
-    }
-
-    /// The `key: value` pairs of a block map, as written.
-    fn fields(&self, key: &str) -> Vec<(String, String)> {
-        let Some((_, lines)) = self.keys.iter().find(|(name, _)| name == key) else {
-            return Vec::new();
-        };
-        lines[1..]
-            .iter()
-            .filter_map(|line| {
-                let (name, value) = line.trim_start().split_once(": ")?;
-                Some((name.to_string(), value.to_string()))
-            })
-            .collect()
-    }
-
-    fn set(&mut self, key: &str, lines: Option<Vec<String>>) {
-        let position = self.keys.iter().position(|(name, _)| name == key);
-        match (position, lines) {
-            (Some(index), Some(lines)) => self.keys[index].1 = lines,
-            (Some(index), None) => {
-                self.keys.remove(index);
+        // A key the line scan cannot find is written in a way it does not know: refuse rather
+        // than write a record that no longer parses.
+        for key in meta.keys() {
+            let name = key.as_str().unwrap_or("");
+            if !keys.iter().any(|(found, _)| found == name) {
+                return Err(format!("{}: cannot edit the frontmatter key {name:?} in place", path.display()).into());
             }
-            (None, Some(lines)) => self.keys.push((key.to_string(), lines)),
-            (None, None) => {}
+        }
+        Ok(Head { path: path.to_path_buf(), keys, meta, body })
+    }
+
+    fn get(&self, key: &str) -> Option<Yaml> {
+        self.meta.get(key).cloned()
+    }
+
+    fn set(&mut self, key: &str, value: Option<Yaml>) {
+        let position = self.keys.iter().position(|(name, _)| name == key);
+        match value {
+            Some(value) => {
+                let lines = emit_key(key, &value);
+                self.meta.insert(Yaml::from(key), value);
+                match position {
+                    Some(index) => self.keys[index].1 = lines,
+                    None => self.keys.push((key.to_string(), lines)),
+                }
+            }
+            None => {
+                self.meta.remove(key);
+                if let Some(index) = position {
+                    self.keys.remove(index);
+                }
+            }
         }
     }
 
-    fn append_step(&mut self, entry: &[(String, String)]) {
-        let line = format!(
-            "- {{{}}}",
-            entry.iter().map(|(key, value)| format!("{key}: {value}")).collect::<Vec<_>>().join(", ")
-        );
-        match self.keys.iter_mut().find(|(name, _)| name == "steps") {
-            Some((_, lines)) if lines.len() == 1 => *lines = vec!["steps:".into(), line],
-            Some((_, lines)) => lines.push(line),
-            None => self.keys.push(("steps".into(), vec!["steps:".into(), line])),
-        }
+    fn append_step(&mut self, entry: Mapping) {
+        let mut steps = match self.get("steps") {
+            Some(Yaml::Sequence(steps)) => steps,
+            _ => Vec::new(),
+        };
+        steps.push(Yaml::Mapping(entry));
+        self.set("steps", Some(Yaml::Sequence(steps)));
     }
 
     fn write(&self, context: &Context) -> Result<(), Fail> {
@@ -867,30 +868,81 @@ impl Head {
     }
 }
 
-fn block_map(key: &str, fields: &[(String, String)]) -> Vec<String> {
-    let mut lines = vec![format!("{key}:")];
-    lines.extend(fields.iter().map(|(name, value)| format!("  {name}: {value}")));
-    lines
+fn step_entry(context: &Context, step: &str) -> Mapping {
+    let mut entry = Mapping::new();
+    entry.insert(Yaml::from("step"), Yaml::from(step));
+    entry.insert(Yaml::from(context.date_field()), Yaml::from(today()));
+    entry
 }
 
-fn flow_list(items: &[String]) -> String {
-    format!("[{}]", items.iter().map(|item| yaml_scalar(item, true)).collect::<Vec<_>>().join(", "))
+fn new_ask(step: &str, files: &[String]) -> Mapping {
+    let mut ask = Mapping::new();
+    ask.insert(Yaml::from("step"), Yaml::from(step));
+    ask.insert(Yaml::from("asked"), Yaml::from(now()));
+    ask.insert(
+        Yaml::from("files"),
+        Yaml::Sequence(files.iter().map(|file| Yaml::from(file.as_str())).collect()),
+    );
+    ask
 }
 
-fn flow_map(items: &[(String, String)]) -> String {
-    format!(
-        "{{{}}}",
-        items
-            .iter()
-            .map(|(key, value)| format!("{}: {}", yaml_scalar(key, true), yaml_scalar(value, true)))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+fn is_scalar(value: &Yaml) -> bool {
+    !matches!(value, Yaml::Sequence(_) | Yaml::Mapping(_) | Yaml::Tagged(_))
+}
+
+/// One top-level key the way PyYAML writes it with `default_flow_style=None`: a collection of
+/// scalars on one flow line, any other collection as a block.
+fn emit_key(key: &str, value: &Yaml) -> Vec<String> {
+    match value {
+        Yaml::Sequence(items) if !items.iter().all(is_scalar) => {
+            let mut lines = vec![format!("{key}:")];
+            lines.extend(items.iter().map(|item| format!("- {}", emit_flow(item))));
+            lines
+        }
+        Yaml::Mapping(map) if !map.values().all(is_scalar) => {
+            let mut lines = vec![format!("{key}:")];
+            lines.extend(map.iter().map(|(name, item)| format!("  {}: {}", emit_flow(name), emit_inline(item))));
+            lines
+        }
+        _ => vec![format!("{key}: {}", emit_inline(value))],
+    }
+}
+
+/// A value after `key: ` in block context.
+fn emit_inline(value: &Yaml) -> String {
+    match value {
+        Yaml::String(text) => yaml_scalar(text, false),
+        other => emit_flow(other),
+    }
+}
+
+/// A value inside `[…]` or `{…}`.
+fn emit_flow(value: &Yaml) -> String {
+    match value {
+        Yaml::Null => "null".into(),
+        Yaml::Bool(flag) => flag.to_string(),
+        Yaml::Number(number) => number.to_string(),
+        Yaml::String(text) => yaml_scalar(text, true),
+        Yaml::Sequence(items) => format!("[{}]", items.iter().map(emit_flow).collect::<Vec<_>>().join(", ")),
+        Yaml::Mapping(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(name, item)| format!("{}: {}", emit_flow(name), emit_flow(item)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Yaml::Tagged(tagged) => emit_flow(&tagged.value),
+    }
 }
 
 /// A string as PyYAML's safe dumper writes it: plain when it reads back as the same string,
 /// else single-quoted. `flow` is true inside `[…]` or `{…}`, where `,[]{}` need quotes too.
+/// Text with a line break or a control character is double-quoted with JSON escapes, so it
+/// stays on one line: a note from the approvals window can hold `---` on a line of its own.
 fn yaml_scalar(text: &str, flow: bool) -> String {
+    if text.chars().any(|c| c.is_control() || c == '\u{feff}' || c == '\u{2028}' || c == '\u{2029}') {
+        return serde_json::to_string(text).unwrap_or_else(|_| "''".into());
+    }
     if plain(text, flow) {
         text.to_string()
     } else {
@@ -935,6 +987,10 @@ fn implicit(text: &str) -> bool {
         "on", "On", "ON", "off", "Off", "OFF", "y", "Y", "n", "N", "null", "Null", "NULL", "~", "<<", "=",
     ];
     if WORDS.contains(&text) {
+        return true;
+    }
+    // This CLI reads YAML 1.2: `1e3` and `0o17` are numbers there and not in YAML 1.1.
+    if !matches!(serde_yaml_ng::from_str::<Yaml>(text), Ok(Yaml::String(_))) {
         return true;
     }
     let patterns = [
