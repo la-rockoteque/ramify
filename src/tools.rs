@@ -1,5 +1,5 @@
 use crate::providers::Providers;
-use crate::sandbox::{scrub, Sandbox};
+use crate::sandbox::{load_extras, scrub, Paths, Sandbox, DENIED_HINT};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -289,15 +289,38 @@ the human reads the command and decides whether it runs.",
             .root
             .canonicalize()
             .map_err(|e| format!("could not resolve {}: {e}", self.root.display()))?;
+        let home = self.home();
+        let config = self.config_dir();
+        let mut paths = Paths::new(&root, &temp, home.as_deref());
+        paths.extras = load_extras(&config, paths.home.as_deref())?;
+        paths.config = Some(config);
         let mut cmd = self
             .sandbox
-            .command(&root, &temp, self.home().as_deref(), command)
+            .command(&paths, command)
             .ok_or("no sandbox on this machine")?;
         cmd.current_dir(&root)
             .env_clear()
             .envs(scrub(&self.env, &self.key_envs))
             .env("TMPDIR", &temp);
-        run_with_timeout(cmd, timeout)
+        let mut output = run_with_timeout(cmd, timeout)?;
+        if output.contains("Operation not permitted") {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(DENIED_HINT);
+        }
+        Ok(output)
+    }
+
+    /// Ram Code's configuration folder: `RAM_CODE_CONFIG_DIR`, else `~/.config/ram-code`.
+    fn config_dir(&self) -> PathBuf {
+        let get = |key: &str| {
+            self.env
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        Providers::default_dir(&get)
     }
 
     /// Hand the command to the human through `ramify run`, and wait for the decision.

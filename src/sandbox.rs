@@ -31,20 +31,12 @@ impl Sandbox {
         Sandbox::None
     }
 
-    /// `sh -c command` inside the sandbox. Writes go only to `root` and `temp`. The secret
-    /// files under `home` cannot be read.
-    pub fn command(
-        &self,
-        root: &Path,
-        temp: &Path,
-        home: Option<&Path>,
-        command: &str,
-    ) -> Option<Command> {
-        let secrets = secret_paths(home);
+    /// `sh -c command` inside the sandbox described by `paths`.
+    pub fn command(&self, paths: &Paths, command: &str) -> Option<Command> {
         match self {
             Sandbox::Seatbelt(program) => {
                 let mut cmd = Command::new(program);
-                cmd.arg("-p").arg(seatbelt_profile(root, temp, &secrets));
+                cmd.arg("-p").arg(seatbelt_profile_for(paths));
                 cmd.args(["sh", "-c", command]);
                 Some(cmd)
             }
@@ -54,9 +46,9 @@ impl Sandbox {
                 let exists = |path: &Path| -> Option<bool> {
                     std::fs::symlink_metadata(path).ok().map(|meta| meta.is_dir())
                 };
-                let (dirs, files) = linux_hidden(&secrets, uid, &exists);
+                let (dirs, files) = linux_hidden(&paths.secrets, uid, &exists);
                 let mut cmd = Command::new(program);
-                cmd.args(bwrap_args(root, temp, &dirs, &files, command));
+                cmd.args(bwrap_args(&paths.root, &paths.temp, &dirs, &files, command));
                 Some(cmd)
             }
             Sandbox::None => None,
@@ -179,24 +171,281 @@ pub fn secret_paths(home: Option<&Path>) -> Vec<PathBuf> {
     SECRETS.iter().map(|name| home.join(name)).collect()
 }
 
-/// Reads anywhere but the secret paths. Writes only under `root`, `temp` and a few devices,
-/// and never to Git metadata, which Git runs later outside the sandbox (hooks, fsmonitor).
-/// No network, Unix sockets included: Docker or an ssh-agent would be a way out. No terminal
-/// ioctl, so a command cannot type into the TUI. No way to start a program outside the sandbox
-/// through Launch Services, Apple events or launchd. Seatbelt applies the last matching rule.
-pub fn seatbelt_profile(root: &Path, temp: &Path, secrets: &[PathBuf]) -> String {
-    let hidden = if secrets.is_empty() {
-        String::new()
-    } else {
-        let rules: Vec<String> = secrets
-            .iter()
-            .map(|path| format!("  (subpath \"{}\")", quote(path)))
-            .collect();
-        format!("(deny file-read*\n{})\n", rules.join("\n"))
+/// The paths one sandboxed command may use. Each path is a real path, because Seatbelt
+/// matches real paths (`/var` is `/private/var`).
+#[derive(Debug, Clone, Default)]
+pub struct Paths {
+    /// The worktree.
+    pub root: PathBuf,
+    /// The task's temp folder, which `TMPDIR` names.
+    pub temp: PathBuf,
+    /// The home folder, for the toolchains and Git settings in it.
+    pub home: Option<PathBuf>,
+    /// Credential paths that no rule can open.
+    pub secrets: Vec<PathBuf>,
+    /// Ram Code's configuration folder. A command may not write it, or it could widen its own
+    /// sandbox through `sandbox.json`.
+    pub config: Option<PathBuf>,
+    /// What `sandbox.json` adds.
+    pub extras: Extras,
+}
+
+impl Paths {
+    pub fn new(root: &Path, temp: &Path, home: Option<&Path>) -> Self {
+        let home = home.map(real);
+        Paths {
+            root: real(root),
+            temp: real(temp),
+            secrets: secret_paths(home.as_deref()),
+            home,
+            config: None,
+            extras: Extras::default(),
+        }
+    }
+}
+
+/// The real path when the path exists, else the path as given.
+fn real(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Paths the user adds in `~/.config/ram-code/sandbox.json`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Extras {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+pub const SANDBOX_FILE: &str = "sandbox.json";
+
+/// Read `sandbox.json` from Ram Code's configuration folder. A missing file adds nothing. A
+/// file that is not valid is an error, so a command never runs with a sandbox the user did not
+/// mean. Ram Code reads no sandbox file from the worktree.
+pub fn load_extras(config: &Path, home: Option<&Path>) -> Result<Extras, String> {
+    let path = config.join(SANDBOX_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Extras::default()),
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
     };
+    let shown = path.display();
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{shown} is not valid JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{shown} must hold a JSON object with \"read\" and \"write\""))?;
+    let mut extras = Extras::default();
+    for (key, entries) in object {
+        let list = match key.as_str() {
+            "read" => &mut extras.read,
+            "write" => &mut extras.write,
+            other => return Err(format!("{shown} has an unknown key \"{other}\"; use read or write")),
+        };
+        let items = entries
+            .as_array()
+            .ok_or_else(|| format!("{shown}: \"{key}\" must be a list of paths"))?;
+        for item in items {
+            let raw = item
+                .as_str()
+                .ok_or_else(|| format!("{shown}: \"{key}\" holds a value that is not a path"))?;
+            list.push(expand(raw, home).ok_or_else(|| {
+                format!("{shown}: {raw} must be an absolute path or start with ~/")
+            })?);
+        }
+    }
+    Ok(extras)
+}
+
+fn expand(raw: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => home?.join(rest),
+        None if Path::new(raw).is_absolute() => PathBuf::from(raw),
+        None => return None,
+    };
+    Some(real(&path))
+}
+
+/// The Git folders of a linked worktree. Its `.git` is a file that names a folder under the
+/// main repository's Git folder, which holds the objects and refs that Git reads.
+fn git_folders(root: &Path) -> Vec<PathBuf> {
+    let dot_git = root.join(".git");
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return Vec::new();
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return Vec::new();
+    };
+    let gitdir = root.join(target.trim());
+    let gitdir = real(&gitdir);
+    let mut folders = vec![gitdir.clone()];
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        folders.push(real(&gitdir.join(common.trim())));
+    }
+    folders
+}
+
+/// The per-user temp and cache folders. `ar`, `xcrun` and `clang` use them and ignore `TMPDIR`.
+#[cfg(target_os = "macos")]
+fn user_folders() -> (Option<PathBuf>, Option<PathBuf>) {
+    fn confstr(name: libc::c_int) -> Option<PathBuf> {
+        let mut buffer = vec![0u8; 1024];
+        // SAFETY: the buffer is valid for its length, and confstr writes at most that many bytes.
+        let length = unsafe { libc::confstr(name, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if length == 0 || length > buffer.len() {
+            return None;
+        }
+        buffer.truncate(length - 1);
+        let path = PathBuf::from(String::from_utf8(buffer).ok()?);
+        Some(real(&path))
+    }
+    (
+        confstr(libc::_CS_DARWIN_USER_TEMP_DIR),
+        confstr(libc::_CS_DARWIN_USER_CACHE_DIR),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn user_folders() -> (Option<PathBuf>, Option<PathBuf>) {
+    (None, None)
+}
+
+/// System folders that hold programs, libraries, compilers and their settings.
+const SYSTEM_READS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/System",
+    "/Library",
+    "/private/etc",
+    "/private/var/db/timezone",
+    "/private/var/select",
+    "/dev",
+    "/opt/homebrew",
+    "/Applications/Xcode.app",
+];
+
+/// The links and folders on the way to the read roots. A process reads them to follow `/var`,
+/// `/etc` and `/tmp` to `/private`.
+const SYSTEM_LINKS: &[&str] = &["/", "/private", "/private/var", "/var", "/etc", "/tmp"];
+
+/// Toolchains and their caches in the home folder. Secret files in them stay denied.
+const HOME_READS: &[&str] = &[
+    ".cargo",
+    ".rustup",
+    ".asdf",
+    ".nvm",
+    ".pyenv",
+    ".volta",
+    ".local/share/mise",
+    ".npm",
+    ".config/git",
+];
+
+/// Services a build needs: user and group lookups, logging, notifications and certificates.
+/// Launch Services is not here.
+const SERVICES: &[&str] = &[
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.DirectoryService.libinfo_v1",
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.diagnosticd",
+    "com.apple.system.notification_center",
+    "com.apple.trustd.agent",
+    "com.apple.SecurityServer",
+    "com.apple.bsd.dirhelper",
+];
+
+fn subpath(path: &Path) -> String {
+    format!("  (subpath \"{}\")", quote(path))
+}
+
+fn literal(path: &str) -> String {
+    format!("  (literal \"{}\")", quote(Path::new(path)))
+}
+
+fn regex_of(path: &Path) -> String {
+    regex::escape(&path.display().to_string()).replace('"', "\\\"")
+}
+
+/// The profile for `root` and `temp`, with no home folder and no `sandbox.json`.
+pub fn seatbelt_profile(root: &Path, temp: &Path, secrets: &[PathBuf]) -> String {
+    let mut paths = Paths::new(root, temp, None);
+    paths.secrets = secrets.to_vec();
+    seatbelt_profile_for(&paths)
+}
+
+/// Deny by default, then allow what builds, tests and Git need. The denials from the earlier
+/// sandbox come last, because Seatbelt applies the last rule that matches: secrets stay
+/// unreadable, Git metadata and the configuration folder stay unwritable, and no network,
+/// terminal ioctl, Apple event or Launch Services lookup gets through.
+pub fn seatbelt_profile_for(paths: &Paths) -> String {
+    let (user_temp, user_cache) = user_folders();
+
+    let mut reads: Vec<String> = SYSTEM_LINKS.iter().map(|p| literal(p)).collect();
+    reads.extend(
+        SYSTEM_READS
+            .iter()
+            .map(|p| subpath(Path::new(p))),
+    );
+    reads.push(subpath(&paths.root));
+    reads.push(subpath(&paths.temp));
+    reads.extend(git_folders(&paths.root).iter().map(|p| subpath(p)));
+    reads.extend(user_temp.iter().chain(user_cache.iter()).map(|p| subpath(p)));
+    if let Some(home) = &paths.home {
+        reads.extend(HOME_READS.iter().map(|p| subpath(&home.join(p))));
+        reads.push(format!("  (literal \"{}\")", quote(&home.join(".tool-versions"))));
+        // `~/.gitconfig` and the files it includes, such as `~/.gitconfig-github`.
+        reads.push(format!("  (regex #\"^{}/\\.gitconfig\")", regex_of(home)));
+    }
+    reads.extend(paths.extras.read.iter().map(|p| subpath(p)));
+
+    let mut writes = vec![subpath(&paths.root), subpath(&paths.temp)];
+    // `ar` makes its temporary file directly in the user temp folder. Its subfolders, which
+    // other programs own, stay unwritable.
+    if let Some(dir) = &user_temp {
+        writes.push(format!("  (regex #\"^{}/[^/]+$\")", regex_of(dir)));
+    }
+    if let Some(dir) = &user_cache {
+        writes.push(subpath(&dir.join("clang")));
+    }
+    writes.extend(
+        ["/dev/null", "/dev/zero", "/dev/dtracehelper"]
+            .iter()
+            .map(|p| literal(p)),
+    );
+    writes.push("  (regex #\"^/dev/fd/\")".to_string());
+    writes.extend(paths.extras.write.iter().map(|p| subpath(p)));
+
+    let services: Vec<String> = SERVICES
+        .iter()
+        .map(|name| format!("  (global-name \"{name}\")"))
+        .collect();
+
+    let mut denials = String::new();
+    if !paths.secrets.is_empty() {
+        let rules: Vec<String> = paths.secrets.iter().map(|p| subpath(p)).collect();
+        denials.push_str(&format!("(deny file-read*\n{})\n", rules.join("\n")));
+        denials.push_str(&format!("(deny file-write*\n{})\n", rules.join("\n")));
+    }
+    if let Some(config) = &paths.config {
+        denials.push_str(&format!("(deny file-write*\n{})\n", subpath(config)));
+    }
+
     format!(
         r#"(version 1)
-(allow default)
+(deny default)
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+(allow sysctl-read user-preference-read)
+(allow file-read-metadata)
+(allow ipc-posix-sem ipc-posix-shm)
+(allow mach-lookup
+{services})
+(allow file-read*
+{reads})
+(allow file-write*
+{writes})
 (deny appleevent-send)
 (deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
 (deny process-exec
@@ -204,22 +453,19 @@ pub fn seatbelt_profile(root: &Path, temp: &Path, secrets: &[PathBuf]) -> String
   (literal "/usr/bin/osascript")
   (literal "/usr/bin/osacompile")
   (literal "/bin/launchctl"))
-{hidden}(deny network*)
+{denials}(deny network*)
 (deny file-ioctl (regex #"^/dev/tty"))
-(deny file-write*)
-(allow file-write*
-  (subpath "{root}")
-  (subpath "{temp}")
-  (literal "/dev/null")
-  (literal "/dev/zero")
-  (literal "/dev/dtracehelper")
-  (regex #"^/dev/fd/"))
 (deny file-write* (regex #"/\.git(/|$)"))
 "#,
-        root = quote(root),
-        temp = quote(temp),
+        services = services.join("\n"),
+        reads = reads.join("\n"),
+        writes = writes.join("\n"),
     )
 }
+
+/// The line added to a command's output when the sandbox may have denied it.
+pub const DENIED_HINT: &str = "[the sandbox may have denied this. For a lasting need, add the path to \
+~/.config/ram-code/sandbox.json; for a one-time need, run the command with outside_sandbox and a reason]";
 
 /// Names that hold a credential, or a path or socket that leads to one.
 const SECRET_NAMES: &[&str] = &[
