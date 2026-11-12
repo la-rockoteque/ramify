@@ -1,0 +1,108 @@
+{
+  "description": "ramify's hooks for Ram Code: the same dispatcher as Claude Code and Codex, with Ram Code's tool names.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" behind",
+            "timeout": 25
+          },
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" pr-gate",
+            "timeout": 25
+          },
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" decide-guard",
+            "timeout": 25
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" human-gate",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" push",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" worktree-add",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" auto-gate",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" session-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" user-prompt-submit",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RAMIFY_AGENT=ram \"${CLAUDE_PLUGIN_ROOT}/hooks/ramify-hook\" session-end",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | allow | session-start | user-prompt-submit | stop | session-end
+# Claude Code and Codex hook dispatcher: ramify-hook worktree-add | push | behind | pr-gate | allow | session-start | user-prompt-submit | workflow-pre | workflow-post | stop | session-end
 #
 # Installed as a plugin, these fire in every repo. Each one exits 0 silently unless the checkout
 # has a ramify config, and none of them ever fails a turn.
@@ -520,7 +520,7 @@ set_state() { # working | idle — only for a session that has a record
 # The title: `<slug> · <name>` in a linked worktree, `<name>` in the primary checkout. Claude
 # Code applies it on startup, resume and fork, and a title the human set wins.
 session_title() { # root, name
-  [ "${RAMIFY_AGENT:-claude}" = codex ] && return 0
+  case "${RAMIFY_AGENT:-claude}" in codex|ram) return 0 ;; esac
   case "$(field source)" in startup|resume|fork) ;; *) return 0 ;; esac
   [ -z "$(field session_title)" ] && configured "$1" || return 0
   if [ "$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" != \
@@ -602,6 +602,9 @@ case "${1:-}" in
   session-start) on_session_start ;;
   stop) on_stop ;;
   user-prompt-submit) set_state working ;;
+  # PreWorkflow and PostWorkflow for Claude Code and Codex, from Ram Code's hook files.
+  workflow-pre) RAMIFY_ROOT= "$RAMIFY" hooks bridge pre <<<"$INPUT" ;;
+  workflow-post) RAMIFY_ROOT= "$RAMIFY" hooks bridge post <<<"$INPUT" ;;
   session-end) on_session_end ;;
 esac
 exit 0

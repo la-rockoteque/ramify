@@ -1,3 +1,5 @@
+use crate::hooked::{absorb, Hooked};
+use crate::hooks::Outcome;
 use crate::tools::Tools;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -55,6 +57,8 @@ pub enum AgentEvent {
     ToolCall { name: String, input: String },
     ToolResult(String),
     Error(String),
+    /// A hook blocked, denied, failed or sent a message: one transcript line.
+    Hook(String),
 }
 
 pub trait Llm: Send + Sync {
@@ -139,11 +143,47 @@ pub fn run_turn(
     task: &str,
     on_event: &mut dyn FnMut(AgentEvent),
 ) -> Result<(String, Vec<Value>), String> {
+    run_turn_hooked(llm, root, history, task, &Hooked::none(root), on_event)
+}
+
+/// A Stop hook can send the model back to work this many times in a row, then the task ends.
+const MAX_STOP_BLOCKS: usize = 3;
+
+fn notes(outcome: &Outcome, on_event: &mut dyn FnMut(AgentEvent)) {
+    for note in &outcome.notes {
+        on_event(AgentEvent::Hook(note.clone()));
+    }
+}
+
+/// `run_turn`, with the session's hooks around the prompt, each tool call and the stop.
+pub fn run_turn_hooked(
+    llm: &dyn Llm,
+    root: &Path,
+    history: &[Value],
+    task: &str,
+    hooks: &Hooked,
+    on_event: &mut dyn FnMut(AgentEvent),
+) -> Result<(String, Vec<Value>), String> {
     let tools = Tools::new(root);
     let definitions = Tools::definitions();
     let mut messages: Vec<Value> = history.to_vec();
-    messages.push(json!({"role": "user", "content": task}));
+
+    let submitted = hooks.fire("UserPromptSubmit", "", json!({"prompt": task}));
+    notes(&submitted, on_event);
+    if let Some(reason) = submitted.block.or(submitted.stop) {
+        on_event(AgentEvent::Hook(format!("the message was not sent: {reason}")));
+        return Ok((String::new(), messages));
+    }
+    let mut context: Vec<String> = hooks.start_context.clone();
+    context.extend(submitted.contexts);
+    let content = if context.is_empty() {
+        task.to_string()
+    } else {
+        format!("{}\n\n{task}", context.join("\n\n"))
+    };
+    messages.push(json!({"role": "user", "content": content}));
     let mut answer = String::new();
+    let mut stop_blocks = 0;
 
     for _ in 0..MAX_TURNS {
         let request = json!({
@@ -170,6 +210,7 @@ pub fn run_turn(
 
         let mut assistant_blocks = Vec::new();
         let mut tool_results = Vec::new();
+        let mut ended: Option<String> = None;
 
         for block in content {
             match block.get("type").and_then(Value::as_str) {
@@ -195,9 +236,10 @@ pub fn run_turn(
                         name: name.clone(),
                         input: input.to_string(),
                     });
-                    let result = match tools.call(&name, &input) {
-                        Ok(output) => output,
-                        Err(error) => format!("error: {error}"),
+                    let result = if ended.is_some() {
+                        "error: the task was stopped by a hook".to_string()
+                    } else {
+                        call_tool(&tools, hooks, &name, &input, &mut ended, on_event)
                     };
                     on_event(AgentEvent::ToolResult(result.clone()));
                     assistant_blocks.push(block.clone());
@@ -211,9 +253,27 @@ pub fn run_turn(
             }
         }
 
+        if let Some(reason) = ended {
+            on_event(AgentEvent::Hook(format!("the task was stopped: {reason}")));
+            messages.push(json!({"role": "assistant", "content": assistant_blocks}));
+            if !tool_results.is_empty() {
+                messages.push(json!({"role": "user", "content": tool_results}));
+            }
+            return Ok((answer.trim().to_string(), messages));
+        }
+
         if tool_results.is_empty() {
             messages.push(json!({"role": "assistant", "content": content.clone()}));
-            return Ok((answer.trim().to_string(), messages));
+            let stopped = hooks.fire("Stop", "", json!({"stop_hook_active": stop_blocks > 0}));
+            notes(&stopped, on_event);
+            match stopped.block {
+                Some(reason) if stopped.stop.is_none() && stop_blocks < MAX_STOP_BLOCKS => {
+                    stop_blocks += 1;
+                    messages.push(json!({"role": "user", "content": reason}));
+                    continue;
+                }
+                _ => return Ok((answer.trim().to_string(), messages)),
+            }
         }
 
         messages.push(json!({"role": "assistant", "content": assistant_blocks}));
@@ -221,6 +281,76 @@ pub fn run_turn(
     }
 
     Err(format!("the task did not finish within {MAX_TURNS} turns"))
+}
+
+/// One tool call between its PreToolUse/PreWorkflow and PostToolUse/PostWorkflow hooks.
+fn call_tool(
+    tools: &Tools,
+    hooks: &Hooked,
+    name: &str,
+    input: &Value,
+    ended: &mut Option<String>,
+    on_event: &mut dyn FnMut(AgentEvent),
+) -> String {
+    let actions = hooks.actions(name, input);
+    let mut before = hooks.fire(
+        "PreToolUse",
+        name,
+        json!({"tool_name": name, "tool_input": input}),
+    );
+    for found in &actions {
+        let action = found["action"].as_str().unwrap_or("");
+        absorb(
+            &mut before,
+            hooks.fire(
+                "PreWorkflow",
+                action,
+                json!({"action": action, "tool_name": name, "tool_input": input, "details": found["details"]}),
+            ),
+        );
+    }
+    notes(&before, on_event);
+    if let Some(reason) = before.stop {
+        *ended = Some(reason);
+    }
+    if let Some(reason) = before.deny {
+        return format!("blocked by a hook: {reason}");
+    }
+    let mut result = match tools.call(name, input) {
+        Ok(output) => output,
+        Err(error) => format!("error: {error}"),
+    };
+    let mut after = hooks.fire(
+        "PostToolUse",
+        name,
+        json!({"tool_name": name, "tool_input": input, "tool_response": result}),
+    );
+    let succeeded = result.strip_prefix("exit ").map(|rest| rest.starts_with("0\n") || rest == "0");
+    for found in &actions {
+        let action = found["action"].as_str().unwrap_or("");
+        absorb(
+            &mut after,
+            hooks.fire(
+                "PostWorkflow",
+                action,
+                json!({
+                    "action": action, "tool_name": name, "tool_input": input,
+                    "details": found["details"], "tool_response": result, "succeeded": succeeded,
+                }),
+            ),
+        );
+    }
+    notes(&after, on_event);
+    for context in after.contexts {
+        result.push_str(&format!("\n\n{context}"));
+    }
+    if let Some(reason) = after.block {
+        result.push_str(&format!("\n\n{reason}"));
+    }
+    if let Some(reason) = after.stop {
+        *ended = Some(reason);
+    }
+    result
 }
 
 fn shorten(text: &str, limit: usize) -> String {

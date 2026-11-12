@@ -60,8 +60,20 @@ hooks/codex.json
 Cargo.toml
 Cargo.lock
 .ramify/work/ram-hooks/**
+tests/qa_plan.rs
+.ramify/work/zsh-prompt/**
+cli/tests/prompt.rs
+shell/**
 !cli/tests/parity.rs
 !cli/tests/reference/**
 !workflows.yml
 !skills/**
 ```
+
+Deviations, added during the build:
+
+- `tests/qa_plan.rs`: Ram Code now runs ramify's hooks found next to its binary. The TUI test
+  sets `RAMIFY_HOME` to its temp folder so it runs no hook.
+- `.ramify/work/zsh-prompt/**`, `cli/tests/prompt.rs`, `shell/**`: these come from
+  `feat/zsh-prompt` (#52), which this branch is stacked on. The check compares with
+  `origin/main`, so they show until #52 merges.

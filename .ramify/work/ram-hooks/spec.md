@@ -96,7 +96,7 @@ for it.
     Ram Code's tool names:
     - PreToolUse `run_command`: `behind`, `pr-gate`, `decide-guard`.
     - PreToolUse `*`: `human-gate`.
-    - PostToolUse `run_command`: `push`, `worktree-add`, `auto-gate`.
+    - PostToolUse `run_command`: `push`, `worktree-add`. PostToolUse `*`: `auto-gate`, as Codex has it.
     - SessionStart, UserPromptSubmit, Stop, SessionEnd: as in `hooks/codex.json`.
 
     The `allow` hook is left out: Ram Code has no permission prompt to skip.
