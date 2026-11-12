@@ -19,6 +19,6 @@
 | Q15 | pass | `denied_command_gets_the_hint` |
 | Q16 | pass after a fix | `audit.md`: the Keychain daemon was reachable. Fixed in `66e148d`, test `keychain_is_out_of_reach`. |
 | Q17 | pass | `audit.md` |
-| Q18 | waiting on the human | Needs a provider key. |
+| Q18 | pass | The human ran the case live and reported it passed in the chat on 2026-11-12. |
 
-Yield: 18 cases. 17 ran and passed, 0 failed. The audit fixed 1 gap. Q18 waits on a live run.
+Yield: 18 cases. 18 ran and passed, 0 failed. The audit fixed 1 gap.

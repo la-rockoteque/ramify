@@ -8,6 +8,7 @@ steps:
 - {step: spec, date: '2026-11-12'}
 - {step: qa-plan, date: '2026-11-12'}
 - {step: build, date: '2026-11-12'}
+- {step: audit, date: '2026-11-12'}
 ---
 
 # Ram Code deny-by-default sandbox
