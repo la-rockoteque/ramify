@@ -3,7 +3,7 @@
 | AC | Verdict | Code | Test |
 |---|---|---|---|
 | AC1 | met | `src/sandbox.rs` `seatbelt_profile_for` starts with `(deny default)` | `profile_starts_with_deny_default`, `unlisted_operation_fails` |
-| AC2 | met | `SYSTEM_READS`, `HOME_READS`, `SERVICES`, the per-user temp and clang cache writes | `toolchains_work_in_the_sandbox`, `c_build_script_works_in_the_sandbox`, `git_works_in_the_sandbox`, `common_tools_work_in_the_sandbox` |
+| AC2 | met | `SYSTEM_READS`, `HOME_READS`, `HOME_FILES`, `SERVICES`, `ar`'s temp name in the per-user temp folder, a per-task clang module cache | `toolchains_work_in_the_sandbox`, `c_build_script_works_in_the_sandbox`, `git_works_in_the_sandbox`, `common_tools_work_in_the_sandbox` |
 | AC3 | met | read roots only | `reads_outside_the_roots_fail` |
 | AC4 | met | the #62 denials come last | `tests/qa_sandbox.rs` passes with no change against `main` |
 | AC5 | met | `(allow signal (target same-sandbox))` | `cannot_signal_outside` |
@@ -30,7 +30,7 @@ Every `allow` is narrow, with one exception, which is now fixed (`66e148d`).
 - `/Library` is the system folder, not `~/Library`.
 
 **Deviations the build made, accepted:**
-- Only files directly in the per-user temp folder are writable, not its subfolders.
+- Only files directly in the per-user temp folder are writable, not its subfolders. The review later narrowed this to `ar.XXXXXX` only (`4d20889`).
 - `file-read-metadata` stays allowed everywhere, because the asdf `node` shim needs it. A command can learn that a path exists, and the README says so.
 - Writes to the secret paths and to `~/.config/ram-code` are denied, so a command cannot widen its own sandbox through `sandbox.json`.
 
