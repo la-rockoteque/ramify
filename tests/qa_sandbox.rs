@@ -681,6 +681,7 @@ fn bwrap_args_isolate_pids_and_sockets() {
         &[PathBuf::from("/home/u/.ssh"), PathBuf::from("/run/user/1000")],
         &[PathBuf::from("/var/run/docker.sock"), PathBuf::from("/home/u/.netrc")],
         "true",
+        false,
     )
     .into_iter()
     .map(|arg| arg.to_string_lossy().into_owned())

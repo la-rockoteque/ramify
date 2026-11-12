@@ -84,26 +84,7 @@ impl Tools {
     /// A sandboxed command can write here, so before each command the folder must still be a
     /// real folder that the user owns. A link in its place would widen the next profile.
     pub fn temp_dir(&self) -> Result<PathBuf, String> {
-        use std::os::unix::fs::MetadataExt;
-        let shown = self.temp.display();
-        let meta = match std::fs::symlink_metadata(&self.temp) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&self.temp)
-                    .map_err(|e| format!("could not create {shown}: {e}"))?;
-                std::fs::symlink_metadata(&self.temp)
-                    .map_err(|e| format!("could not read {shown}: {e}"))?
-            }
-            Err(error) => return Err(format!("could not read {shown}: {error}")),
-        };
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
-            return Err(format!(
-                "the task temp folder {shown} was replaced; Ram Code runs no more commands in it"
-            ));
-        }
-        Ok(self.temp.clone())
+        crate::sandbox::checked_temp(&self.temp)
     }
 
     pub fn definitions() -> Vec<serde_json::Value> {

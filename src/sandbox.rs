@@ -53,7 +53,14 @@ impl Sandbox {
                 };
                 let (dirs, files) = linux_hidden(&paths.secrets, uid, &exists);
                 let mut cmd = Command::new(program);
-                cmd.args(bwrap_args(&paths.root, &paths.temp, &dirs, &files, command));
+                cmd.args(bwrap_args(
+                    &paths.root,
+                    &paths.temp,
+                    &dirs,
+                    &files,
+                    command,
+                    paths.network,
+                ));
                 Some(cmd)
             }
             Sandbox::None => None,
@@ -135,13 +142,15 @@ pub fn linux_hidden(
 }
 
 /// The bwrap arguments: `/` read-only, the worktree and temp folder writable, the hidden paths
-/// covered, and no network, no shared process or IPC namespace, no controlling terminal.
+/// covered, no shared process or IPC namespace, no controlling terminal, and no network unless
+/// `network` is true.
 pub fn bwrap_args(
     root: &Path,
     temp: &Path,
     hidden_dirs: &[PathBuf],
     hidden_files: &[PathBuf],
     command: &str,
+    network: bool,
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = Vec::new();
     let mut push = |items: &[&std::ffi::OsStr]| args.extend(items.iter().map(|i| i.to_os_string()));
@@ -155,8 +164,10 @@ pub fn bwrap_args(
     for file in hidden_files {
         push(&["--ro-bind".as_ref(), "/dev/null".as_ref(), file.as_os_str()]);
     }
+    if !network {
+        push(&["--unshare-net".as_ref()]);
+    }
     push(&[
-        "--unshare-net".as_ref(),
         "--unshare-pid".as_ref(),
         "--unshare-ipc".as_ref(),
         "--new-session".as_ref(),
@@ -231,6 +242,8 @@ pub struct Paths {
     pub config: Option<PathBuf>,
     /// What `sandbox.json` adds.
     pub extras: Extras,
+    /// IP traffic and name lookups, for an MCP server the human approved with network.
+    pub network: bool,
 }
 
 impl Paths {
@@ -243,8 +256,33 @@ impl Paths {
             home,
             config: None,
             extras: Extras::default(),
+            network: false,
         }
     }
+}
+
+/// A temp folder a sandboxed process can write, created when missing. The process could replace
+/// it with a link, which would widen the next profile, so it must still be a real folder that
+/// the user owns.
+pub fn checked_temp(path: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    let shown = path.display();
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).map_err(|e| format!("could not create {shown}: {e}"))?;
+            std::fs::symlink_metadata(path).map_err(|e| format!("could not read {shown}: {e}"))?
+        }
+        Err(error) => return Err(format!("could not read {shown}: {error}")),
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
+        return Err(format!(
+            "the temp folder {shown} was replaced; Ram Code runs no more commands in it"
+        ));
+    }
+    Ok(path.to_path_buf())
 }
 
 /// The real path when the path exists, else the path as given.
@@ -544,7 +582,7 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
   (literal "{root}")
   (literal "{temp}"))
 (deny network*)
-(deny file-ioctl (regex #"^/dev/tty"))
+{network}(deny file-ioctl (regex #"^/dev/tty"))
 (deny file-write* (regex #"/\.git(/|$)"))
 "#,
         services = services.join("\n"),
@@ -557,8 +595,17 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
         writes = writes.join("\n"),
         root = quote(&paths.root),
         temp = quote(&paths.temp),
+        network = if paths.network { NETWORK } else { "" },
     )
 }
+
+/// The rules `network` adds, after `(deny network*)` so they win. Unix sockets other than the name
+/// lookup daemon's stay denied, so Docker and an ssh-agent stay out of reach.
+const NETWORK: &str = "(allow network-outbound (remote ip))
+(allow network-inbound (local ip))
+(allow network-bind (local ip))
+(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))
+";
 
 /// The line added to a command's output when the sandbox may have denied it.
 pub const DENIED_HINT: &str = "[the sandbox may have denied this. For a lasting need, add the path to \
@@ -598,7 +645,7 @@ fn has_userinfo(value: &str) -> bool {
 }
 
 /// True for a variable that holds a key, a token, a password, or a way to reach one.
-fn is_secret(name: &str, value: &str, key_envs: &[String]) -> bool {
+pub(crate) fn is_secret(name: &str, value: &str, key_envs: &[String]) -> bool {
     let upper = name.to_ascii_uppercase();
     upper.starts_with("ANTHROPIC_")
         || upper.starts_with("RAM_CODE_")

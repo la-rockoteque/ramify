@@ -7,6 +7,7 @@ pub mod edit;
 pub mod hooks;
 pub mod hooked;
 pub mod instructions;
+pub mod mcp;
 pub mod openai;
 pub mod panel;
 pub mod providers;
