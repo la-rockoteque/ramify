@@ -10,6 +10,8 @@ steps:
 - {step: build, date: '2026-11-12'}
 - {step: audit, date: '2026-11-12'}
 - {step: qa, date: '2026-11-12'}
+- {step: review, date: '2026-11-12'}
+- {step: pr, date: '2026-11-12', note: '#54'}
 ---
 
 # Ram Code providers
