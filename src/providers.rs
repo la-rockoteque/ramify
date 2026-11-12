@@ -1,7 +1,8 @@
 //! Named model providers: four presets, plus custom ones from `providers.json`.
 
 use crate::agent::{
-    credential_from_env, max_tokens_from_env, normalize_base, AgentConfig, AnthropicLlm,
+    credential_from_env, idle_timeout_from_env, max_tokens_from_env, normalize_base,
+    stream_from_env, AgentConfig, AnthropicLlm,
     Credential, Llm, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, DEFAULT_MODEL, NO_CREDENTIAL,
 };
 use crate::openai::OpenAiLlm;
@@ -29,6 +30,10 @@ pub struct Provider {
     /// they use the Anthropic credential order.
     pub key_env: Option<String>,
     pub model: Option<String>,
+    /// The default `max_tokens`. `RAM_CODE_MAX_TOKENS` overrides it.
+    pub max_tokens: Option<u32>,
+    /// `Some(false)` turns streaming off for a server that does not stream.
+    pub stream: Option<bool>,
 }
 
 /// One entry of `providers.json`. A field it leaves out comes from the preset of the same name.
@@ -39,7 +44,13 @@ struct Entry {
     base_url: Option<String>,
     key_env: Option<String>,
     model: Option<String>,
+    max_tokens: Option<u32>,
+    stream: Option<bool>,
 }
+
+/// `claude` streams, so a long reply hits no request timeout. Other providers keep the
+/// smaller default, which every compatible server accepts.
+const CLAUDE_MAX_TOKENS: u32 = 64_000;
 
 fn preset(name: &str) -> Option<Provider> {
     let make = |format, base: Option<&str>, key: Option<&str>, model: Option<&str>| Provider {
@@ -48,6 +59,8 @@ fn preset(name: &str) -> Option<Provider> {
         base_url: base.map(String::from),
         key_env: key.map(String::from),
         model: model.map(String::from),
+        max_tokens: (name == CLAUDE).then_some(CLAUDE_MAX_TOKENS),
+        stream: None,
     };
     match name {
         CLAUDE => Some(make(Format::Anthropic, Some(ANTHROPIC_BASE_URL), None, Some(ANTHROPIC_MODEL))),
@@ -134,6 +147,8 @@ impl Providers {
                 base_url: entry.base_url.clone().or(base.base_url),
                 key_env: entry.key_env.clone().or(base.key_env),
                 model: entry.model.clone().or(base.model),
+                max_tokens: entry.max_tokens.or(base.max_tokens),
+                stream: entry.stream.or(base.stream),
             }),
             (Some(base), None) => Some(base),
             (None, Some(entry)) => Some(Provider {
@@ -142,6 +157,8 @@ impl Providers {
                 base_url: entry.base_url.clone(),
                 key_env: entry.key_env.clone(),
                 model: entry.model.clone(),
+                max_tokens: entry.max_tokens,
+                stream: entry.stream,
             }),
             (None, None) => None,
         }
@@ -219,6 +236,11 @@ fn parse_entry(entry: &Value) -> Result<Entry, String> {
         base_url: field("base_url"),
         key_env: field("key_env"),
         model: field("model"),
+        max_tokens: entry
+            .get("max_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|tokens| u32::try_from(tokens).ok()),
+        stream: entry.get("stream").and_then(Value::as_bool),
     })
 }
 
@@ -304,6 +326,10 @@ pub fn resolve(
         if let (Some(model), None) = (&provider.model, get("RAM_CODE_MODEL")) {
             config.model = model.clone();
         }
+        if let (Some(tokens), None) = (provider.max_tokens, get("RAM_CODE_MAX_TOKENS")) {
+            config.max_tokens = tokens;
+        }
+        config.stream &= provider.stream.unwrap_or(true);
         config
     } else {
         let credential = match &provider.key_env {
@@ -339,7 +365,12 @@ pub fn resolve(
             base_url,
             credential,
             model,
-            max_tokens: max_tokens_from_env(&get),
+            max_tokens: match (get("RAM_CODE_MAX_TOKENS"), provider.max_tokens) {
+                (None, Some(tokens)) => tokens,
+                _ => max_tokens_from_env(&get),
+            },
+            stream: stream_from_env(&get) && provider.stream.unwrap_or(true),
+            idle_timeout: idle_timeout_from_env(&get),
         }
     };
     if let Some(model) = session_model {

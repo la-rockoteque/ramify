@@ -431,6 +431,8 @@ fn openai_bad_arguments_become_a_tool_error() {
         credential: Credential::ApiKey("k".into()),
         model: "gpt-x".into(),
         max_tokens: 10,
+        stream: false,
+        idle_timeout: 90,
     };
     let llm = ram_code::openai::OpenAiLlm::new(config);
     let mut results = Vec::new();
