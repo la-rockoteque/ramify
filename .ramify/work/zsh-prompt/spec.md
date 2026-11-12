@@ -94,6 +94,40 @@ This branch puts the segment into ramify.
 - AC18: The README documents `ramify prompt`, the session record, the plugin, the p10k segment
   and `ramify prompt install`.
 
+## Amendment: Ram Code (2026-11-12)
+
+The user asked to integrate the segment into Ram Code too, and to keep the zsh plugin. A Ram
+Code session counts as an agent session.
+
+### Behaviour
+
+15. Ram Code's chat header gets a status row under the worktree chips. It shows the
+    `ramify prompt` line of the selected worktree. Ram Code reads it again when the selection
+    changes, when a task ends, and every 5 seconds. Outside a configured repo the row is empty.
+16. Ram Code writes a session record, `sessions/ram-<pid>.session`, when it starts a task: agent
+    `ram`, the task's worktree as root, its own pid, and state `working`. When the task ends,
+    the state is `idle`. When Ram Code quits, the record is deleted.
+17. `ramify prompt` marks a Ram Code session with `◆`. A Ram Code session has no name, so it
+    shows as `◆ ram`.
+18. The Sessions pane of the Ram Code panel lists every live session from the records, not only
+    the sessions that `ramify new` pinned to a worktree. Each row shows the mark, the name (or
+    the agent), the branch, and `⏸` for an idle session. A pinned session without a record
+    still shows, as before.
+
+### Acceptance criteria
+
+- AC19: Given the selected worktree is configured, then the header shows its `ramify prompt`
+  line. When the selection changes to another worktree, the row changes on the next refresh.
+- AC20: Given Ram Code starts a task in `wt-1`, then `sessions/ram-<pid>.session` has agent
+  `ram`, root `wt-1`, Ram Code's pid and state `working`. When the task ends, the state is
+  `idle`. When Ram Code quits, the file is gone.
+- AC21: Given a live Ram Code record, then `ramify prompt` shows `◆ ram` in its worktree.
+- AC22: Given two live records and no pin, then the Sessions pane lists both, with their marks.
+  An idle one shows `⏸`.
+- AC23: The existing Ram Code tests keep passing.
+
+The out-of-scope list above still applies.
+
 ## Out of scope
 
 - bash, fish and starship prompts.

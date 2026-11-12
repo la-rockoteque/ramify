@@ -35,6 +35,12 @@ with oh-my-zsh and powerlevel10k.
 | Q25 | AC17 | medium | `prompt_install_links_the_plugin`: with `ZSH_CUSTOM` in a temp dir, the link exists and `.zshrc` is not touched | build |
 | Q26 | AC18 | low | The README has a section on `ramify prompt`, the session record, the plugin, the p10k segment and `ramify prompt install` | audit |
 | Q27 | AC3 | medium | Both `.claude-plugin/plugin.json` and `hooks/codex.json` register `user-prompt-submit` | audit |
+| Q28 | AC19 | high | `header_shows_the_prompt_line` in `tests/qa_prompt.rs`: a fake runner answers `prompt` with a line, and the rendered header contains it. After a selection change and a refresh, it contains the other worktree's line. | build |
+| Q29 | AC20 | high | `a_task_writes_a_ram_record`: the record exists with agent `ram` and state `working` while the task runs, `idle` after it, and is gone after quit | build |
+| Q30 | AC21 | medium | `a_ram_session_shows_as_ram` in `cli/tests/prompt.rs` | build |
+| Q31 | AC22 | high | `sessions_pane_lists_live_records`: two records, no pin, both rows with their marks, `⏸` on the idle one | build |
+| Q32 | AC23 | medium | `cargo test` at the root: every existing test passes | build |
+| Q33 | AC19 | medium | Live: open `ram` in a worktree where a Claude Code session runs. The header shows `✻ <name>`. Start a Ram Code task: a shell prompt in the same worktree shows `◆ ram`. | qa |
 
 ## Write set
 
@@ -47,6 +53,8 @@ hooks/codex.json
 .codex-plugin/**
 shell/**
 README.md
+src/**
+tests/qa_prompt.rs
 .ramify/work/zsh-prompt/**
 !cli/tests/parity.rs
 !cli/tests/reference/**
