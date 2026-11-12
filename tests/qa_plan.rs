@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn tmp(name: &str) -> PathBuf {
+    // A task reads the user's AGENTS.md and CLAUDE.md: point it at an empty home. Every test
+    // sets the same value, so the tests may run in parallel.
+    let home = std::env::temp_dir().join(format!("ramcode-test-{}-no-home", std::process::id()));
+    std::env::set_var("RAM_CODE_INSTRUCTIONS_HOME", home);
     let dir = std::env::temp_dir().join(format!("ramcode-test-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
