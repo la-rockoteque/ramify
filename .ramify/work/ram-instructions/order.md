@@ -4,7 +4,8 @@ lane: standard
 branch: feat/ram-instructions
 tags: []
 created: 2026-11-12
-steps: []
+steps:
+- {step: spec, date: '2026-11-12'}
 ---
 
 # ram-instructions
