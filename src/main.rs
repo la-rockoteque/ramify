@@ -1,5 +1,6 @@
 use crossterm::event::{self, Event, KeyEventKind};
-use ram_code::agent::{run_turn_hooked, AgentEvent, Llm};
+use ram_code::agent::{run_turn_cancellable, AgentEvent, TurnEnd};
+use ram_code::cancel::Cancel;
 use ram_code::hooked::Hooked;
 use ram_code::providers::resolve_from_env;
 use ram_code::app::{App, Screen};
@@ -127,8 +128,11 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         eprintln!("{note}");
     }
     hooks.start_context = started.contexts;
-    let result = run_headless_task(llm.as_ref(), root, task, &mut |event| match event {
+    // Ctrl+C stops the task, keeps what finished, and exits with 130.
+    let cancel = Cancel::on_sigint();
+    let turn = run_turn_cancellable(llm.as_ref(), root, &[], task, &hooks, &cancel, &mut |event| match event {
         AgentEvent::Text(text) => println!("{text}"),
+        AgentEvent::TextDelta(_) => {}
         AgentEvent::ToolCall { name, input } => println!("→ {name} {input}"),
         AgentEvent::ToolResult(result) => {
             if let Some(first) = result.lines().next() {
@@ -140,14 +144,18 @@ fn run_headless(root: &Path, task: &str) -> std::io::Result<()> {
         AgentEvent::RunPending(id) => {
             println!("→ run {id} waits for your OK: ramify run go {id}, or ramify run block {id}")
         }
-    }, &hooks);
+    });
     let _ = hooks.fire("SessionEnd", "", json!({"reason": "exit"}));
-    match result {
-        Ok(answer) => {
-            println!("{answer}");
+    match turn.end {
+        TurnEnd::Done => {
+            println!("{}", turn.answer);
             Ok(())
         }
-        Err(error) => {
+        TurnEnd::Interrupted => {
+            println!("interrupted");
+            std::process::exit(130);
+        }
+        TurnEnd::Failed(error) => {
             eprintln!("{error}");
             std::process::exit(1);
         }
@@ -191,9 +199,12 @@ fn run_worker(
             }
         }
     }
-    let result = run_turn_hooked(llm.as_ref(), root, &previous, task, &hooks, &mut |event| {
+    // The interface sends SIGINT on Esc: the turn stops and keeps what finished.
+    let cancel = Cancel::on_sigint();
+    let turn = run_turn_cancellable(llm.as_ref(), root, &previous, task, &hooks, &cancel, &mut |event| {
         let value = match event {
             AgentEvent::Text(text) => json!({"type": "text", "text": text}),
+            AgentEvent::TextDelta(text) => json!({"type": "text_delta", "text": text}),
             AgentEvent::ToolCall { name, input } => {
                 json!({"type": "tool_call", "name": name, "input": input})
             }
@@ -205,19 +216,21 @@ fn run_worker(
         let _ = writeln!(out, "{value}");
         let _ = out.flush();
     });
-    match result {
-        Ok((answer, new_history)) => {
-            if let Ok(text) = serde_json::to_string(&new_history) {
-                let _ = std::fs::write(history, text);
-            }
-            let _ = writeln!(out, "{}", json!({"type": "finished", "answer": answer}));
-            let _ = out.flush();
+    // The history keeps what finished, whatever way the turn ended.
+    if let Ok(text) = serde_json::to_string(&turn.history) {
+        let _ = std::fs::write(history, text);
+    }
+    match &turn.end {
+        TurnEnd::Done => {}
+        TurnEnd::Interrupted => {
+            let _ = writeln!(out, "{}", json!({"type": "interrupted"}));
         }
-        Err(error) => {
+        TurnEnd::Failed(error) => {
             let _ = writeln!(out, "{}", json!({"type": "error", "text": error}));
-            let _ = out.flush();
         }
     }
+    let _ = writeln!(out, "{}", json!({"type": "finished", "answer": turn.answer}));
+    let _ = out.flush();
     Ok(())
 }
 
@@ -239,7 +252,9 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if event::poll(Duration::from_millis(120))? {
+        // A running task streams text: read its events often.
+        let wait = if app.running { 50 } else { 120 };
+        if event::poll(Duration::from_millis(wait))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if app.screen == Screen::Splash {
@@ -253,15 +268,4 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// `run_task` with the session's hooks: the headless run is its own session.
-fn run_headless_task(
-    llm: &dyn Llm,
-    root: &Path,
-    task: &str,
-    on_event: &mut dyn FnMut(AgentEvent),
-    hooks: &Hooked,
-) -> Result<String, String> {
-    run_turn_hooked(llm, root, &[], task, hooks, on_event).map(|(answer, _)| answer)
 }

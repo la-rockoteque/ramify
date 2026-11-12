@@ -64,7 +64,12 @@ struct Worker {
     offset: u64,
     pending: Vec<u8>,
     saw_text: bool,
+    /// When the user pressed Esc: the worker has 3 seconds to stop on its own.
+    stop_at: Option<Instant>,
 }
+
+/// How long a stopped worker may take to finish before Ram Code kills it.
+const STOP_GRACE: Duration = Duration::from_secs(3);
 
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -126,6 +131,8 @@ pub struct App {
     loader: Option<Loader>,
     task_seq: u64,
     picker_from: usize,
+    /// The transcript entry that streamed text grows, until the reply's text block is whole.
+    streaming: Option<usize>,
     /// The `ramify prompt` line of the selected worktree, and when and where it was read.
     status_line: String,
     status_root: Option<PathBuf>,
@@ -185,6 +192,7 @@ impl App {
             loader: None,
             task_seq: 0,
             picker_from: 0,
+            streaming: None,
             status_line: String::new(),
             status_root: None,
             status_at: None,
@@ -572,6 +580,7 @@ impl App {
                     offset: 0,
                     pending: Vec::new(),
                     saw_text: false,
+                    stop_at: None,
                 });
             }
             Err(error) => {
@@ -608,6 +617,24 @@ impl App {
 
         for value in parsed {
             self.apply_worker_value(value);
+        }
+        let stuck = !saw_finished
+            && self
+                .worker
+                .as_ref()
+                .and_then(|worker| worker.stop_at)
+                .is_some_and(|at| at.elapsed() >= STOP_GRACE);
+        if stuck {
+            // Dropping the worker kills it. The history stays as it was before the task.
+            self.worker = None;
+            self.running = false;
+            self.streaming = None;
+            self.task_ended();
+            self.push(
+                Role::Info,
+                "the task did not stop within 3 seconds; Ram Code ended it, and the history is as before the task",
+            );
+            return;
         }
         if saw_finished {
             self.finish_task();
@@ -683,7 +710,25 @@ impl App {
     }
 
     fn apply_worker_value(&mut self, value: Value) {
-        match value.get("type").and_then(Value::as_str) {
+        let kind = value.get("type").and_then(Value::as_str);
+        if !matches!(kind, Some("text_delta" | "text" | "trace")) {
+            self.streaming = None;
+        }
+        match kind {
+            Some("text_delta") => {
+                let text = value.get("text").and_then(Value::as_str).unwrap_or("");
+                if let Some(worker) = self.worker.as_mut() {
+                    worker.saw_text = true;
+                }
+                match self.streaming.and_then(|index| self.entries.get_mut(index)) {
+                    Some(entry) => entry.text.push_str(text),
+                    None => {
+                        self.push(Role::Assistant, text);
+                        self.streaming = Some(self.entries.len() - 1);
+                    }
+                }
+                self.scroll_up = 0;
+            }
             Some("text") => {
                 let text = value
                     .get("text")
@@ -693,8 +738,13 @@ impl App {
                 if let Some(worker) = self.worker.as_mut() {
                     worker.saw_text = true;
                 }
-                self.push(Role::Assistant, text);
+                // The whole block replaces the text that streamed in, so it never shows twice.
+                match self.streaming.take().and_then(|index| self.entries.get_mut(index)) {
+                    Some(entry) => entry.text = text,
+                    None => self.push(Role::Assistant, text),
+                }
             }
+            Some("interrupted") => self.push(Role::Info, "interrupted"),
             Some("tool_call") => {
                 let name = value.get("name").and_then(Value::as_str).unwrap_or("");
                 let input = value.get("input").and_then(Value::as_str).unwrap_or("");
@@ -933,6 +983,15 @@ impl App {
             self.quit = true;
             return;
         }
+        // Esc stops a running task. The panel's own prompt still takes Esc first.
+        if key.code == KeyCode::Esc
+            && self.running
+            && self.screen == Screen::Main
+            && !(self.panel.open && self.panel.has_prompt())
+        {
+            self.interrupt();
+            return;
+        }
         if self.screen == Screen::Main
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('p'))
@@ -974,6 +1033,22 @@ impl App {
             },
             _ => {}
         }
+    }
+
+    /// Ask the worker to stop: `SIGINT`, then a kill after 3 seconds if it has not finished.
+    pub fn interrupt(&mut self) {
+        let Some(worker) = self.worker.as_mut() else {
+            return;
+        };
+        if worker.stop_at.is_some() {
+            return;
+        }
+        worker.stop_at = Some(Instant::now());
+        // SAFETY: SIGINT to the worker process this app started.
+        unsafe {
+            libc::kill(worker.child.id() as i32, libc::SIGINT);
+        }
+        self.push(Role::Info, "stopping…");
     }
 
     fn key_chat(&mut self, key: KeyEvent) {
@@ -1285,7 +1360,7 @@ impl App {
         let hint = if self.running && self.waiting_run.is_some() {
             " waiting for your OK in the Run pane · g run · b block · ^C quit "
         } else if self.running {
-            " working… · ↑/↓ scroll · ^C quit "
+            " working… · esc stop · ↑/↓ scroll · ^C quit "
         } else {
             " enter send · tab worktrees · ^O inspect · /help · ^C quit "
         };
