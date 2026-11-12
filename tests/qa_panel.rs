@@ -249,6 +249,13 @@ fn run_go_and_block() {
     .to_string();
     runner.push(&["runs", "--json"], out(&runs));
     let mut app = app_with(runner.clone(), &root);
+    // `g` runs only a script the human can see, so each run has its frozen script.
+    let runs_dir = root.join("runs");
+    for id in ["20260101-1", "20260102-2"] {
+        std::fs::create_dir_all(runs_dir.join(id)).unwrap();
+        std::fs::write(runs_dir.join(id).join("script"), "#!/bin/sh\necho hello\n").unwrap();
+    }
+    app.panel.runs_dir = runs_dir;
     app.panel.open_on(Pane::Run);
     app.panel.refresh(&*runner, &root);
     let text = render_text(&app);
