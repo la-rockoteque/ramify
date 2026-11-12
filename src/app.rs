@@ -1,4 +1,5 @@
 use crate::agent::AgentConfig;
+use crate::bonsai_art;
 use crate::panel::Panel;
 use crate::ramify::{Action, CommandOutput, CommandSpec, Runner};
 use crate::state::{parse_project, project_for_root, Project, Worktree};
@@ -1310,35 +1311,6 @@ fn push_prefixed<'a>(
     }
 }
 
-const RAM_ART: &[&str] = &[
-    "                     ░░░    ░▒▒▒▒▒▒▒▒▒░",
-    "                ░░▒▓▓█████▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒",
-    "              ▓▓██████████████▓▓▓▒▒▒▒▒▒▒▒▒",
-    "              ▓▓████████████████▓▒▒▒▒▒▒▒▒▒▒",
-    "         ░▒▒▒▒▓▓████████████████▓▒▒▓▓▓▒▒▒▒▒",
-    "       ▒▒▒▒▓▓▓██████████████████▓▒▒▓▓▓▒▒▒▒▒",
-    "       ▒▓████▓███████████████▓▓▓▓▓▒▓▓▓▒▒▒▒░",
-    "     ░▓████████████████████▓▓▓████▒▒▒▒▒▒▒▒",
-    "    ▒▓▓████████████████████▓▓▒████▒▒ ░░░",
-    "    ▓██████████████████████▓▓▒████▒░",
-    "    ▓████████████████████████▓▒▒▒▒▒▒░",
-    "   ░▓█████████████████████████▒▒▒▒▒▒░",
-    " ░▓███████████████████▓▒██████▒▒▒▒▒▒░",
-    " ░█████████████████▓▓▓▓▓██████░",
-    "███████████████████▓▓▓▒▓▓▓███▒",
-    "████████▓▓█████████▓▓▓▒▓▓▓█████▓▒▒▒░",
-    "████▓███▓▒▒▓████░▒▒▒   ▒▒▓███████▓▒▒▒▒",
-    "░░░░░░ ▓▓▓░░░░░░           ▓█████▓▓███░",
-    "       ▓▓███▒             ░▒▒████▓▓███░",
-    "       ▓▓███▒░    ░░░ ▒▓███▓▓▓████▓███▓",
-    "       ░▓███▒░   ▒▒▒▒████████████████████",
-    "          ▒▒▒░   ▒▒▒▒████████████████████",
-    "                 ▒▒▒▒████████████████████",
-    "                   ░░░░░▓▓▓▓██████████▓▓",
-    "                         ░░░ ░░▒▒▒  ░░░",
-];
-
-
 const RAM_CODE_ART: &[&str] = &[
     "██████╗  █████╗ ███╗   ███╗    ██████╗  ██████╗ ██████╗ ███████╗",
     "██╔══██╗██╔══██╗████╗ ████║   ██╔════╝ ██╔═══██╗██╔══██╗██╔════╝",
@@ -1348,16 +1320,34 @@ const RAM_CODE_ART: &[&str] = &[
     "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝    ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝",
 ];
 
+/// Builds the splash for an inner area of `height` x `width` cells. It shows the
+/// largest bonsai that fits with the wordmark; failing that, the largest bonsai
+/// alone; failing that, the wordmark alone; and the tagline always.
 fn splash_lines(height: usize, width: usize) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for art in RAM_ART {
-        lines.push(Line::from(Span::styled(
-            *art,
-            Style::default().fg(Color::Cyan),
-        )));
-    }
+    const FOOTER: usize = 4; // blank, tagline, blank, "press any key"
     let wordmark = RAM_CODE_ART.len() + shadow_rows(RAM_CODE_ART).len() + 1;
-    if width >= 64 && height >= lines.len() + wordmark + 5 {
+    let wordmark_fits = width >= 64;
+    let fits = |art: bonsai_art::Art, below: usize| {
+        bonsai_width(art) <= width && art.len() + below <= height
+    };
+    let with_wordmark = bonsai_art::ARTS
+        .iter()
+        .copied()
+        .find(|art| wordmark_fits && fits(art, wordmark + FOOTER));
+    let bonsai = with_wordmark.or_else(|| {
+        bonsai_art::ARTS
+            .iter()
+            .copied()
+            .find(|art| fits(art, FOOTER))
+    });
+    let show_wordmark = with_wordmark.is_some()
+        || (bonsai.is_none() && wordmark_fits && height >= wordmark + FOOTER);
+
+    let mut lines = Vec::new();
+    if let Some(art) = bonsai {
+        lines.extend(bonsai_lines(art));
+    }
+    if show_wordmark {
         lines.push(Line::from(""));
         for art in RAM_CODE_ART {
             lines.push(Line::from(Span::styled(
@@ -1385,6 +1375,61 @@ fn splash_lines(height: usize, width: usize) -> Vec<Line<'static>> {
         Style::default().fg(Color::DarkGray),
     )));
     lines
+}
+
+/// Widest row of a splash bonsai, in cells.
+fn bonsai_width(art: bonsai_art::Art) -> usize {
+    art.iter()
+        .map(|(chars, _)| chars.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// A splash bonsai, one styled span per run of the same ink and shade.
+/// Rows are padded to one width so centring keeps the picture's shape.
+fn bonsai_lines(art: bonsai_art::Art) -> Vec<Line<'static>> {
+    let width = bonsai_width(art);
+    art.iter()
+        .map(|(chars, inks)| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut run = String::new();
+            let mut run_style = Style::default();
+            let cells = chars
+                .chars()
+                .zip(inks.chars().chain(std::iter::repeat(' ')));
+            for (ch, ink) in cells {
+                let style = bonsai_style(ink, ch);
+                if style != run_style && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), run_style));
+                }
+                run_style = style;
+                run.push(ch);
+            }
+            run.push_str(&" ".repeat(width.saturating_sub(chars.chars().count())));
+            spans.push(Span::styled(run, run_style));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Colour of one bonsai cell: its ink's colour, dimmed by how dark its character is.
+fn bonsai_style(ink: char, ch: char) -> Style {
+    let (r, g, b) = match ink {
+        't' => (150, 128, 108),
+        'd' => (214, 204, 186),
+        'l' => (70, 140, 100),
+        'm' => (110, 150, 70),
+        'g' => (120, 96, 72),
+        's' => (200, 60, 50),
+        _ => return Style::default(),
+    };
+    let steps = bonsai_art::RAMP.chars().count().saturating_sub(1).max(1);
+    let level = bonsai_art::RAMP
+        .chars()
+        .position(|c| c == ch)
+        .unwrap_or(steps);
+    let dim = |v: u8| (f32::from(v) * (0.45 + 0.55 * level as f32 / steps as f32)) as u8;
+    Style::default().fg(Color::Rgb(dim(r), dim(g), dim(b)))
 }
 
 fn shadow_rows(art: &[&str]) -> Vec<String> {

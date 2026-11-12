@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod app;
+pub mod bonsai_art;
 pub mod panel;
 pub mod ramify;
 pub mod state;
