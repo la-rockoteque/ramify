@@ -151,6 +151,37 @@ RAMIFY_ROOT=/path/to/worktree cargo run -- --task "Add a --version flag"
 The tests are `cargo test`; they cover the acceptance criteria in
 `.ramify/work/ram-code/spec.md`.
 
+### Instructions: AGENTS.md and CLAUDE.md
+
+Before each task, Ram Code reads `AGENTS.md` and `CLAUDE.md` files, as Codex and Claude Code do,
+and adds them to its system prompt. It reads them in this order, and skips a missing file:
+
+1. `~/.ram/AGENTS.md`, then `~/.claude/CLAUDE.md`.
+2. In each folder from the git top level down to the folder of the task: `AGENTS.md`,
+   `CLAUDE.md`, `.claude/CLAUDE.md`, then `CLAUDE.local.md`.
+
+A later file is more specific, so it comes last. A file that two names reach, such as a
+`CLAUDE.md` link to `AGENTS.md`, is read one time. Unlike Claude Code, Ram Code reads no file
+above the git top level, as Codex does.
+
+In a `CLAUDE.md`, `@path` imports a file, as in Claude Code. The path is relative to the
+importing file. An import in a code span or a code block stays as text, and so does an import
+of a missing file. Imports go 5 levels deep, and a file is never read twice, so a loop ends.
+`AGENTS.md` has no imports, as in Codex.
+
+> **Caution:** a project's files can import only files inside the project. Ram Code refuses
+> `@~/…`, `@/…` and `@../…` that leave it, and a `CLAUDE.md` link that points outside it, with
+> one line in the transcript. Only your own files in `~/.ram` and `~/.claude` may import from
+> your home folder or from an absolute path.
+
+Each file, imported or not, is cut at 32 KiB. All the files together stop at 128 KiB: the file
+that crosses the limit is cut, and the files after it are left out. A file that is not UTF-8 is
+skipped with one line in the transcript. `/instructions` lists the files the next task reads,
+with their sizes and what the limits did to them. `RAM_CODE_INSTRUCTIONS_HOME` replaces `~` for
+the user's files. With no home folder, Ram Code reads only the project's files.
+
+This repository has an `AGENTS.md` with its own rules, and a `CLAUDE.md` that imports it.
+
 ## Install
 
 ```bash

@@ -5,6 +5,7 @@ pub mod bonsai_art;
 #[path = "../cli/src/hooks.rs"]
 pub mod hooks;
 pub mod hooked;
+pub mod instructions;
 pub mod openai;
 pub mod panel;
 pub mod providers;
