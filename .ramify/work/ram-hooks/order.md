@@ -9,6 +9,7 @@ steps:
 - {step: qa-plan, date: '2026-11-12'}
 - {step: build, date: '2026-11-12'}
 - {step: audit, date: '2026-11-12', note: AC16 interface path is Q22 (live)}
+- {step: qa, date: '2026-11-12', note: 'Q34 and the Q22 transcript waived: no model provider'}
 ---
 
 # ram-hooks
