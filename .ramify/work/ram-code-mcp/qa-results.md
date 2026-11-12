@@ -27,6 +27,6 @@
 | Q23 | pass | `both_formats_get_mcp_tools` |
 | Q24 | pass | `http_entry_is_not_supported_yet` |
 | Q25 | pass after fixes | `audit.md`: five gaps, fixed in `a0b56d4` and `1c5c00f` |
-| Q26 | waiting on the human | Needs a real stdio server, such as `@modelcontextprotocol/server-filesystem`, and a provider key. |
+| Q26 | pass | The human ran the case live and reported it passed in the chat on 2026-11-12. |
 
-Yield: 26 cases. 25 ran and passed, 0 failed. The audit fixed 5 gaps. Q26 waits on a live run.
+Yield: 26 cases. 26 ran and passed, 0 failed. The audit fixed 5 gaps.
