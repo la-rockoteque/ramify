@@ -236,37 +236,71 @@ Ram Code reads two files in Claude Code's format:
   An unset variable with no default stops that server only.
 - A tool appears to the model as `mcp__<server>__<tool>`. A name that is not valid, or longer
   than 64 characters, is changed so that it stays valid and unique.
+- Two tools of one server whose names repeat, or read the same once cleaned (`a b` and `a_b`),
+  are both refused, so a hook rule written for one name always covers the tool.
+- A server offers at most 128 tools. A description is cut at 2,000 characters. A tool whose
+  `inputSchema` is not an object schema (`"type": "object"`) is not offered, with a note.
+- One message from a server may hold at most 8 MiB. A longer one ends the server's transport.
 - A call waits at most `timeout_seconds`: 120 by default, 600 at most.
 - A result is cut at 40,000 characters. An image becomes `[image: <type>, <size> bytes]`.
   Control characters show as text, such as `^[`, so a server cannot drive the terminal.
 - `PreToolUse` and `PostToolUse` hooks see MCP calls by their `mcp__…` name.
 
-A project server does not start until you approve it. Before the first task, Ram Code shows
-the server's command line and its `env` as written, with each `${VAR}` visible. Answer with
-one key:
+A project server does not start until you approve it. Before the first task, Ram Code shows:
+
+- the server's command line, with each word escaped and quoted;
+- `runs:`, the program the command finds on `PATH`;
+- each file from the repository that the server runs, such as `tools/mcp.js`, or the
+  `node_modules/.bin` program that `npx` runs;
+- its `env` as written, with each `${VAR}` visible.
+
+Control characters, new lines, zero-width and bidi marks show as text, such as `\n` or
+`\u{202e}`, so a name or an argument cannot fake a line of the prompt. Answer with one key:
 
 - `a`: run it in the sandbox, with no network.
 - `n`: run it in the sandbox, with network. Ram Code suggests this for `npx` and `uvx`, which
   download packages on their first run.
-- `u`: run it outside the sandbox, with your full rights. The prompt shows this in red.
 - `d`: deny it.
 - `Esc`: do not start the task now.
 
+A project server never runs outside the sandbox. The model can change files in the worktree,
+so a server from the repository could run the model's code with your full rights. To run a
+server outside the sandbox, put it in `~/.config/ram-code/mcp.json` and use
+`/mcp approve <name> u`.
+
 Ram Code stores the decision in `~/.config/ram-code/mcp-approvals.json`, by project and by a
-SHA-256 of the entry and of what it expands to. The file holds no `env` value. A changed
-entry, or a changed variable in it, asks again. A headless run
+SHA-256 of:
+
+- the entry and what it expands to;
+- the program `command` resolves to;
+- the content of each repository file the server runs.
+
+The file holds no `env` value. A changed entry, a changed variable, another program on
+`PATH` or a changed repository file asks again. If the file changes while the prompt is on
+screen, the key stores nothing and the prompt shows the new entry. A headless run
 (`--task`) never asks: it skips an unapproved server and prints one line. User servers need no
 approval and run in the sandbox with no network.
 
 A project's `.mcp.json` comes with the repository, so it may not read a secret variable: a
-provider key, a `key_env`, or a name that ends in `_KEY`, `_TOKEN` or `_SECRET`. Such an entry
-fails with a note. Put a server that needs a secret in `~/.config/ram-code/mcp.json`.
+provider key, a `key_env`, or a name that ends in `_KEY`, `_TOKEN` or `_SECRET`. It may not
+set an `env` variable that changes what the command runs either: `PATH` and any name that
+ends in `PATH`, `NODE_OPTIONS`, `PYTHONSTARTUP`, `PYTHONHOME`, `RUBYOPT`, `RUBYLIB`, `PERL5OPT`,
+`PERL5LIB`, `BASH_ENV`, `ENV`, the Java option variables, `DYLD_*`, `LD_*` and
+`npm_config_*`. Such an entry fails with a note. Put the server in
+`~/.config/ram-code/mcp.json` instead.
 
 `/mcp` lists the servers, with their source, approval and state. `/mcp approve <name> [a|n|u]`
 and `/mcp deny <name>` change a decision.
 
-Servers start with each task, in the worker, and stop when the task ends: Ram Code closes
-their input, waits 2 seconds, then kills their process group. A server that crashes starts
+Servers start with each task, in the worker, and stop when the task ends. Ram Code closes the
+input of every server at once and waits 2 seconds. Then it kills each server's process group
+and each process under the server, as listed while the server ran, including one that left
+the group with `setsid`.
+
+> **Note:** on macOS, a process that a server starts and then leaves, as a daemon does with a
+> double fork, is no longer under the server when Ram Code lists the tree. Such a process can
+> outlive the task. On Linux, `bwrap` gives each server its own process namespace, which ends
+> with the server. A server that crashes starts
 again once on the next call. A second crash marks it failed for the task. A server gets the
 environment without secrets, as `run_command` does, plus the variables its `env` names.
 
