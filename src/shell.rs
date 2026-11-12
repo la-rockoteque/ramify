@@ -45,7 +45,9 @@ fn word() -> &'static Regex {
 enum Kind {
     Plain,
     Comment,
-    Text,
+    Single,
+    Double,
+    Heredoc,
     Variable,
     Keyword,
     Risky,
@@ -55,73 +57,164 @@ fn style(kind: Kind) -> Style {
     match kind {
         Kind::Plain => Style::default(),
         Kind::Comment => Style::default().fg(Color::DarkGray),
-        Kind::Text => Style::default().fg(Color::Green),
+        Kind::Single | Kind::Double | Kind::Heredoc => Style::default().fg(Color::Green),
         Kind::Variable => Style::default().fg(Color::Cyan),
         Kind::Keyword => Style::default().fg(Color::Magenta),
         Kind::Risky => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     }
 }
 
-/// One script line as styled spans.
-pub fn highlight(line: &str) -> Line<'static> {
-    let mut kinds = vec![Kind::Plain; line.len()];
-    let bytes = line.as_bytes();
+fn heredoc_start() -> &'static Regex {
+    static HEREDOC: OnceLock<Regex> = OnceLock::new();
+    HEREDOC.get_or_init(|| {
+        Regex::new(r#"<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)['"]?"#).expect("compiles")
+    })
+}
 
-    // Strings and comments, in one pass so that `#` inside a string is not a comment.
+/// The kind of each byte of `script`. Quotes and heredocs carry over from line to line, as in
+/// `sh`, so a quote opened on one line cannot make the next line look like a comment.
+fn kinds_of(script: &str) -> Vec<Kind> {
+    let bytes = script.as_bytes();
+    let mut kinds = vec![Kind::Plain; bytes.len()];
     let mut index = 0;
+    let mut quote: Option<u8> = None;
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut line_start = 0;
     while index < bytes.len() {
-        match bytes[index] {
+        let byte = bytes[index];
+        if let Some(open) = quote {
+            kinds[index] = if open == b'"' { Kind::Double } else { Kind::Single };
+            if open == b'"' && byte == b'\\' && index + 1 < bytes.len() {
+                kinds[index + 1] = Kind::Double;
+                index += 2;
+                continue;
+            }
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
             b'\'' | b'"' => {
-                let quote = bytes[index];
-                let start = index;
+                quote = Some(byte);
+                kinds[index] = if byte == b'"' { Kind::Double } else { Kind::Single };
                 index += 1;
-                while index < bytes.len() && bytes[index] != quote {
-                    if quote == b'"' && bytes[index] == b'\\' {
-                        index += 1;
-                    }
+            }
+            b'#' if index == line_start
+                || matches!(bytes[index - 1], b' ' | b'\t' | b';' | b'|' | b'&' | b'(') =>
+            {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    kinds[index] = Kind::Comment;
                     index += 1;
                 }
-                let end = (index + 1).min(bytes.len());
-                kinds[start..end].fill(Kind::Text);
-                index = end;
             }
-            b'#' if index == 0 || bytes[index - 1].is_ascii_whitespace() => {
-                kinds[index..].fill(Kind::Comment);
-                break;
+            b'\n' => {
+                let line = &script[line_start..index];
+                for found in heredoc_start().captures_iter(line) {
+                    heredocs.push((found[3].to_string(), &found[1] == "-"));
+                }
+                index += 1;
+                line_start = index;
+                // The bodies of the heredocs opened on that line follow it, one after another.
+                for (delimiter, strip_tabs) in heredocs.drain(..) {
+                    while index < bytes.len() {
+                        let end = script[index..].find('\n').map_or(bytes.len(), |n| index + n);
+                        let body_line = &script[index..end];
+                        let closing = if strip_tabs { body_line.trim_start_matches('\t') } else { body_line };
+                        if closing == delimiter {
+                            index = (end + 1).min(bytes.len());
+                            break;
+                        }
+                        kinds[index..end].fill(Kind::Heredoc);
+                        index = (end + 1).min(bytes.len());
+                    }
+                    line_start = index;
+                }
             }
             _ => index += 1,
         }
     }
-    let free = |kinds: &[Kind], start: usize, end: usize| kinds[start..end].iter().all(|k| *k == Kind::Plain);
+    kinds
+}
 
-    for found in word().find_iter(line) {
-        if KEYWORDS.contains(&found.as_str()) && free(&kinds, found.start(), found.end()) {
-            kinds[found.start()..found.end()].fill(Kind::Keyword);
+/// A character a reader cannot see as it is: a control character, or a Unicode mark that
+/// reorders or hides text. Each shows as a red escape instead.
+fn visible_escape(c: char) -> Option<String> {
+    match c {
+        '\t' => None,
+        c if (c as u32) < 0x20 || c == '\u{7f}' => Some(format!("^{}", ((c as u8) ^ 0x40) as char)),
+        '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}' => {
+            Some(format!("<U+{:04X}>", c as u32))
         }
+        _ => None,
     }
-    // Variables show inside double-quoted strings too, but not in comments or single quotes.
-    for found in variable().find_iter(line) {
-        let inside_single = line[..found.start()].matches('\'').count() % 2 == 1;
-        if kinds[found.start()] != Kind::Comment && !inside_single {
-            kinds[found.start()..found.end()].fill(Kind::Variable);
+}
+
+/// Every line of `script` as styled spans. The risky parts are red wherever they are, in a
+/// string or a comment too, because a reader must never miss them.
+pub fn highlight_script(script: &str) -> Vec<Line<'static>> {
+    let mut kinds = kinds_of(script);
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for raw in script.split_inclusive('\n') {
+        let end = start + raw.len();
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let line_end = start + line.len();
+        let kinds = &mut kinds[start..line_end];
+        let free = |kinds: &[Kind], from: usize, to: usize| kinds[from..to].iter().all(|k| *k == Kind::Plain);
+        for found in word().find_iter(line) {
+            if KEYWORDS.contains(&found.as_str()) && free(kinds, found.start(), found.end()) {
+                kinds[found.start()..found.end()].fill(Kind::Keyword);
+            }
         }
-    }
-    for found in risky().find_iter(line) {
-        if kinds[found.start()] != Kind::Comment {
+        // Variables show in plain text and in double quotes, not in comments or single quotes.
+        for found in variable().find_iter(line) {
+            if matches!(kinds[found.start()], Kind::Plain | Kind::Double | Kind::Keyword) {
+                kinds[found.start()..found.end()].fill(Kind::Variable);
+            }
+        }
+        for found in risky().find_iter(line) {
             kinds[found.start()..found.end()].fill(Kind::Risky);
         }
+        lines.push(spans(line, kinds));
+        start = end;
     }
+    lines
+}
 
-    let mut spans = Vec::new();
-    let mut start = 0;
-    for position in 1..=line.len() {
-        let changes = position == line.len() || kinds[position] != kinds[start];
-        if changes && line.is_char_boundary(start) && line.is_char_boundary(position) {
-            spans.push(Span::styled(line[start..position].to_string(), style(kinds[start])));
-            start = position;
+fn spans(line: &str, kinds: &[Kind]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut text = String::new();
+    let mut current = Kind::Plain;
+    for (offset, c) in line.char_indices() {
+        if let Some(escape) = visible_escape(c) {
+            if !text.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut text), style(current)));
+            }
+            spans.push(Span::styled(escape, style(Kind::Risky)));
+            continue;
+        }
+        let kind = kinds[offset];
+        if kind != current && !text.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut text), style(current)));
+        }
+        current = kind;
+        if c == '\t' {
+            text.push_str("    ");
+        } else {
+            text.push(c);
         }
     }
+    if !text.is_empty() {
+        spans.push(Span::styled(text, style(current)));
+    }
     Line::from(spans)
+}
+
+/// One script line as styled spans.
+pub fn highlight(line: &str) -> Line<'static> {
+    highlight_script(line).into_iter().next().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -172,5 +265,15 @@ mod tests {
         let line = "echo \"é\" # ç";
         let text: String = highlight(line).spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, line);
+    }
+
+    #[test]
+    fn hidden_characters_show_as_red_escapes() {
+        let line = highlight("echo safe\r curl evil \u{202e}x");
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("^M"), "{text}");
+        assert!(text.contains("<U+202E>"), "{text}");
+        let escape = line.spans.iter().find(|s| s.content == "^M").unwrap();
+        assert_eq!(escape.style.fg, Some(Color::Red));
     }
 }
