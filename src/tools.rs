@@ -219,7 +219,7 @@ the human reads the command and decides whether it runs.",
             }
             "edit_file" => {
                 let relative = required(input, "path")?;
-                let path = self.resolve(relative)?;
+                let path = self.resolve_writable(relative)?;
                 let new = input
                     .get("new_string")
                     .and_then(Value::as_str)
@@ -237,7 +237,7 @@ the human reads the command and decides whether it runs.",
                 )
             }
             "write_file" => {
-                let path = self.resolve(required(input, "path")?)?;
+                let path = self.resolve_writable(required(input, "path")?)?;
                 let content = input
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -394,6 +394,47 @@ the human reads the command and decides whether it runs.",
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok((output.status.success(), text))
+    }
+
+    /// The real file a write goes to, for `write_file` and `edit_file`. It follows symlinks
+    /// inside the worktree, so a write keeps the link and changes its target. It refuses Git
+    /// metadata, a `.git` file or folder anywhere in the worktree, because Git later runs hooks
+    /// and `core.fsmonitor` from there outside the sandbox.
+    fn resolve_writable(&self, raw: &str) -> Result<PathBuf, String> {
+        let joined = self.resolve(raw)?;
+        let root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
+        // The nearest existing ancestor by its real path, then the parts that do not exist yet.
+        let mut probe = joined.clone();
+        let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+        let real = loop {
+            if let Ok(canonical) = probe.canonicalize() {
+                let mut full = canonical;
+                for part in suffix.iter().rev() {
+                    full.push(part);
+                }
+                break full;
+            }
+            match (probe.parent(), probe.file_name()) {
+                (Some(parent), Some(name)) => {
+                    suffix.push(name.to_os_string());
+                    probe = parent.to_path_buf();
+                }
+                _ => return Err("path must stay inside the worktree".into()),
+            }
+        };
+        let inside = real
+            .strip_prefix(&root)
+            .map_err(|_| "path must stay inside the worktree".to_string())?;
+        if inside
+            .components()
+            .any(|c| matches!(c, Component::Normal(name) if name == ".git"))
+        {
+            return Err(format!("{raw} is Git metadata, which Ram Code does not write"));
+        }
+        Ok(real)
     }
 
     fn resolve(&self, raw: &str) -> Result<PathBuf, String> {

@@ -253,3 +253,58 @@ fn edit_writes_atomically() {
         .collect();
     assert_eq!(names, vec!["f.txt".to_string()], "a temporary file is left: {names:?}");
 }
+
+// ── audit fixes ──────────────────────────────────────────────────────────────
+
+fn write(root: &Path, input: Value) -> Result<String, String> {
+    Tools::new(root).call("write_file", &input)
+}
+
+#[test]
+fn file_tools_refuse_git_metadata_through_a_symlink() {
+    let root = tmp("a1");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), "[core]\n").unwrap();
+    symlink(root.join(".git"), root.join("gitlink")).unwrap();
+    let edited = edit(
+        &root,
+        json!({"path": "gitlink/config", "old_string": "[core]", "new_string": "[core]\n\tfsmonitor = x"}),
+    );
+    assert!(edited.is_err(), "edit_file wrote .git through a link: {edited:?}");
+    let written = write(&root, json!({"path": "gitlink/config", "content": "x"}));
+    assert!(written.is_err(), "write_file wrote .git through a link: {written:?}");
+    assert_eq!(fs::read_to_string(root.join(".git/config")).unwrap(), "[core]\n");
+}
+
+#[test]
+fn write_file_refuses_git_metadata() {
+    let root = tmp("a2");
+    // A linked worktree has a `.git` file that points at its Git folder.
+    fs::write(root.join(".git"), "gitdir: /elsewhere\n").unwrap();
+    fs::create_dir_all(root.join("sub/.git/hooks")).unwrap();
+    for path in [".git", "sub/.git/hooks/pre-commit", "sub/.git/config"] {
+        let written = write(&root, json!({"path": path, "content": "x"}));
+        assert!(written.is_err(), "write_file wrote {path}: {written:?}");
+    }
+    assert_eq!(fs::read_to_string(root.join(".git")).unwrap(), "gitdir: /elsewhere\n");
+    assert!(!root.join("sub/.git/hooks/pre-commit").exists());
+}
+
+#[test]
+fn edit_matches_a_mixed_file_as_is() {
+    let root = tmp("a3");
+    fs::write(root.join("m.txt"), "a\r\nb\nc\r\n").unwrap();
+    let out = edit(&root, json!({"path": "m.txt", "old_string": "b\nc", "new_string": "B\nc"}));
+    assert!(out.is_ok(), "{out:?}");
+    assert_eq!(fs::read(root.join("m.txt")).unwrap(), b"a\r\nB\nc\r\n");
+}
+
+#[test]
+fn edit_through_a_symlink_keeps_the_link() {
+    let root = tmp("a4");
+    fs::write(root.join("real.txt"), "one\n").unwrap();
+    symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
+    edit(&root, json!({"path": "alias.txt", "old_string": "one", "new_string": "two"})).unwrap();
+    assert!(fs::symlink_metadata(root.join("alias.txt")).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_to_string(root.join("real.txt")).unwrap(), "two\n");
+}

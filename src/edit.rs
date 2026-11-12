@@ -31,9 +31,12 @@ pub fn edit_file(
     let text = read_utf8(path)?;
 
     // A CRLF file gets CRLF in the strings, so an LF edit matches and keeps the file's endings.
+    // A file with mixed endings is matched as it is first, and with CRLF only if that fails.
     let crlf = text.contains("\r\n");
-    let (old, new) = if crlf {
-        (to_crlf(old), to_crlf(new))
+    let bare_lf = text.replace("\r\n", "").contains('\n');
+    let converted = (to_crlf(old), to_crlf(new));
+    let (old, new) = if crlf && (!bare_lf || !text.contains(old)) {
+        converted
     } else {
         (old.to_string(), new.to_string())
     };
