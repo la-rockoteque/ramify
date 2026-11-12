@@ -143,24 +143,28 @@ both. Rust is not needed. Run the installer again to update, or use `ram update`
 ### Updates
 
 When the interface starts, Ram Code checks for an update on a background thread. It checks at
-most once in 24 hours, and keeps the result in `~/.cache/ram-code/update.json`. A network error
-or a check longer than 10 s shows nothing.
+most once in 24 hours per install, and keeps the result in `~/.cache/ram-code/update.json`. A
+network error or a check longer than 10 s shows nothing. `git fetch` runs with no terminal and
+with `ssh -o BatchMode=yes` (unless you set `GIT_SSH_COMMAND`), so it never asks for a password.
 
 - A release install (a folder with a `RELEASE` file) compares its tag with the latest GitHub
   release. `RAMIFY_RELEASES` changes the releases URL.
-- A checkout runs `git fetch origin main` and counts the commits on `origin/main` that `main`
-  does not have.
+- A checkout on `main` runs `git fetch origin main` and counts the commits on `origin/main`
+  that `main` does not have. A checkout on another branch is offered nothing.
 
 When an update exists, the header shows `update v0.3.0 → ram update`, or
-`update: 4 commits on main → ram update`.
+`update: 4 commits on main → ram update`. After a build that failed, it shows
+`update: the build is older than main → ram update`.
 
 `ram update` installs it:
 
-- A release install runs its own `install.sh` from a copy. The installer checks the SHA-256 and
-  swaps the folder in one move, so a failed update keeps the old release.
+- A release install runs its own `install.sh` for the tag the check found, and links `ram` again
+  in the folder where it is linked now. The installer checks the SHA-256 and swaps the folder in
+  one move, so a failed download keeps the old release.
 - A checkout fast-forwards `main` to `origin/main`, then builds `cli/` and Ram Code in release
   mode. It refuses a checkout on another branch, with uncommitted changes, or with commits that
-  `origin/main` does not have.
+  `origin/main` does not have. A build that fails is built again by the next `ram update`.
+- One `ram update` runs at a time: a second one exits with `another ram update is running`.
 
 Auto-update is off. To turn it on, put `{"auto_update": true}` in
 `~/.config/ram-code/settings.json`. Then, when you quit with an update found, Ram Code starts

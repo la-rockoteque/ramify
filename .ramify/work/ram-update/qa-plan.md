@@ -35,6 +35,17 @@ folder in a temp folder, and points the cache and the config at that temp folder
 | Q19 | AC14 | low | The README documents the check, the header line, `ram update`, `auto_update` and `RAM_CODE_NO_UPDATE` | audit |
 | Q20 | AC5 | medium | Read the diff: the check runs on its own thread, and the interface thread only reads its result | audit |
 
+Cases added at the review:
+
+| Case | AC | Risk | Check | Settled by |
+|---|---|---|---|---|
+| Q21 | AC9 | high | `a_failed_build_is_built_again` | build |
+| Q22 | AC3 | medium | `a_checkout_off_main_is_offered_nothing` | build |
+| Q23 | AC5 | medium | `a_hung_fetch_ends_in_time` | build |
+| Q24 | AC4 | medium | `the_cache_keeps_one_entry_per_install` | build |
+| Q25 | AC6 | low | `a_tag_with_odd_characters_is_refused` | build |
+| Q26 | AC7 | medium | `two_updates_at_once_refuse` | build |
+
 ## Write set
 
 ```

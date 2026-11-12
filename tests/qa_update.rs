@@ -128,7 +128,7 @@ fn release_tree(dir: &Path, tag: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"ram-code\"\n").unwrap();
     std::fs::write(dir.join("RELEASE"), format!("{tag}\n")).unwrap();
     std::fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"),
@@ -163,17 +163,17 @@ fn release_files(base: &Path, tag: &str, bad: bool) -> Vec<(String, Vec<u8>)> {
         base,
     );
     let sum = sh(
-        &format!("shasum -a 256 '{}' | cut -d' ' -f1", archive.display()),
+        &format!("{{ shasum -a 256 '{}' 2>/dev/null || sha256sum '{}'; }} | cut -d' ' -f1", archive.display(), archive.display()),
         base,
     );
     let sum = if bad { "0".repeat(64) } else { sum };
     vec![
         (
-            format!("/latest/download/{}", asset()),
+            format!("/download/{tag}/{}", asset()),
             std::fs::read(&archive).unwrap(),
         ),
         (
-            format!("/latest/download/{}.sha256", asset()),
+            format!("/download/{tag}/{}.sha256", asset()),
             format!("{sum}  {}\n", asset()).into_bytes(),
         ),
     ]
@@ -314,7 +314,8 @@ fn an_old_cache_checks_again() {
     let file = cache.join("update.json");
     let mut record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    record["checked_at"] = serde_json::json!(record["checked_at"].as_u64().unwrap() - 25 * 3600);
+    let entry = &mut record[base.join("home").display().to_string()];
+    entry["checked_at"] = serde_json::json!(entry["checked_at"].as_u64().unwrap() - 25 * 3600);
     std::fs::write(&file, record.to_string()).unwrap();
     check(&install, &cache, &server.url);
     assert_eq!(server.requests.load(Ordering::SeqCst), 2);
@@ -397,6 +398,9 @@ fn the_header_shows_the_update() {
 fn ram(args: &[&str], envs: &[(&str, &Path)], extra: &[(&str, &str)]) -> (i32, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ram-code"));
     command.args(args);
+    // Never the user's own cache: `ram update` takes a lock there and clears the check.
+    let cache = std::env::temp_dir().join(format!("ram-update-{}-cli-cache", std::process::id()));
+    command.env("RAM_CODE_CACHE_DIR", cache);
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -426,7 +430,8 @@ fn ram_update_installs_a_newer_release() {
             ("RAMIFY_BIN_DIR", &base.join("bin")),
             ("RAM_CODE_CACHE_DIR", &base.join("cache")),
         ],
-        &[("RAMIFY_RELEASES", &server.url)],
+        // The tag the check found wins over a version left in the environment.
+        &[("RAMIFY_RELEASES", &server.url), ("RAMIFY_VERSION", "v0.1.0")],
     );
     assert_eq!(code, 0, "{text}");
     assert_eq!(
@@ -436,6 +441,10 @@ fn ram_update_installs_a_newer_release() {
         "v0.3.0"
     );
     assert!(text.contains("ram updated from v0.2.0 to v0.3.0"), "{text}");
+    assert_eq!(
+        std::fs::read_link(base.join("bin/ram")).unwrap(),
+        home.join("bin/ram")
+    );
 }
 
 #[test]
@@ -634,4 +643,100 @@ fn version_names_the_install() {
         text.trim(),
         format!("ram-code {} (main@{commit})", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn a_failed_build_is_built_again() {
+    let _guard = serial();
+    let base = tmp("rebuild");
+    let (_, clone) = checkout(&base);
+    advance(&base, 1);
+    let log = base.join("build.log");
+    let failing = format!("[ \"$1\" = Cargo.toml ] && exit 1; echo \"$1\" >> '{}'", log.display());
+    let (code, text) = ram(&["update"], &[("RAM_CODE_HOME", &clone)], &[("RAM_CODE_BUILD", &failing)]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("run ram update again"), "{text}");
+    // On origin/main, but the binaries are not from it: the check says so.
+    let found = check(&install_of(&clone), &base.join("cache"), "");
+    assert_eq!(found, Some(Found::Rebuild));
+    let working = format!("echo \"$1\" >> '{}'", log.display());
+    let (code, text) = ram(&["update"], &[("RAM_CODE_HOME", &clone)], &[("RAM_CODE_BUILD", &working)]);
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = ram(&["update"], &[("RAM_CODE_HOME", &clone)], &[("RAM_CODE_BUILD", &working)]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("ram is up to date"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "cli/Cargo.toml\ncli/Cargo.toml\nCargo.toml\n"
+    );
+    assert_eq!(check(&install_of(&clone), &base.join("cache-2"), ""), None);
+}
+
+#[test]
+fn a_checkout_off_main_is_offered_nothing() {
+    let _guard = serial();
+    let base = tmp("branch");
+    let (_, clone) = checkout(&base);
+    advance(&base, 2);
+    sh("git checkout -q -b feat/x", &clone);
+    assert_eq!(check(&install_of(&clone), &base.join("cache"), ""), None);
+}
+
+#[test]
+fn a_hung_fetch_ends_in_time() {
+    let _guard = serial();
+    let base = tmp("hung");
+    let (_, clone) = checkout(&base);
+    sh("git remote set-url origin ssh://example.invalid/x.git", &clone);
+    std::env::set_var("GIT_SSH_COMMAND", "sleep 30");
+    let started = Instant::now();
+    let found = check(&install_of(&clone), &base.join("cache"), "");
+    std::env::remove_var("GIT_SSH_COMMAND");
+    assert_eq!(found, None);
+    assert!(started.elapsed() <= Duration::from_secs(12), "{:?}", started.elapsed());
+}
+
+#[test]
+fn the_cache_keeps_one_entry_per_install() {
+    let _guard = serial();
+    let base = tmp("entries");
+    let (one, two) = (base.join("one"), base.join("two"));
+    release_tree(&one, "v0.2.0");
+    release_tree(&two, "v0.2.0");
+    let server = server("v0.3.0", Vec::new(), false);
+    let cache = base.join("cache");
+    for _ in 0..2 {
+        check(&install_of(&one), &cache, &server.url);
+        check(&install_of(&two), &cache, &server.url);
+    }
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+    // A new version of one install checks again, and is up to date.
+    std::fs::write(one.join("RELEASE"), "v0.3.0\n").unwrap();
+    assert_eq!(check(&install_of(&one), &cache, &server.url), None);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_tag_with_odd_characters_is_refused() {
+    let _guard = serial();
+    let base = tmp("odd");
+    release_tree(&base.join("home"), "v0.2.0");
+    let server = server("v9;rm", Vec::new(), false);
+    assert_eq!(check(&install_of(&base.join("home")), &base.join("cache"), &server.url), None);
+}
+
+#[test]
+fn two_updates_at_once_refuse() {
+    use std::os::fd::AsRawFd;
+    let _guard = serial();
+    let base = tmp("lock");
+    let home = base.join("home");
+    release_tree(&home, "v0.2.0");
+    let cache = base.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let held = std::fs::File::create(cache.join("update.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let (code, text) = ram(&["update"], &[("RAM_CODE_HOME", &home), ("RAM_CODE_CACHE_DIR", &cache)], &[]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("another ram update is running"), "{text}");
 }

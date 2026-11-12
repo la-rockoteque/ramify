@@ -41,7 +41,7 @@ fn main() -> std::io::Result<()> {
         let install = update::home()
             .map(|home| update::install_of(&home))
             .unwrap_or(update::Install::Unknown);
-        match update::run(&install, &update::releases()) {
+        match update::run(&install, &update::releases(), &update::cache_dir()) {
             Ok(done) => {
                 println!("{done}");
                 return Ok(());
@@ -95,7 +95,12 @@ fn main() -> std::io::Result<()> {
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
     app.end_session();
-    app.auto_update();
+    if app.auto_update() {
+        println!(
+            "ram: an update runs in the background; its log is {}",
+            update::cache_dir().join("update.log").display()
+        );
+    }
     result
 }
 

@@ -81,6 +81,26 @@ one command, or by itself when the user asks for that.
 - AC14: The README documents the check, the header line, `ram update`, `auto_update` and
   `RAM_CODE_NO_UPDATE`.
 
+## Amendment: review (2026-11-12)
+
+9. A checkout update writes the commit it built to `target/release/.ram-built`. A build that
+   fails leaves a stamp that is not HEAD. Then the check finds `Rebuild`, and the next
+   `ram update` builds again. After a build, the release binary is newer than any debug build.
+10. A checkout on a branch other than `main` is offered nothing.
+11. `git fetch` and the detached update run in their own session, with no terminal. `ssh` runs
+    with `BatchMode=yes` unless the user set `GIT_SSH_COMMAND`. A timeout kills the whole group.
+12. A release update runs the folder's `install.sh` in place, with `--version <tag found>`,
+    without `RAMIFY_VERSION`, and with `--bin-dir` of the current `ram` link on PATH. A failure
+    after the swap says that the new release is installed.
+13. One `ram update` runs at a time (`update.lock`). The cache keeps one entry per install, and is
+    written with a rename. `ram update` clears it.
+14. A tag outside `[A-Za-z0-9._+-]`, or longer than 64 characters, is refused. Tags compare as
+    semantic versions: `v1.2` equals `v1.2.0`, and `v0.3.0-rc.1` comes before `v0.3.0`.
+15. `RAM_CODE_BUILD` and `RAM_CODE_UPDATER` work only in a debug build. `home()` accepts the
+    folder above the binary only when it holds `bin/ram` and the `ram-code` `Cargo.toml`.
+16. The installer may run 10 minutes at most. `update.log` starts again past 1 MB. At quit, Ram
+    Code says that an update runs in the background, and names the log.
+
 ## Out of scope
 
 - A check or an update for the `ramify` CLI alone. Both binaries come from one install, so one

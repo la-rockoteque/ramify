@@ -26,4 +26,15 @@ The build cases ran with `cargo test --test qa_update`: 16 passed. The full suit
 | Q19 | pass | audit: README "Updates" |
 | Q20 | pass | audit: the check runs on its own thread |
 
-**Yield:** 20 cases. 19 ran, 19 passed, 0 failed. The user waived Q17.
+Cases added at the review:
+
+| Case | Result | Evidence |
+|---|---|---|
+| Q21 | pass | `a_failed_build_is_built_again` |
+| Q22 | pass | `a_checkout_off_main_is_offered_nothing` |
+| Q23 | pass | `a_hung_fetch_ends_in_time` |
+| Q24 | pass | `the_cache_keeps_one_entry_per_install` |
+| Q25 | pass | `a_tag_with_odd_characters_is_refused` |
+| Q26 | pass | `two_updates_at_once_refuse` |
+
+**Yield:** 26 cases. 25 ran, 25 passed, 0 failed. The user waived Q17.
