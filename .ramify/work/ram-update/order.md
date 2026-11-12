@@ -11,6 +11,7 @@ steps:
 - {step: audit, date: '2026-11-12'}
 - {step: qa, date: '2026-11-12', note: Q17 waived by the user}
 - {step: review, date: '2026-11-12'}
+- {step: pr, date: '2026-11-12', note: '#59'}
 ---
 
 # ram-update
