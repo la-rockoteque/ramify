@@ -996,3 +996,103 @@ fn esc_without_a_task_does_nothing() {
     app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.quit);
 }
+
+// ── audit ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sse_parser_handles_crlf_comments_bare_data_and_split_utf8() {
+    use ram_code::stream::SseParser;
+    let mut parser = SseParser::default();
+    let text = "é".as_bytes();
+    let mut events = Vec::new();
+    events.extend(parser.push(b": keep-alive\r\nevent: a\r\ndata:{\"t\":\""));
+    events.extend(parser.push(&text[..1]));
+    events.extend(parser.push(&text[1..]));
+    events.extend(parser.push(b"\"}\r\ndata: second\r\n\r\n"));
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].name.as_deref(), Some("a"));
+    assert_eq!(events[0].data, "{\"t\":\"é\"}\nsecond");
+}
+
+#[test]
+fn openai_name_split_across_fragments_with_id_first() {
+    let delta = |d: Value| json!({"choices": [{"index": 0, "delta": d, "finish_reason": null}]});
+    let events = vec![
+        (0, delta(json!({"tool_calls": [{"index": 1, "id": "call_b", "type": "function",
+            "function": {"name": "list_", "arguments": ""}}]}))),
+        (0, delta(json!({"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
+            "function": {"name": "read", "arguments": "{\"pa"}}]}))),
+        (0, delta(json!({"tool_calls": [{"index": 1, "function": {"name": "files", "arguments": "{}"}}]}))),
+        (0, delta(json!({"tool_calls": [{"index": 0, "function": {"name": "_file", "arguments": "th\":\"a\"}"}}]}))),
+        (0, json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})),
+    ];
+    let (base, _seen) = serve(vec![chunks(&events)]);
+    let reply = OpenAiLlm::new(config(&base)).stream(&json!({"model": "m", "messages": []}), &Cancel::new(), &mut |_| {});
+    assert_eq!(reply.end, ReplyEnd::Complete);
+    let content = reply.message["content"].as_array().unwrap();
+    assert_eq!(content[0]["id"], "call_a");
+    assert_eq!(content[0]["name"], "read_file");
+    assert_eq!(content[0]["input"], json!({"path": "a"}));
+    assert_eq!(content[1]["id"], "call_b");
+    assert_eq!(content[1]["name"], "list_files");
+}
+
+#[test]
+fn openai_stream_cut_before_the_end_is_an_error() {
+    let delta = |d: Value| json!({"choices": [{"index": 0, "delta": d, "finish_reason": null}]});
+    let cut = Reply {
+        content_type: "text/event-stream",
+        pieces: vec![
+            Piece(0, format!("data: {}\n\n", delta(json!({"content": "half an ans"})))),
+        ],
+    };
+    let (base, _seen) = serve(vec![cut]);
+    let reply = OpenAiLlm::new(config(&base)).stream(&json!({"model": "m", "messages": []}), &Cancel::new(), &mut |_| {});
+    assert!(
+        matches!(reply.end, ReplyEnd::Failed(_)),
+        "a stream cut before finish_reason or [DONE] passed as complete: {:?}",
+        reply.end
+    );
+    assert_eq!(reply.message["content"][0]["text"], "half an ans");
+}
+
+struct ThinkingOnly;
+
+impl Llm for ThinkingOnly {
+    fn complete(&self, _request: &Value) -> Result<Value, String> {
+        Err("not used".into())
+    }
+
+    fn stream(&self, _request: &Value, _cancel: &Cancel, _on_text: &mut dyn FnMut(&str)) -> ram_code::agent::Reply {
+        ram_code::agent::Reply {
+            message: json!({"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": "sig"}
+            ]}),
+            end: ReplyEnd::Interrupted,
+        }
+    }
+}
+
+#[test]
+fn an_interrupt_after_thinking_only_leaves_no_thinking_only_message() {
+    let root = tmp("audit-think");
+    let turn = run_turn_cancellable(
+        &ThinkingOnly,
+        &root,
+        &[],
+        "go",
+        &Hooked::none(&root),
+        &Cancel::new(),
+        &mut |_| {},
+    );
+    assert_eq!(turn.end, TurnEnd::Interrupted);
+    for message in &turn.history {
+        if message["role"] == "assistant" {
+            let blocks = message["content"].as_array().cloned().unwrap_or_default();
+            assert!(
+                blocks.iter().any(|b| b["type"] == "text" || b["type"] == "tool_use"),
+                "an assistant message holds only thinking: {message}"
+            );
+        }
+    }
+}

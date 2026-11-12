@@ -449,10 +449,15 @@ impl OpenAiAssembler {
         Flow::Continue
     }
 
+    /// True once the stream said it is over: `[DONE]` or a `finish_reason`.
+    pub fn over(&self) -> bool {
+        self.finished || self.finish.is_some()
+    }
+
     /// The reply so far, in the Anthropic shape. Before the stream ends, the last tool call may
     /// be cut, so only the calls before it stay.
     pub fn message(&self) -> Value {
-        let over = self.finished || self.finish.is_some();
+        let over = self.over();
         let last = self.calls.keys().next_back().copied();
         let calls: Vec<Value> = self
             .calls

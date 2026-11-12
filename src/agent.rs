@@ -473,7 +473,15 @@ fn push_task(messages: &mut Vec<Value>, content: String) {
 /// Close a turn that stopped part way: keep the assistant blocks, and answer each `tool_use` with
 /// an error result, so the next request is valid for both formats.
 fn close_turn(messages: &mut Vec<Value>, blocks: Vec<Value>, result: &str) {
-    if blocks.is_empty() {
+    // Thinking alone carries nothing the next turn needs, and an assistant message with no text
+    // and no tool call is not a valid turn to send back.
+    let useful = blocks.iter().any(|block| {
+        matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("text") | Some("tool_use")
+        )
+    });
+    if !useful {
         return;
     }
     let results: Vec<Value> = blocks

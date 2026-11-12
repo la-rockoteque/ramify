@@ -78,7 +78,11 @@ impl Llm for OpenAiLlm {
             Ended::Failed(error) => ReplyEnd::Failed(error),
             Ended::Done => match &assembler.error {
                 Some(error) => ReplyEnd::Failed(error.clone()),
-                None => ReplyEnd::Complete,
+                None if assembler.over() => ReplyEnd::Complete,
+                // The connection closed with no finish_reason and no [DONE]: the reply is cut.
+                None => ReplyEnd::Failed(
+                    "the model stream ended before a finish_reason or [DONE]".into(),
+                ),
             },
         };
         let message = assembler.message();
