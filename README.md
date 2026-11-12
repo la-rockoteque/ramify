@@ -129,6 +129,38 @@ RAMIFY_ROOT=/path/to/worktree cargo run -- --task "Add a --version flag"
 The tests are `cargo test`; they cover the acceptance criteria in
 `.ramify/work/ram-code/spec.md`.
 
+### Sandbox
+
+`run_command` runs each command in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux.
+
+- A command reads any file. It writes only in the worktree, in a temp folder for the task
+  (`$TMPDIR`), and to `/dev/null` and the terminal devices.
+- A command has no network. Local Unix sockets still work.
+- The environment has no provider keys. Ram Code removes every `ANTHROPIC_*` and `RAM_CODE_*`
+  variable, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, each `key_env` in `providers.json`, and any
+  variable whose name ends in `_KEY`, `_TOKEN` or `_SECRET` or contains `PASSWORD`.
+- A command stops after `timeout_seconds`: 120 by default, 600 at most. Ram Code kills the
+  command's whole process group and returns the output so far with `timed out after N s`.
+  A background job that outlives its command is killed too.
+
+A command that must reach the network or write elsewhere, such as a dependency fetch, needs
+your OK. The model sets `outside_sandbox` and gives a reason:
+
+1. Ram Code writes the command to a script, with the reason in a comment.
+2. It runs `ramify run ask <script> --cwd <worktree> --note <reason> --no-window`.
+3. The side panel opens on the Run pane, on that run. The pane shows the script with colours:
+   comments, strings, variables and keywords. Risky parts are red: `rm -rf`, `sudo`, a pipe
+   into `sh` or `bash`, `curl`, `wget`, a write to an absolute path, `git push`, `chmod` and
+   `chown`.
+4. `g` runs the script, and `b` blocks it with a note. The model gets `ran: exit N` with the
+   output, or `blocked: <note>`.
+5. After 30 minutes without a decision, the model gets
+   `no decision; the run stays pending in the Run pane`. `RAM_CODE_RUN_WAIT` sets the wait in
+   seconds.
+
+With no sandbox program on the machine, every command goes to you this way. A headless run
+(`--task`) asks without `--no-window`, so the run window opens.
+
 ## Install
 
 ```bash
@@ -682,8 +714,8 @@ ramify runs                             # every run, newest first
   directory, the hash and the script with line numbers. Run has no keyboard shortcut. A started
   run outlives the window, and the window streams its output.
 - A run is a folder in `~/.claude/ramify/runs/<id>`: `script`, `meta.json` and `output.log`.
-  `RAMIFY_RUNS_DIR` moves them. `RAMIFY_POPUP=0` keeps the window shut, and a bare `ramify run`
-  opens it.
+  `RAMIFY_RUNS_DIR` moves them. `run ask --no-window` or `RAMIFY_POPUP=0` keeps the window
+  shut, and a bare `ramify run` opens it. Ram Code uses `--no-window`: its Run pane shows the run.
 - The plugin refuses `ramify run go` and `ramify run block` from the agent.
 
 `card`, `dash` and the status line show `▶ run <id> waits on you` while a run asked from that
