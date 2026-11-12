@@ -1,67 +1,177 @@
 //! The read-only search tools: `grep`, `glob` and `code_map`.
 //!
-//! Every walk starts at the worktree root, honours `.gitignore`, skips `.git`, binary files and
-//! symlinks, and keeps only the paths under the folder the model asked for.
+//! A walk starts at the worktree root, so the root `.gitignore` applies to every folder, but it
+//! enters only the folders on the way to the requested path and under it. It honours
+//! `.gitignore`, skips `.git`, binary files, files over 10 MB and symlinks.
 
-use globset::GlobBuilder;
+use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::path::{Component, Path, PathBuf};
 use tree_sitter::{Language, Node, Parser};
 
 const MAX_MATCHES: usize = 200;
 const MAX_LINE: usize = 300;
 const MAX_FILES: usize = 500;
+/// The most characters `code_map` returns, its cut note included.
 const MAX_MAP: usize = 40_000;
 /// A NUL byte in this many first bytes marks a file as binary, as git does.
 const BINARY_PROBE: usize = 8192;
+/// A larger file is skipped, so one huge file cannot fill the memory.
+const MAX_FILE: u64 = 10 * 1024 * 1024;
 
-/// The regular files under `base`, relative to `root`, sorted. `base` is already checked to stay
-/// inside `root`.
-fn files(root: &Path, base: &Path) -> Vec<PathBuf> {
-    if base.is_file() {
-        return base
-            .strip_prefix(root)
-            .map(|p| vec![p.to_path_buf()])
-            .unwrap_or_default();
+/// The worktree and the requested path, both by their real path, so a path typed in another case
+/// still matches on a file system that ignores case.
+struct Scope {
+    root: PathBuf,
+    base: PathBuf,
+}
+
+impl Scope {
+    /// `None` when the requested path does not exist.
+    fn new(root: &Path, base: &Path) -> Result<Option<Self>, String> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let Ok(base) = base.canonicalize() else {
+            return Ok(None);
+        };
+        let relative = base.strip_prefix(&root).unwrap_or(Path::new(""));
+        if relative
+            .components()
+            .any(|c| matches!(c, Component::Normal(name) if name == ".git"))
+        {
+            return Err(format!("{} is inside .git, which is not searched", relative.display()));
+        }
+        Ok(Some(Self { root, base }))
     }
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut found: Vec<PathBuf> = WalkBuilder::new(root)
-        .hidden(false)
-        .parents(false)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
-        .build()
-        .flatten()
-        .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
-        .map(|entry| entry.into_path())
-        .filter(|path| path.starts_with(base))
-        .filter(|path| {
-            path.canonicalize()
-                .is_ok_and(|real| real.starts_with(&canonical_root))
+
+    fn relative_base(&self) -> &Path {
+        self.base.strip_prefix(&self.root).unwrap_or(Path::new(""))
+    }
+
+    /// The regular files under the base, relative to the root, sorted. A base that `.gitignore`
+    /// ignores is an error, so a file path cannot reach what a folder walk skips.
+    fn files(&self) -> Result<Vec<PathBuf>, String> {
+        let base = self.base.clone();
+        let mut seen_base = self.base == self.root;
+        let mut found = Vec::new();
+        let walk = WalkBuilder::new(&self.root)
+            .hidden(false)
+            .parents(false)
+            .require_git(false)
+            .follow_links(false)
+            .filter_entry(move |entry| {
+                let path = entry.path();
+                entry.file_name() != ".git" && (path.starts_with(&base) || base.starts_with(path))
+            })
+            .build();
+        for entry in walk.flatten() {
+            let path = entry.path();
+            if path == self.base {
+                seen_base = true;
+            }
+            if entry.file_type().is_some_and(|t| t.is_file()) && path.starts_with(&self.base) {
+                if let Ok(relative) = path.strip_prefix(&self.root) {
+                    found.push(relative.to_path_buf());
+                }
+            }
+        }
+        if !seen_base {
+            return Err(format!(
+                "{} is ignored by .gitignore, so it is not searched",
+                self.relative_base().display()
+            ));
+        }
+        found.sort();
+        Ok(found)
+    }
+}
+
+enum Content {
+    Text(String),
+    Binary,
+    TooLarge,
+    Unreadable,
+}
+
+/// The text of a file. It reads the first bytes before the rest, so a binary file costs one
+/// small read.
+fn read_text(path: &Path) -> Content {
+    let Ok(file) = File::open(path) else {
+        return Content::Unreadable;
+    };
+    if file.metadata().map_or(true, |m| m.len() > MAX_FILE) {
+        return Content::TooLarge;
+    }
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    if (&mut reader).take(BINARY_PROBE as u64).read_to_end(&mut bytes).is_err() {
+        return Content::Unreadable;
+    }
+    if bytes.contains(&0) {
+        return Content::Binary;
+    }
+    if reader.read_to_end(&mut bytes).is_err() {
+        return Content::Unreadable;
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Content::Text(text),
+        Err(error) => Content::Text(String::from_utf8_lossy(error.as_bytes()).into_owned()),
+    }
+}
+
+/// The line count of a text file, read in chunks. `None` for a binary or unreadable file.
+fn count_lines(path: &Path) -> Option<usize> {
+    let mut reader = BufReader::new(File::open(path).ok()?);
+    let mut chunk = vec![0; 64 * 1024];
+    let (mut lines, mut first, mut last) = (0, true, b'\n');
+    loop {
+        let read = reader.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        let part = &chunk[..read];
+        if first && part[..read.min(BINARY_PROBE)].contains(&0) {
+            return None;
+        }
+        first = false;
+        lines += part.iter().filter(|&&b| b == b'\n').count();
+        last = part[read - 1];
+    }
+    Some(lines + usize::from(last != b'\n'))
+}
+
+/// One rule for `grep`'s filter and the `glob` tool. A pattern without `/` matches the file name
+/// at any depth. A pattern with `/` matches the path from the requested folder.
+struct PathFilter {
+    matcher: GlobMatcher,
+    by_name: bool,
+}
+
+impl PathFilter {
+    fn new(pattern: &str) -> Result<Self, String> {
+        let pattern = pattern.trim().trim_start_matches("./");
+        let matcher = GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| format!("bad glob pattern: {e}"))?
+            .compile_matcher();
+        Ok(Self {
+            matcher,
+            by_name: !pattern.contains('/'),
         })
-        .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
-        .collect();
-    found.sort();
-    found
-}
-
-fn is_binary(bytes: &[u8]) -> bool {
-    bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
-}
-
-/// The text of a file, or `None` when it is binary or unreadable.
-fn text_of(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    if is_binary(&bytes) {
-        return None;
     }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
-}
 
-fn display(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    fn is_match(&self, relative: &Path, base: &Path) -> bool {
+        if self.by_name {
+            return relative
+                .file_name()
+                .is_some_and(|name| self.matcher.is_match(Path::new(name)));
+        }
+        self.matcher
+            .is_match(relative.strip_prefix(base).unwrap_or(relative))
+    }
 }
 
 pub fn grep(
@@ -75,26 +185,25 @@ pub fn grep(
         .case_insensitive(ignore_case)
         .build()
         .map_err(|e| format!("bad regex: {e}"))?;
-    let filter = match glob {
-        Some(glob) => Some(
-            GlobBuilder::new(glob)
-                .literal_separator(false)
-                .build()
-                .map_err(|e| format!("bad glob pattern: {e}"))?
-                .compile_matcher(),
-        ),
-        None => None,
+    let filter = glob.map(PathFilter::new).transpose()?;
+    let Some(scope) = Scope::new(root, base)? else {
+        return Ok("no matches".into());
     };
     let mut lines = Vec::new();
-    for relative in files(root, base) {
+    let mut too_large = Vec::new();
+    for relative in scope.files()? {
         if let Some(filter) = &filter {
-            let name = relative.file_name().map(Path::new).unwrap_or(&relative);
-            if !filter.is_match(&relative) && !filter.is_match(name) {
+            if !filter.is_match(&relative, scope.relative_base()) {
                 continue;
             }
         }
-        let Some(text) = text_of(&root.join(&relative)) else {
-            continue;
+        let text = match read_text(&scope.root.join(&relative)) {
+            Content::Text(text) => text,
+            Content::TooLarge => {
+                too_large.push(relative.display().to_string());
+                continue;
+            }
+            Content::Binary | Content::Unreadable => continue,
         };
         for (index, line) in text.lines().enumerate() {
             if !regex.is_match(line) {
@@ -106,11 +215,18 @@ pub fn grep(
                 ));
                 return Ok(lines.join("\n"));
             }
-            lines.push(format!("{}:{}: {}", display(&relative), index + 1, cut_line(line)));
+            lines.push(format!("{}:{}: {}", relative.display(), index + 1, cut_line(line)));
         }
     }
     if lines.is_empty() {
-        return Ok("no matches".into());
+        lines.push("no matches".into());
+    }
+    if !too_large.is_empty() {
+        lines.push(format!(
+            "[skipped {} file(s) over 10 MB: {}]",
+            too_large.len(),
+            too_large.join(", ")
+        ));
     }
     Ok(lines.join("\n"))
 }
@@ -124,23 +240,26 @@ fn cut_line(line: &str) -> String {
 }
 
 pub fn glob(root: &Path, base: &Path, pattern: &str) -> Result<String, String> {
-    let matcher = GlobBuilder::new(pattern)
-        .literal_separator(true)
-        .build()
-        .map_err(|e| format!("bad glob pattern: {e}"))?
-        .compile_matcher();
-    let base_relative = base.strip_prefix(root).unwrap_or(Path::new(""));
+    let filter = PathFilter::new(pattern)?;
+    let Some(scope) = Scope::new(root, base)? else {
+        return Ok("no files".into());
+    };
+    if scope.base.is_file() {
+        return Err(format!(
+            "glob needs a folder path; {} is a file",
+            scope.relative_base().display()
+        ));
+    }
     let mut lines = Vec::new();
-    for relative in files(root, base) {
-        let from_base = relative.strip_prefix(base_relative).unwrap_or(&relative);
-        if !matcher.is_match(from_base) {
+    for relative in scope.files()? {
+        if !filter.is_match(&relative, scope.relative_base()) {
             continue;
         }
         if lines.len() == MAX_FILES {
             lines.push(format!("[cut: more than {MAX_FILES} files; narrow the pattern or path]"));
             break;
         }
-        lines.push(display(&relative));
+        lines.push(relative.display().to_string());
     }
     if lines.is_empty() {
         return Ok("no files".into());
@@ -149,37 +268,63 @@ pub fn glob(root: &Path, base: &Path, pattern: &str) -> Result<String, String> {
 }
 
 pub fn code_map(root: &Path, base: &Path) -> Result<String, String> {
+    let Some(scope) = Scope::new(root, base)? else {
+        return Ok("no files".into());
+    };
+    let note = format!("[cut: the outline passed {MAX_MAP} characters; map a smaller path]");
+    // Room for the content, so the note still fits under the cap.
+    let budget = MAX_MAP - note.chars().count() - 1;
     let mut out = String::new();
-    for relative in files(root, base) {
-        let Some(text) = text_of(&root.join(&relative)) else {
-            continue;
-        };
-        let block = match language_of(&relative) {
-            Some(language) => {
-                let mut block = display(&relative);
-                for line in outline(language, &text) {
-                    block.push('\n');
-                    block.push_str(&line);
+    let mut used = 0;
+    for relative in scope.files()? {
+        let path = scope.root.join(&relative);
+        let block: Vec<String> = match language_of(&relative) {
+            Some(language) => match read_text(&path) {
+                Content::Text(text) => {
+                    let mut block = vec![relative.display().to_string()];
+                    block.extend(outline(language, &text));
+                    block
                 }
-                block
-            }
-            None => format!("{} ({} lines)", display(&relative), text.lines().count()),
+                Content::TooLarge => vec![format!("{} (skipped: over 10 MB)", relative.display())],
+                Content::Binary | Content::Unreadable => continue,
+            },
+            None => match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() > MAX_FILE => {
+                    vec![format!("{} (skipped: over 10 MB)", relative.display())]
+                }
+                _ => match count_lines(&path) {
+                    Some(count) => vec![format!("{} ({count} lines)", relative.display())],
+                    None => continue,
+                },
+            },
         };
-        let separator = usize::from(!out.is_empty());
-        if out.len() + separator + block.len() > MAX_MAP {
-            out.push_str(&format!(
-                "\n[cut: the outline passed {MAX_MAP} characters; map a smaller path]"
-            ));
-            break;
+        let size: usize = block.iter().map(|line| line.chars().count() + 1).sum();
+        if used + size > budget {
+            // The first file always shows, cut at a line, so one big file still gives an outline.
+            if out.is_empty() {
+                for line in block {
+                    let width = line.chars().count() + 1;
+                    if used + width > budget {
+                        break;
+                    }
+                    out.push_str(&line);
+                    out.push('\n');
+                    used += width;
+                }
+            }
+            out.push_str(&note);
+            return Ok(out);
         }
-        if separator == 1 {
+        for line in block {
+            out.push_str(&line);
             out.push('\n');
         }
-        out.push_str(&block);
+        used += size;
     }
     if out.is_empty() {
         return Ok("no files".into());
     }
+    out.pop();
     Ok(out)
 }
 
@@ -225,32 +370,45 @@ fn outline(lang: Lang, text: &str) -> Vec<String> {
     let Some(tree) = parser.parse(text, None) else {
         return Vec::new();
     };
+    let source = text.as_bytes();
     let mut lines = Vec::new();
-    visit(lang, tree.root_node(), text.as_bytes(), 1, &mut lines);
-    lines
-}
-
-fn visit(lang: Lang, node: Node, source: &[u8], depth: usize, lines: &mut Vec<String>) {
-    let child_depth = match symbol(lang, node, source) {
-        Some((kind, name)) => {
-            lines.push(format!(
-                "{}{kind} {name} :{}",
-                "  ".repeat(depth),
-                node.start_position().row + 1
-            ));
-            depth + 1
-        }
-        None => depth,
-    };
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        visit(lang, child, source, child_depth, lines);
+    // An explicit stack, not recursion: a deeply nested expression must not overflow the
+    // thread's stack, because a stack overflow ends the whole process.
+    let mut stack = vec![(tree.root_node(), 1usize)];
+    while let Some((node, depth)) = stack.pop() {
+        let child_depth = match symbol(lang, node, source) {
+            Some((kind, name)) => {
+                lines.push(format!(
+                    "{}{kind} {name} :{}",
+                    "  ".repeat(depth),
+                    node.start_position().row + 1
+                ));
+                depth + 1
+            }
+            None => depth,
+        };
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev().map(|child| (child, child_depth)));
     }
+    lines
 }
 
 fn field_text(node: Node, field: &str, source: &[u8]) -> Option<String> {
     let text = node.child_by_field_name(field)?.utf8_text(source).ok()?;
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn is_function(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "function" | "generator_function"
+    )
+}
+
+/// `export default class {}` and `export default function () {}` have no name.
+fn default_export(node: Node) -> bool {
+    node.parent().is_some_and(|parent| parent.kind() == "export_statement")
 }
 
 fn symbol(lang: Lang, node: Node, source: &[u8]) -> Option<(&'static str, String)> {
@@ -277,7 +435,8 @@ fn symbol(lang: Lang, node: Node, source: &[u8]) -> Option<(&'static str, String
             _ => None,
         },
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => match node.kind() {
-            "class_declaration" | "abstract_class_declaration" | "class" => named("class"),
+            "class_declaration" | "abstract_class_declaration" | "class" => named("class")
+                .or_else(|| default_export(node).then(|| ("class", "default".to_string()))),
             "interface_declaration" => named("interface"),
             "type_alias_declaration" => named("type"),
             "enum_declaration" => named("enum"),
@@ -285,14 +444,22 @@ fn symbol(lang: Lang, node: Node, source: &[u8]) -> Option<(&'static str, String
             "method_definition" | "method_signature" | "abstract_method_signature" => {
                 named("method")
             }
+            // A class field that holds a function, such as `handle = () => {}`.
+            "public_field_definition" | "field_definition" => {
+                let value = node.child_by_field_name("value")?;
+                if !is_function(value) {
+                    return None;
+                }
+                field_text(node, "name", source)
+                    .or_else(|| field_text(node, "property", source))
+                    .map(|name| ("method", name))
+            }
             "variable_declarator" => {
                 let value = node.child_by_field_name("value")?;
-                matches!(
-                    value.kind(),
-                    "arrow_function" | "function_expression" | "function"
-                )
-                .then(|| named("function"))
-                .flatten()
+                is_function(value).then(|| named("function")).flatten()
+            }
+            kind if default_export(node) && is_function(node) && kind != "arrow_function" => {
+                Some(("function", "default".to_string()))
             }
             _ => None,
         },

@@ -292,3 +292,199 @@ fn both_formats_get_the_new_tools() {
         assert!(chat_names.contains(&tool), "chat tools lack {tool}: {chat_names:?}");
     }
 }
+
+// ── review fixes ─────────────────────────────────────────────────────────────
+
+fn lines_of(out: &str) -> Vec<String> {
+    out.lines().map(String::from).collect()
+}
+
+/// Runs in a child process from `code_map_survives_deep_nesting`, so a stack overflow fails
+/// that test and does not abort the whole suite.
+#[test]
+#[ignore]
+fn deep_nesting_child() {
+    let root = tmp("deep");
+    let depth = 4_000;
+    let source = format!(
+        "let x = {}1{};\nfunction after() {{}}\n",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    write(&root, "deep.js", &source);
+    let out = std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(move || call(&root, "code_map", json!({"path": "deep.js"})))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    assert!(out.contains("function after :2"), "{out}");
+}
+
+#[test]
+fn code_map_survives_deep_nesting() {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["deep_nesting_child", "--exact", "--ignored", "--quiet"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "code_map crashed or failed on deep nesting: {status}");
+}
+
+#[test]
+fn code_map_cuts_one_big_file_at_a_line() {
+    let root = tmp("bigmap");
+    let source: String = (0..3000)
+        .map(|i| format!("fn function_number_{i}() {{}}\n"))
+        .collect();
+    write(&root, "big.rs", &source);
+    let out = call(&root, "code_map", json!({"path": "big.rs"})).unwrap();
+    assert!(out.starts_with("big.rs\n"), "{}", &out[..out.len().min(80)]);
+    assert!(out.chars().count() <= 40_000, "{} characters", out.chars().count());
+    let lines = lines_of(&out);
+    let (note, body) = lines.split_last().unwrap();
+    assert!(note.starts_with("[cut:"), "{note}");
+    assert!(body.len() > 100, "only {} lines kept", body.len());
+    for line in &body[1..] {
+        assert!(line.starts_with("  fn function_number_"), "{line}");
+        let number = line.rsplit(':').next().unwrap();
+        assert!(number.chars().all(|c| c.is_ascii_digit()), "a cut line: {line}");
+    }
+}
+
+#[test]
+fn large_files_are_skipped() {
+    let root = tmp("large");
+    write(&root, "small.txt", "needle\n");
+    write(&root, "big.txt", &"needle\n".repeat(11 * 1024 * 1024 / 7 + 1));
+    let out = call(&root, "grep", json!({"pattern": "needle"})).unwrap();
+    assert!(out.starts_with("small.txt:1: needle"), "{}", &out[..out.len().min(200)]);
+    assert!(!out.contains("big.txt:"), "the big file was searched");
+    assert!(out.contains("big.txt") && out.contains("10 MB"), "no skip note: {out}");
+    let map = call(&root, "code_map", json!({})).unwrap();
+    assert!(map.contains("big.txt (skipped: over 10 MB)"), "{map}");
+    assert!(map.contains("small.txt (1 lines)"), "{map}");
+}
+
+#[test]
+fn a_file_path_under_git_or_ignored_is_rejected() {
+    let root = tmp("filepath");
+    write(&root, ".git/config", "needle\n");
+    write(&root, ".gitignore", ".env\n");
+    write(&root, ".env", "needle=secret\n");
+    write(&root, "a.rs", "fn needle() {}\n");
+    for (tool, input) in [
+        ("grep", json!({"pattern": "needle", "path": ".git/config"})),
+        ("grep", json!({"pattern": "needle", "path": ".env"})),
+        ("code_map", json!({"path": ".git/config"})),
+        ("code_map", json!({"path": ".env"})),
+        ("glob", json!({"pattern": "*", "path": ".git"})),
+    ] {
+        let error = call(&root, tool, input.clone()).expect_err(&format!("{tool} {input}"));
+        assert!(
+            error.contains(".git") || error.contains("ignored"),
+            "{tool} {input}: {error}"
+        );
+    }
+    assert_eq!(
+        call(&root, "grep", json!({"pattern": "needle", "path": "a.rs"})).unwrap(),
+        "a.rs:1: fn needle() {}"
+    );
+}
+
+#[test]
+fn paths_and_patterns_normalise() {
+    let root = tmp("normalise");
+    write(&root, "src/a.rs", "fn a() {}\n");
+    assert_eq!(
+        call(&root, "glob", json!({"pattern": "./src/*.rs"})).unwrap(),
+        "src/a.rs"
+    );
+    let error = call(&root, "glob", json!({"pattern": "*", "path": "src/a.rs"})).unwrap_err();
+    assert!(error.contains("folder"), "{error}");
+    // Only on a file system that ignores case, as macOS does by default.
+    if root.join("SRC").exists() {
+        assert_eq!(
+            call(&root, "glob", json!({"pattern": "*.rs", "path": "SRC"})).unwrap(),
+            "src/a.rs"
+        );
+        assert_eq!(
+            call(&root, "grep", json!({"pattern": "fn", "path": "SRC"})).unwrap(),
+            "src/a.rs:1: fn a() {}"
+        );
+    }
+}
+
+#[test]
+fn grep_glob_matches_like_the_glob_tool() {
+    let root = tmp("globrule");
+    for path in ["c.rs", "d.txt", "src/a.rs", "src/deep/b.rs"] {
+        write(&root, path, "x\n");
+    }
+    for (path, pattern) in [
+        (".", "*.rs"),
+        (".", "src/*.rs"),
+        (".", "src/**/*.rs"),
+        ("src", "*.rs"),
+        ("src", "deep/*.rs"),
+    ] {
+        let mut from_glob: Vec<String> =
+            lines_of(&call(&root, "glob", json!({"pattern": pattern, "path": path})).unwrap());
+        let mut from_grep: Vec<String> = lines_of(
+            &call(&root, "grep", json!({"pattern": "x", "path": path, "glob": pattern})).unwrap(),
+        )
+        .into_iter()
+        .map(|line| line.split(':').next().unwrap().to_string())
+        .collect();
+        from_glob.sort();
+        from_grep.sort();
+        assert_eq!(from_glob, from_grep, "path {path}, pattern {pattern}");
+    }
+    let all = call(&root, "glob", json!({"pattern": "*.rs"})).unwrap();
+    assert_eq!(all, "c.rs\nsrc/a.rs\nsrc/deep/b.rs", "a name pattern matches at any depth");
+}
+
+#[test]
+fn code_map_cap_counts_what_it_says() {
+    let root = tmp("capcount");
+    for i in 0..2000 {
+        write(&root, &format!("f{i:04}.rs"), &format!("fn f{i}() {{}}\n"));
+    }
+    let out = call(&root, "code_map", json!({})).unwrap();
+    assert!(out.chars().count() <= 40_000, "{} characters", out.chars().count());
+    assert!(out.ends_with("characters; map a smaller path]"), "{}", &out[out.len() - 80..]);
+}
+
+#[test]
+fn subfolder_walk_keeps_root_gitignore() {
+    let root = tmp("subignore");
+    write(&root, ".gitignore", "*.log\n");
+    write(&root, "sub/a.log", "x\n");
+    write(&root, "sub/b.rs", "x\n");
+    write(&root, "other/c.rs", "x\n");
+    assert_eq!(
+        call(&root, "glob", json!({"pattern": "*", "path": "sub"})).unwrap(),
+        "sub/b.rs"
+    );
+}
+
+#[test]
+fn ts_class_fields_and_default_exports_are_listed() {
+    let root = tmp("tsfields");
+    write(&root, "a.ts", "class Widget {\n  handle = () => {};\n  run() {}\n}\n");
+    write(&root, "b.ts", "export default class {\n  go() {}\n}\n");
+    write(&root, "c.js", "export default function () {}\n");
+    write(&root, "d.js", "class W {\n  onClick = () => {};\n}\n");
+    let out = call(&root, "code_map", json!({})).unwrap();
+    for expected in [
+        "method handle :2",
+        "method run :3",
+        "class default :1",
+        "method go :2",
+        "function default :1",
+        "method onClick :2",
+    ] {
+        assert!(out.contains(expected), "missing {expected}:\n{out}");
+    }
+}
