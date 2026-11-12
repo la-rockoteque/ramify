@@ -22,6 +22,6 @@
 | Q18 max_tokens_defaults_per_provider | pass | `` |
 | Q19 esc_without_a_task_does_nothing | pass | `` |
 | Q20 | pass after 2 fixes | `audit.md`: a cut OpenAI stream and a thinking-only stopped turn. Fixed in `cd3f90f`. |
-| Q21 | waiting on the human | Needs a provider key and a person to press Esc. |
+| Q21 | pass | The human ran the case live and reported it passed in the chat on 2026-11-12. |
 
-Yield: 21 cases. 20 ran and passed, 0 failed. The audit fixed 2 gaps. Q21 waits on a live run.
+Yield: 21 cases. 21 ran and passed, 0 failed. The audit fixed 2 gaps.
