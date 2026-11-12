@@ -481,9 +481,6 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
     if let Some(dir) = &user_temp {
         writes.push(format!("  (regex #\"^{}/[^/]+$\")", regex_of(dir)));
     }
-    if let Some(dir) = &user_cache {
-        writes.push(subpath(&dir.join("clang")));
-    }
     writes.extend(
         ["/dev/null", "/dev/zero", "/dev/dtracehelper"]
             .iter()

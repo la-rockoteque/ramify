@@ -322,7 +322,10 @@ the human reads the command and decides whether it runs.",
         cmd.current_dir(&root)
             .env_clear()
             .envs(scrub(&self.env, &self.key_envs))
-            .env("TMPDIR", &temp);
+            .env("TMPDIR", &temp)
+            // A module cache per task: the shared one under the user cache folder feeds builds
+            // outside the sandbox, so a planted module there could change them.
+            .env("CLANG_MODULE_CACHE_PATH", temp.join("clang-module-cache"));
         let mut output = run_with_timeout(cmd, timeout)?;
         if output.contains("Operation not permitted") {
             if !output.ends_with('\n') {
