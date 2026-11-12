@@ -33,10 +33,10 @@
 | Q26 | pass | Audit: the README sections exist. |
 | Q27 | pass | Audit: both manifests register `UserPromptSubmit`. |
 | Q32 | pass | `cargo test` at the root: 41 tests pass, 0 fail. |
-| Q23 | pending | Live, in the user's terminal with powerlevel10k. |
-| Q24 | pending | Live: Claude Code and Codex sessions in one worktree. |
-| Q33 | pending | Live: Ram Code next to a Claude Code session. |
+| Q23 | pass | Live, powerlevel10k: the user saw the line in the worktree, and the setup was checked in an interactive zsh (`prompt_ramify` defined, `_ramify_precmd` before `_p9k_precmd`). |
+| Q24 | pass | Live, confirmed by the user with two Claude Code sessions (`claude --plugin-dir`). Codex is not installed on this machine, so the Codex half rests on Q2, Q12 and Q14. The sessions had ended when the agent looked, so the agent did not see the records. A hand run of the branch's `session-start` hook on this worktree wrote `qa1.session` (agent `claude`, the worktree, the Claude Code pid) and the name `aspen`. |
+| Q33 | waived | The user waived the live check. Automated cases cover it: Q28 (header line), Q29 (the `ram` record), Q30 (`◆ ram`), Q31 (Sessions pane) and Q34 (health refresh). When the agent looked, the Ram Code that ran was main's build, not this branch's. |
 
 Smoke run on the release build: `bin/ramify prompt` in this worktree printed `𖣂 zsh-prompt ⎇ feat/zsh-prompt · feature/standard 4/8 → qa`.
 
-**Yield:** 31 of 34 cases ran, 31 passed, 0 failed, 0 fixed. 3 live cases wait on the user.
+**Yield:** 33 of 34 cases ran, 33 passed, 0 failed, 0 fixed. The user waived 1 live case (Q33).
