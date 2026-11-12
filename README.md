@@ -44,6 +44,12 @@ Press any key to leave the splash. The interface is a chat:
 - Slash commands: `/help`, `/up`, `/down`, `/step`, `/status`, `/workflow`, `/new <slug>`,
   `/refresh`, `/worktrees`, `/clear`, `/quit`.
 
+Under the worktree chips, the header shows the `ramify prompt` line of the selected worktree:
+its branch, stack, workflow step and the agent sessions that work in it (see
+[The zsh prompt](#the-zsh-prompt)). Ram Code reads it again when the selection changes, when a
+task ends, and every 5 seconds. Every 30 seconds it also runs `ramify statusline` for that worktree in
+the background, which keeps the stack health fresh for the header and for shell prompts.
+
 The first message starts a task in the selected worktree. The transcript stays, and later
 messages carry the earlier turns to the model. Each task runs in a worker process, so the
 interface keeps drawing while the model works.
@@ -219,6 +225,7 @@ ramify prune --apply       # remove merged branches and their worktrees
 | `delete <worktree> [--yes]` | Force-delete one worktree and its branch |
 | `shared-down` | Stop the shared service instances |
 | `statusline [--json]` | A status line segment: the session's worktree and branch |
+| `prompt [--json \| install]` | The status line of the current directory, with the agent sessions that work in it, for a zsh prompt. `install` links the oh-my-zsh plugin |
 | `write-set <file>` | Check the branch's diff against allowed and immutable path globs |
 
 `RAMIFY_ROOT=<path>` points any command at another worktree.
@@ -626,6 +633,55 @@ tool's PATH only. A status line script of your own can call `ramify statusline -
 port, `{"web": 5174}`), `run` (`▶ run <id> waits on you`, or null), and run its git segment from `root`.
 `RAMIFY_STATUSLINE_ICON` replaces the tree.
 
+`statusline` writes what each service answered to
+`${RAMIFY_STATE_DIR:-/tmp/ramify}/<project>/<worktree>.health`, as `<answering> <total> <epoch>`.
+[The zsh prompt](#the-zsh-prompt) reads it.
+
+### The zsh prompt
+
+`ramify prompt` prints the status line of the current directory, then the Claude Code and Codex
+sessions that work in the same worktree:
+
+```
+𖣂 tm-127 ⎇ feat/tm-127 · 2/3 up · feature/standard 3/8 → build · ✻ birch, ◇ ash ⏸
+```
+
+- `✻` is a Claude Code session, `◇` a Codex session and `◆` a Ram Code session. Each one shows
+  its [session name](#session-names), or its agent when it has none.
+- `⏸` follows a session that waits for a prompt. A session without it is working.
+- The sessions are in the order they started.
+- The command prints nothing outside a git repository or in a repository without a ramify
+  config.
+- It makes no HTTP request, so it is fast enough for every prompt. The stack health comes from
+  the last `ramify statusline`, and it does not show when that result is older than 60 seconds.
+- `ramify prompt --json` prints the `statusline --json` fields, and `sessions`: an array of
+  `{name, agent, state, since}`.
+
+The hooks keep one record per session in
+`${RAMIFY_STATE_DIR:-/tmp/ramify}/sessions/<session_id>.session`. It is a JSON object:
+`agent` (`claude`, `codex` or `ram`), `root` (the session's worktree), `pid` (the agent's process),
+`state` (`working` or `idle`) and `since` (epoch seconds). SessionStart writes it in a repo with
+a ramify config. A resume or a compaction keeps the state. UserPromptSubmit sets `working` and
+Stop sets `idle`. A move to a new worktree moves the record's `root`. SessionEnd removes it, on
+every reason. Ram Code writes `ram-<pid>.session` itself: `working` while a
+task runs, `idle` after it, and it deletes the record when it quits. A record whose process has
+stopped is ignored, and `ramify reap` deletes it. The Sessions pane of the Ram Code panel lists
+every live record.
+
+To use it with oh-my-zsh:
+
+1. Run `ramify prompt install`. It links `shell/` as `${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/ramify`.
+   It does not edit your rc files. It refuses to replace a `ramify` link that points elsewhere,
+   unless you add `--force`.
+2. In `~/.zshrc`, add `ramify` to the plugins list: `plugins=(git ramify)`.
+3. With powerlevel10k, add `ramify` to `POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS` in `~/.p10k.zsh`.
+   With another theme, put `$(ramify_prompt_info)` in your prompt.
+4. Open a new shell.
+
+The plugin runs `ramify prompt` once per prompt (`precmd`). `ramify` must be on the PATH, or
+`RAMIFY_BIN` must name it. A `ramify` whose Rust binary is not built yet shows nothing: the
+prompt never starts the build.
+
 ### The app
 
 `app/` is an Electron window on the same machine-wide dashboard. It shows every project and
@@ -663,10 +719,11 @@ The allow hook works in every repo, since a ramify command acts the same anywher
 - **SessionStart** (startup, resume, clear, compact): gives the agent the branch's work order and its next step. It also picks the [session name](#session-names). In Claude Code, startup, resume and fork set the session title to `<slug> · <name>` in a linked worktree and `<name>` in the primary checkout, unless the session already has a title. Codex receives the work order without a session title.
 - **PostToolUse `git worktree add` / `ramify new`**: moves the session to the new worktree and starts its stack. With `--workflow`, it also gives the agent the work order.
 - **PostToolUse `git push`**: tells the agent to hand the branch over for QA.
-- **Stop**: starts the stack if it does not answer. The fast path is one curl per service.
+- **UserPromptSubmit**: marks the session `working` in its [session record](#the-zsh-prompt).
+- **Stop**: marks the session `idle`, and starts the stack if it does not answer. The fast path is one curl per service.
 - **PreToolUse `ramify approve` / `ramify reject` / `ramify run go` / `ramify run block`**: refuses them. The decision on a gate or a run belongs to the human.
 - **PreToolUse Bash, allow**: lets a plain `ramify` command run without a permission prompt. See [Commands that run without a prompt](#commands-that-run-without-a-prompt).
-- **SessionEnd**: stops this worktree's stack.
+- **SessionEnd**: stops this worktree's stack, and removes the session record.
 
 #### Commands that run without a prompt
 

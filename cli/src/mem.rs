@@ -695,6 +695,7 @@ fn mem_project(
 }
 
 pub fn reap() -> i32 {
+    reap_sessions();
     let footprints = HashMap::new();
     for config in service_projects() {
         let rows = mem_project(&config, false, "reap", &footprints);
@@ -730,4 +731,15 @@ fn remove_worktree_state(config: &Config, worktree: &str) {
     }
     let _ = std::fs::remove_file(config.state_dir.join(format!("{worktree}.errors")));
     let _ = std::fs::remove_dir_all(config.state_dir.join(format!("{worktree}.up.lock")));
+}
+
+/// A session that crashed never ran its end hook: its record names a process that is gone.
+fn reap_sessions() {
+    let state_root = std::env::var("RAMIFY_STATE_DIR").unwrap_or_else(|_| "/tmp/ramify".into());
+    let folder = std::path::Path::new(&state_root).join("sessions");
+    for agent in crate::statusline::records(&state_root) {
+        if !crate::statusline::running(agent.pid) {
+            let _ = std::fs::remove_file(folder.join(format!("{}.session", agent.id)));
+        }
+    }
 }

@@ -1054,6 +1054,7 @@ name = "ram-code"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "md-5",
  "ratatui",
  "serde",

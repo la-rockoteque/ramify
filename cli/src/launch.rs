@@ -105,7 +105,7 @@ pub fn open(kind: &str) -> Result<(), String> {
     ))
 }
 
-fn home() -> Result<PathBuf, String> {
+pub(crate) fn home() -> Result<PathBuf, String> {
     if let Some(home) = std::env::var_os("RAMIFY_HOME") {
         return Ok(PathBuf::from(home));
     }
