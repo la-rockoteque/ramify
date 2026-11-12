@@ -33,6 +33,16 @@ The ramify cases (AC15, AC16) run the real `hooks/ramify-hook` on a fixture repo
 | Q22 | AC1–AC16 | high | Live: in `~/dev/ramify-wt/ram-hooks`, run the branch's Ram Code with a work order that has steps missing. Ask it to run `gh pr create --title x --body y`. The transcript shows the pr-gate deny, and no PR opens. A shell prompt in the worktree shows `◆ <name>` while Ram Code runs. | qa |
 | Q23 | AC17 | low | The README has the sources, events, decisions and `hooks/ram.json` | audit |
 | Q24 | AC14 | medium | Read the diff: the tool loop calls no hook code when no hook is loaded, and the interface thread never waits on a hook (SessionStart in a thread, SessionEnd bounded at 5 s) | audit |
+| Q25 | AC18 | high | `classify_each_action` in `cli/tests/hooks.rs`: one table row per tool call of spec 17, with the expected action; a plain `ls` gives `[]` | build |
+| Q26 | AC19 | high | `classify_a_chain`: `cd wt && git commit -m x && git push origin HEAD` gives `commit` then `push`, with `branch: "HEAD"` | build |
+| Q27 | AC20 | medium | `classify_pr_details`: `--draft` gives `draft: true`; `gh pr merge 50 --squash` gives `pr: 50` | build |
+| Q28 | AC25 | medium | `classify_a_work_item_read`: `read_file` and Claude Code's `Read` of `.ramify/work/x/spec.md` give `workitem.read` with `work_item` | build |
+| Q29 | AC21 | high | `pre_workflow_deny_blocks_the_merge` in `tests/qa_hooks.rs`: the command would create a file; it does not exist, and the result has the reason | build |
+| Q30 | AC22 | high | `post_workflow_gets_details_and_output`: `ramify step done build` through `run_command`; the hook log has `details.step`, `succeeded` and the output | build |
+| Q31 | AC23 | high | `bridge_denies_for_claude_code` in `cli/tests/hooks.rs`: `hooks/ramify-hook workflow-pre` with Claude Code's PreToolUse JSON for `gh pr create`, and a `pr.open` deny in `.ram/settings.json`, prints a PreToolUse deny | build |
+| Q32 | AC24 | medium | `no_workflow_hooks_no_classifier`: in Ram Code and in the bridge, with no PreWorkflow or PostWorkflow hook, `ramify classify` never runs (a fake `ramify` logs each call) | build |
+| Q33 | AC26 | low | The README documents the actions, the details, `ramify classify`, `ramify hooks run` and the bridge | audit |
+| Q34 | AC21 | medium | Live: a PreWorkflow hook on `pr.merge` in `~/.ram/settings.json` that denies. Ask Ram Code to merge a PR: the transcript shows the deny. Ask a branch Claude Code session (`--plugin-dir`) to do the same: Claude Code shows the same deny. | qa |
 
 ## Write set
 
@@ -43,10 +53,15 @@ tests/qa_prompt.rs
 hooks/ram.json
 hooks/ramify-hook
 README.md
+cli/src/**
+cli/tests/hooks.rs
+.claude-plugin/plugin.json
+hooks/codex.json
+Cargo.toml
+Cargo.lock
 .ramify/work/ram-hooks/**
-!cli/**
-!.claude-plugin/**
-!hooks/codex.json
+!cli/tests/parity.rs
+!cli/tests/reference/**
 !workflows.yml
 !skills/**
 ```
