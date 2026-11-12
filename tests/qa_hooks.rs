@@ -736,8 +736,9 @@ fn pre_workflow_deny_blocks_the_merge() {
 fn post_workflow_gets_details_and_output() {
     let fixture = Fixture::new("workflow-post");
     fixture.ram(json!({"PostWorkflow": group("workitem.update", &fixture.script("update", ""))}));
-    // A `ramify` on the PATH that answers like `step done`.
-    let bin = fixture.base.join("bin");
+    // A `ramify` on the PATH that answers like `step done`. It sits in the worktree, because the
+    // sandbox reads no other folder under the per-user temp folder.
+    let bin = fixture.project.join(".test-bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(
         bin.join("ramify"),

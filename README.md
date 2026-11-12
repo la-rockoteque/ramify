@@ -208,14 +208,50 @@ The tests are `cargo test`; they cover the acceptance criteria in
 
 `run_command` runs each command in a sandbox: `sandbox-exec` on macOS, `bwrap` on Linux.
 
-- A command reads any file except credentials in the home folder: `~/.ssh`, `~/.aws`,
+On macOS the sandbox denies everything by default. It then allows only what builds, tests and Git
+need:
+
+- A command runs programs, starts child processes, and reads system settings. It can signal
+  and inspect only its own processes.
+- A command reads files only under these roots:
+  - system folders: `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/private/etc`, `/dev`,
+    `/opt/homebrew` and `/Applications/Xcode.app`;
+  - the worktree, the task's temp folder (`$TMPDIR`), and the main repository's Git folder of
+    a linked worktree;
+  - the per-user cache folder under `/private/var/folders`, and `xcrun`'s cache file in the
+    per-user temp folder;
+  - toolchains in the home folder: `~/.cargo/bin`, `~/.cargo/registry`, `~/.cargo/git`,
+    `~/.cargo/env`, `~/.cargo/config.toml`, `~/.rustup`, `~/.asdf`, `~/.nvm`, `~/.pyenv`,
+    `~/.volta`, `~/.local/share/mise`, `~/.npm` and `~/.tool-versions`;
+  - Git settings: `~/.gitconfig`, the files whose name starts with it, and `config`, `ignore`
+    and `attributes` in `~/.config/git`.
+- Other files, such as `~/Documents`, your other repositories and your dotfiles, stay
+  unreadable. A command can still see that a path exists.
+- A command writes only in the worktree, in the task's temp folder, and to `/dev/null`.
+  `xcrun` resets `TMPDIR` to the per-user temp folder, so `ar` makes `ar.XXXXXX` there. That
+  name is the only one a command can create there. `xcrun` cannot write its cache and prints
+  `couldn't create cache file` on each call; the build goes on, and this warning gets no hint.
+- Each command gets its own clang module cache (`CLANG_MODULE_CACHE_PATH`) in the task's temp
+  folder. The shared clang cache stays read-only, so no command can plant a module that a build
+  outside the sandbox uses.
+- The task's temp folder is fixed when the task starts. A command cannot remove, rename or
+  replace it with a link. If something else replaces it, Ram Code runs no more commands in it.
+- A command never reads credentials in the home folder: `~/.ssh`, `~/.aws`,
   `~/.azure`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `~/.config/gh`,
   `~/.config/hub`, `~/.config/anthropic`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`,
-  `~/.pypirc`, `~/.cargo/credentials.toml`, `~/.vault-token`, `~/.terraform.d`, `~/.orbstack`,
-  `~/.colima`, the shell histories and `~/Library/Keychains`. What a command reads goes to the
-  provider in the transcript.
-- A command writes only in the worktree, in a temp folder for the task (`$TMPDIR`), and to
-  `/dev/null`.
+  `~/.pypirc`, `~/.cargo/credentials.toml`, `~/.config/git/credentials`, `~/.vault-token`,
+  `~/.terraform.d`, `~/.orbstack`, `~/.colima`, the shell histories and `~/Library/Keychains`.
+  It never writes them either. The rule also covers the real path behind a link, such as a
+  `~/.config` that a dotfile manager links to `~/dotfiles/config`. What a command reads goes to
+  the provider in the transcript.
+- Some tokens stay visible, because the tools must read the file that holds them. Cargo stops
+  when `~/.cargo/config.toml` exists and cannot be read, so keep a registry token in
+  `~/.cargo/credentials.toml`. A token in a `~/.gitconfig` URL, such as an `insteadOf` rule, is
+  visible too; keep Git tokens in a credential helper.
+- A command can see that a path exists, and its size, through file metadata. It cannot read the
+  file.
+- A command never writes Ram Code's configuration folder, so it cannot widen its own sandbox.
+  This also holds when that folder is behind a link.
 - A command never writes Git metadata: a `.git` file or folder anywhere in the worktree. Git runs
   hooks and `core.fsmonitor` from there later, outside the sandbox. `git init` and
   `git commit` fail in the sandbox.
@@ -224,6 +260,8 @@ The tests are `cargo test`; they cover the acceptance criteria in
 - A command runs in its own session, with no terminal. It cannot type into Ram Code.
 - On macOS, a command cannot start a program outside the sandbox: `open`, `osascript`,
   `osacompile` and `launchctl` are blocked, and so are Apple events and Launch Services.
+- On macOS, a command cannot reach the Keychain. `security find-generic-password` fails, so a
+  token stored with the `security` command stays out of the transcript.
 - On Linux, `bwrap` also hides `/run/user/<uid>` (the session bus) and the Docker socket, and
   gives the command its own process and IPC namespaces.
 - The environment has no provider keys. Ram Code removes every `ANTHROPIC_*` and `RAM_CODE_*`
@@ -235,6 +273,24 @@ The tests are `cargo test`; they cover the acceptance criteria in
   command's whole process group and returns the output so far with `timed out after N s`.
   A background job that outlives its command is killed too. Ram Code keeps at most 40,000
   bytes of output, and stops reading 1 second after the command ends.
+
+To add paths for good, list them in `~/.config/ram-code/sandbox.json`. `RAM_CODE_CONFIG_DIR`
+moves that folder:
+
+```json
+{ "read": ["~/work/shared-fixtures"], "write": ["~/.cache/my-tool"] }
+```
+
+- A path is absolute or starts with `~/`.
+- A credential path or a `.git` path stays denied, even when the file lists it.
+- Ram Code reads no sandbox file from the worktree, so a project cannot widen its own sandbox.
+- A file that is not valid stops every sandboxed command, with an error that names the file.
+
+When a command fails with `Operation not permitted`, the tool result ends with a hint. It names
+`sandbox.json` for a lasting need, and `outside_sandbox` for a one-time need.
+
+On Linux, `bwrap` still lets a command read any file except the credentials. A deny-by-default
+view needs a bind for each root, which is a later change.
 
 The sandbox cannot protect what you run later yourself. A command can change a `Makefile`,
 `build.rs`, `.cargo/config.toml`, `.envrc`, `package.json` scripts or `node_modules/.bin` in the

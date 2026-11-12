@@ -4,7 +4,7 @@
 use crate::agent::ToolSource;
 use crate::cancel::Cancel;
 use crate::providers::Providers;
-use crate::sandbox::{scrub, Sandbox};
+use crate::sandbox::{checked_temp, load_extras, scrub, Paths, Sandbox};
 use crate::tools::Tools;
 use rmcp::model::{CallToolRequestParams, ClientCapabilities, Implementation, InitializeRequestParams};
 use rmcp::service::RunningService;
@@ -672,6 +672,8 @@ struct Launch {
     root: PathBuf,
     temp: PathBuf,
     home: Option<PathBuf>,
+    /// Ram Code's configuration folder, for `sandbox.json` and the write denial on it.
+    config: PathBuf,
     sandbox: Sandbox,
 }
 
@@ -696,14 +698,15 @@ impl Launch {
             Choice::Sandbox | Choice::Network => {
                 let mut words = vec![quote(&self.command)];
                 words.extend(self.args.iter().map(|arg| quote(arg)));
+                // The same profile as `run_command`, checked again before each start, a restart
+                // too: the server can write its temp folder and could swap it for a link.
+                let temp = checked_temp(&self.temp)?;
+                let mut paths = Paths::new(&self.root, &temp, self.home.as_deref());
+                paths.extras = load_extras(&self.config, paths.home.as_deref())?;
+                paths.config = Some(self.config.clone());
+                paths.network = self.choice == Choice::Network;
                 self.sandbox
-                    .command_with_network(
-                        &self.root,
-                        &self.temp,
-                        self.home.as_deref(),
-                        &format!("exec {}", words.join(" ")),
-                        self.choice == Choice::Network,
-                    )
+                    .command(&paths, &format!("exec {}", words.join(" ")))
                     .ok_or(
                         "Ram Code has no sandbox on this machine; approve the server with `u` \
                          to run it outside the sandbox",
@@ -933,7 +936,8 @@ impl Session {
         if config.servers.is_empty() {
             return empty(notes);
         }
-        let approvals = Approvals::load(&Providers::default_dir(&get), root);
+        let config_dir = Providers::default_dir(&get);
+        let approvals = Approvals::load(&config_dir, root);
         let key_envs = Tools::with_env(root, env.clone()).key_envs;
         let base_env = scrub(&env, &key_envs);
         let home = get("HOME").map(PathBuf::from).filter(|home| home.is_absolute());
@@ -996,6 +1000,7 @@ impl Session {
                     root: root.clone(),
                     temp,
                     home: home.clone(),
+                    config: config_dir.clone(),
                     sandbox: sandbox.clone(),
                 },
                 timeout: Duration::from_secs(timeout),
