@@ -89,6 +89,7 @@ const SECRETS: &[&str] = &[
     ".config/gh",
     ".config/anthropic",
     ".git-credentials",
+    ".config/git/credentials",
     ".netrc",
     ".npmrc",
     ".pypirc",
@@ -370,9 +371,12 @@ const SYSTEM_READS: &[&str] = &[
 /// `/etc` and `/tmp` to `/private`.
 const SYSTEM_LINKS: &[&str] = &["/", "/private", "/private/var", "/var", "/etc", "/tmp"];
 
-/// Toolchains and their caches in the home folder. Secret files in them stay denied.
+/// Toolchains and their caches in the home folder, as folders. Secret files in them stay denied.
+/// `~/.cargo` is listed by part, because its `config.toml` can hold a registry token.
 const HOME_READS: &[&str] = &[
-    ".cargo",
+    ".cargo/bin",
+    ".cargo/registry",
+    ".cargo/git",
     ".rustup",
     ".asdf",
     ".nvm",
@@ -380,7 +384,20 @@ const HOME_READS: &[&str] = &[
     ".volta",
     ".local/share/mise",
     ".npm",
-    ".config/git",
+];
+
+/// Single files in the home folder that tools read: rustup's `env` script, Cargo's settings
+/// and Git's settings. Cargo stops when its `config.toml` exists and cannot be read, so it
+/// stays readable; a registry token belongs in `credentials.toml`, which stays hidden. Git's
+/// `credentials` file stays hidden too.
+const HOME_FILES: &[&str] = &[
+    ".cargo/env",
+    ".cargo/config.toml",
+    ".cargo/config",
+    ".tool-versions",
+    ".config/git/config",
+    ".config/git/ignore",
+    ".config/git/attributes",
 ];
 
 /// Services a build needs: user and group lookups, logging, notifications and certificates.
@@ -448,7 +465,11 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
     reads.extend(user_temp.iter().chain(user_cache.iter()).map(|p| subpath(p)));
     if let Some(home) = &paths.home {
         reads.extend(HOME_READS.iter().map(|p| subpath(&home.join(p))));
-        reads.push(format!("  (literal \"{}\")", quote(&home.join(".tool-versions"))));
+        reads.extend(
+            HOME_FILES
+                .iter()
+                .map(|p| format!("  (literal \"{}\")", quote(&home.join(p)))),
+        );
         // `~/.gitconfig` and the files it includes, such as `~/.gitconfig-github`.
         reads.push(format!("  (regex #\"^{}/\\.gitconfig\")", regex_of(home)));
     }

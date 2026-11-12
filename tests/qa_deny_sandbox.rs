@@ -474,15 +474,19 @@ fn git_and_cargo_credentials_stay_hidden() {
     fs::write(home.join(".config/git/credentials"), "https://u:git-secret@example.com\n").unwrap();
     fs::write(home.join(".config/git/config"), "[user]\n\tname = t\n").unwrap();
     fs::create_dir_all(home.join(".cargo/bin")).unwrap();
-    fs::write(home.join(".cargo/config.toml"), "[registry]\ntoken = \"cargo-secret\"\n").unwrap();
+    fs::write(home.join(".cargo/config.toml"), "[term]\nverbose = false\n").unwrap();
+    fs::write(home.join(".cargo/credentials.toml"), "[registry]\ntoken = \"cargo-secret\"\n").unwrap();
     let tools = Tools::with_env(
         &b.join("wt"),
         env_with(&b, &[("HOME", home.display().to_string())]),
     );
     let creds = run(&tools, "cat \"$HOME/.config/git/credentials\"");
     assert!(!creds.contains("git-secret"), "git credentials readable: {creds}");
-    let cargo = run(&tools, "cat \"$HOME/.cargo/config.toml\"");
-    assert!(!cargo.contains("cargo-secret"), "cargo config readable: {cargo}");
+    let cargo = run(&tools, "cat \"$HOME/.cargo/credentials.toml\"");
+    assert!(!cargo.contains("cargo-secret"), "cargo credentials readable: {cargo}");
+    // Cargo stops when config.toml exists and cannot be read, so it stays readable.
+    let cargo_config = run(&tools, "cat \"$HOME/.cargo/config.toml\"");
+    assert!(ok(&cargo_config), "cargo config should stay readable: {cargo_config}");
     let config = run(&tools, "cat \"$HOME/.config/git/config\"");
     assert!(ok(&config), "git config should stay readable: {config}");
 }
