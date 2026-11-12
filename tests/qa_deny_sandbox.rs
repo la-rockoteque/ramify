@@ -533,19 +533,22 @@ fn per_user_temp_is_create_only() {
     let tag = format!("ramcode-probe-{}", std::process::id());
     let other = t.join(format!("{tag}-app"));
     let existing = t.join(format!("{tag}-existing"));
-    let created = t.join(format!("{tag}-new"));
+    // `ar` makes `ar.XXXXXX` here; nothing else may be created.
+    let created = t.join(format!("ar.rcprobe{}", std::process::id()));
+    let other_name = t.join(format!("{tag}-new"));
+    let xcrun_db = t.join("xcrun_db");
     let moved = t.join(format!("{tag}-moved"));
     let link = t.join(format!("{tag}-link"));
     let cleanup = || {
         let _ = fs::remove_dir_all(&other);
-        for p in [&existing, &created, &moved, &link] {
+        for p in [&existing, &created, &other_name, &moved, &link] {
             let _ = fs::remove_file(p);
         }
     };
     cleanup();
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("secret.txt"), "app-secret").unwrap();
-    fs::write(&existing, "existing").unwrap();
+    fs::write(&existing, "existing-entry-content").unwrap();
 
     let b = base("r4");
     let tools = tools(&b, &b.join("wt"));
@@ -555,16 +558,25 @@ fn per_user_temp_is_create_only() {
     let rm = run(&tools, &format!("rm -f '{}'", existing.display()));
     let ln = run(&tools, &format!("ln -s '{}' '{}'", b.join("wt").display(), link.display()));
     let create = run(&tools, &format!("echo hi > '{}'", created.display()));
+    let create_other = run(&tools, &format!("echo hi > '{}'", other_name.display()));
+    let other_made = other_name.exists();
+    // Open the real cache for appending and write nothing, so a failing sandbox changes no byte.
+    let poison = run(&tools, &format!("printf '' >> '{}'", xcrun_db.display()));
     let existing_left = existing.exists();
     let created_text = fs::read_to_string(&created).unwrap_or_default();
     let link_made = fs::symlink_metadata(&link).is_ok();
     cleanup();
 
     assert!(!read_other.contains("app-secret"), "another app's file was readable: {read_other}");
-    assert!(!read_existing.contains("existing"), "an existing entry was readable: {read_existing}");
+    assert!(
+        !read_existing.contains("existing-entry-content"),
+        "an existing entry was readable: {read_existing}"
+    );
     assert!(existing_left, "an existing entry was moved or removed: mv={mv} rm={rm}");
     assert!(!link_made, "a link was planted in the user temp folder: {ln}");
-    assert!(ok(&create) && created_text == "hi\n", "a new file could not be made: {create}");
+    assert!(ok(&create) && created_text == "hi\n", "ar's temp file could not be made: {create}");
+    assert!(!other_made, "another name could be created: {create_other}");
+    assert!(!ok(&poison), "the xcrun cache was writable: {poison}");
 }
 
 #[cfg(target_os = "macos")]

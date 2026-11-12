@@ -400,6 +400,12 @@ const HOME_FILES: &[&str] = &[
     ".config/git/attributes",
 ];
 
+/// The only name a command may create in the per-user temp folder. `xcrun` resets `TMPDIR` to
+/// that folder, so `ar` makes `ar.XXXXXX` there. `xcrun` cannot write its cache, `xcrun_db`, and
+/// says so on stderr; the build goes on. Tools outside the sandbox trust that cache to find
+/// compilers, so it stays read-only. Other entries, and other programs' folders, stay out of reach.
+const USER_TEMP_FILES: &str = r"ar\.[A-Za-z0-9]+";
+
 /// Services a build needs: user and group lookups, logging, notifications and certificates.
 /// Launch Services is not here.
 const SERVICES: &[&str] = &[
@@ -462,7 +468,11 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
     reads.push(subpath(&paths.root));
     reads.push(subpath(&paths.temp));
     reads.extend(git_folders(&paths.root).iter().map(|p| subpath(p)));
-    reads.extend(user_temp.iter().chain(user_cache.iter()).map(|p| subpath(p)));
+    reads.extend(user_cache.iter().map(|p| subpath(p)));
+    if let Some(dir) = &user_temp {
+        reads.push(format!("  (literal \"{}\")", quote(&dir.join("xcrun_db"))));
+        reads.push(format!("  (regex #\"^{}/{}$\")", regex_of(dir), USER_TEMP_FILES));
+    }
     if let Some(home) = &paths.home {
         reads.extend(HOME_READS.iter().map(|p| subpath(&home.join(p))));
         reads.extend(
@@ -476,11 +486,12 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
     reads.extend(paths.extras.read.iter().map(|p| subpath(p)));
 
     let mut writes = vec![subpath(&paths.root), subpath(&paths.temp)];
+    if let Some(dir) = &user_temp {
+        writes.push(format!("  (regex #\"^{}/{}$\")", regex_of(dir), USER_TEMP_FILES));
+    }
     // `ar` makes its temporary file directly in the user temp folder. Its subfolders, which
     // other programs own, stay unwritable.
-    if let Some(dir) = &user_temp {
-        writes.push(format!("  (regex #\"^{}/[^/]+$\")", regex_of(dir)));
-    }
+
     writes.extend(
         ["/dev/null", "/dev/zero", "/dev/dtracehelper"]
             .iter()
