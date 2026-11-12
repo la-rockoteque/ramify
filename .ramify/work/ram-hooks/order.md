@@ -1,0 +1,15 @@
+---
+workflow: feature
+lane: standard
+branch: feat/ram-hooks
+tags: []
+created: 2026-11-12
+steps: []
+---
+
+# ram-hooks
+
+Ram Code runs no hooks, so a gate, guard or context note that works in Claude Code does nothing
+there. This branch builds Claude Code's hook mechanics into Ram Code. It reads hooks from
+`~/.ram`, `.ram`, Claude Code's settings and enabled plugins, and ramify's `hooks/ram.json`.
+Matchers use Ram Code's tool names. Stacked on `feat/zsh-prompt`. See [spec.md](spec.md).
