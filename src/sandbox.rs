@@ -511,7 +511,10 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
   (literal "/usr/bin/osascript")
   (literal "/usr/bin/osacompile")
   (literal "/bin/launchctl"))
-{denials}(deny network*)
+{denials}(deny file-write-unlink
+  (literal "{root}")
+  (literal "{temp}"))
+(deny network*)
 (deny file-ioctl (regex #"^/dev/tty"))
 (deny file-write* (regex #"/\.git(/|$)"))
 "#,
@@ -523,6 +526,8 @@ pub fn seatbelt_profile_for(paths: &Paths) -> String {
             .join("\n"),
         reads = reads.join("\n"),
         writes = writes.join("\n"),
+        root = quote(&paths.root),
+        temp = quote(&paths.temp),
     )
 }
 

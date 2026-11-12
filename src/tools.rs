@@ -57,7 +57,11 @@ impl Tools {
                     .collect()
             })
             .unwrap_or_default();
-        let temp = std::env::temp_dir().join(format!(
+        // The parent is resolved once, here. The folder itself is never resolved again, so a
+        // command cannot repoint it with a link.
+        let parent = std::env::temp_dir();
+        let parent = parent.canonicalize().unwrap_or(parent);
+        let temp = parent.join(format!(
             "ram-code-task-{}-{}",
             std::process::id(),
             TEMP_SEQ.fetch_add(1, Ordering::SeqCst)
@@ -77,12 +81,29 @@ impl Tools {
     }
 
     /// The task's temp folder, created on first use. `TMPDIR` points here in a command.
+    /// A sandboxed command can write here, so before each command the folder must still be a
+    /// real folder that the user owns. A link in its place would widen the next profile.
     pub fn temp_dir(&self) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(&self.temp)
-            .map_err(|e| format!("could not create {}: {e}", self.temp.display()))?;
-        self.temp
-            .canonicalize()
-            .map_err(|e| format!("could not resolve {}: {e}", self.temp.display()))
+        use std::os::unix::fs::MetadataExt;
+        let shown = self.temp.display();
+        let meta = match std::fs::symlink_metadata(&self.temp) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&self.temp)
+                    .map_err(|e| format!("could not create {shown}: {e}"))?;
+                std::fs::symlink_metadata(&self.temp)
+                    .map_err(|e| format!("could not read {shown}: {e}"))?
+            }
+            Err(error) => return Err(format!("could not read {shown}: {error}")),
+        };
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
+            return Err(format!(
+                "the task temp folder {shown} was replaced; Ram Code runs no more commands in it"
+            ));
+        }
+        Ok(self.temp.clone())
     }
 
     pub fn definitions() -> Vec<serde_json::Value> {

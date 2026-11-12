@@ -437,18 +437,32 @@ fn temp_folder_cannot_be_repointed() {
     let outside = b.join("outside");
     fs::create_dir_all(&outside).unwrap();
     let tools = tools(&b, &b.join("wt"));
-    // Command 1 swaps the task temp folder for a link to a folder outside.
+    let temp_out = run(&tools, "printf %s \"$TMPDIR\"");
+    let temp = PathBuf::from(temp_out.lines().nth(1).unwrap_or("").trim());
+    assert!(temp.is_dir(), "no task temp folder: {temp_out}");
+
+    // From inside the sandbox, the swap fails.
     let first = run(
         &tools,
         &format!("rm -rf \"$TMPDIR\" && ln -s '{}' \"$TMPDIR\"", outside.display()),
     );
-    // Command 2 must not write through it.
+    let swapped = fs::symlink_metadata(&temp)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    assert!(!swapped, "a sandboxed command replaced the temp folder: {first}");
+    let moved = run(&tools, "mv \"$TMPDIR\" \"$TMPDIR-moved\"");
+    assert!(temp.is_dir() && !ok(&moved), "the temp folder was renamed away: {moved}");
+    let root_moved = run(&tools, &format!("mv '{}' '{}'", b.join("wt").display(), b.join("wt2").display()));
+    assert!(b.join("wt").is_dir() && !ok(&root_moved), "the worktree was renamed away: {root_moved}");
+
+    // If something else swaps it, the next command refuses to run.
+    fs::remove_dir_all(&temp).unwrap();
+    std::os::unix::fs::symlink(&outside, &temp).unwrap();
     let second = run(&tools, "echo pwned > \"$TMPDIR/x\"");
-    assert!(
-        !outside.join("x").exists(),
-        "a write reached the outside folder: first={first} second={second}"
-    );
-    assert!(!ok(&second), "the second command ran: {second}");
+    let _ = fs::remove_file(&temp);
+    assert!(!outside.join("x").exists(), "a write reached the outside folder: {second}");
+    assert!(!ok(&second), "the command ran in a replaced temp folder: {second}");
+    assert!(second.contains("was replaced"), "{second}");
 }
 
 #[cfg(target_os = "macos")]
