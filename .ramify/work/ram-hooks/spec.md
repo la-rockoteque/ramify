@@ -147,6 +147,96 @@ for it.
   note, and quitting removes the record.
 - AC17: The README documents the sources, the events, the decisions and `hooks/ram.json`.
 
+## Amendment: synthetic workflow events (2026-11-12)
+
+The user asked for hooks on the steps of a developer's workflow, not only on raw tool calls:
+reading and updating a work item, opening and merging a pull request, and the rest.
+
+### Behaviour
+
+16. Two new events, **PreWorkflow** and **PostWorkflow**, fire around each tool call that does
+    a workflow action. The matcher is tested against the action name. One tool call can do
+    several actions, for example `git commit -m x && git push`. PreWorkflow fires once per
+    action before the tool runs, and PostWorkflow once per action after it.
+17. The actions, and what makes them:
+
+    | Action | Tool calls |
+    |---|---|
+    | `workitem.read` | `ramify step`, `ramify ticket` with no change, `gh issue view`, `acli jira workitem view`; `read_file` of a file under the work directory (`.ramify/work/**`, or the repo's `work_dir`) |
+    | `workitem.update` | `ramify step done`/`na`, `ramify lane`, `ramify ticket start`/`sync`, `gh issue edit`/`comment`/`close`, `acli jira workitem edit`/`transition`/`comment`; `write_file` under the work directory |
+    | `gate.ask` | `ramify step ask` |
+    | `gate.wait` | `ramify step wait` |
+    | `branch.create` | `ramify new`, `git worktree add`, `git switch -c`, `git checkout -b` |
+    | `commit` | `git commit` |
+    | `push` | `git push` |
+    | `pr.open` | `gh pr create`, `gh pr ready` |
+    | `pr.review` | `gh pr review`, `gh pr comment` |
+    | `pr.merge` | `gh pr merge` |
+    | `test.run` | `cargo test`, `npm test`, `npm run test…`, `pnpm test`, `yarn test`, `pytest`, `go test`, `dotnet test` |
+    | `build.run` | `cargo build`, `npm run build`, `pnpm build`, `yarn build`, `go build`, `dotnet build` |
+    | `stack.up` / `stack.down` | `ramify up` / `ramify down` |
+
+18. The JSON on stdin has the common fields, then `action`, `tool_name`, `tool_input`, and
+    `details`. `details` holds what the classifier reads from the command: `step`, `pr` (a
+    number), `branch`, `draft` (true for `gh pr create --draft`), `work_item` (a path or a
+    ticket key) when it finds them. PostWorkflow also has `tool_response` and `succeeded`
+    (true when the command exited 0).
+19. PreWorkflow takes the PreToolUse decisions (8–11). A deny on any action blocks the whole
+    tool call. PostWorkflow takes the PostToolUse decisions.
+20. `ramify classify` is the classifier: it reads `{tool_name, tool_input, cwd}` on stdin and
+    prints the actions as a JSON array. It splits a command on `&&`, `||`, `;`, `|` and line
+    breaks with the same tokenizer as the guard. It reads through `cd DIR &&`, `env X=Y`, `bash
+    -c`, and a `ramify` or `gh` called by a full path. It accepts Ram Code's tool names, and
+    Claude Code's (`Bash`, `Read`, `Write`, `Edit`), so one classifier serves every agent.
+21. Ram Code fires PreWorkflow and PostWorkflow itself, from the same sources (1). It runs the
+    classifier only when some source has a PreWorkflow or PostWorkflow hook.
+22. Claude Code and Codex have no such events. ramify bridges them:
+    - `ramify-hook workflow-pre` on PreToolUse and `ramify-hook workflow-post` on PostToolUse,
+      registered in `.claude-plugin/plugin.json` and `hooks/codex.json` for `Bash`, `Read`,
+      `Write` and `Edit`.
+    - The bridge runs the classifier, then the PreWorkflow and PostWorkflow hooks from the Ram
+      Code sources 1.1 and 1.2 (`~/.ram`, `.ram`). Claude Code's own settings files cannot hold
+      an unknown event, so the workflow hooks live there.
+    - It prints the merged decision in Claude Code's format.
+    - A bridge with no workflow hook configured exits at once, without running the classifier.
+23. `ramify hooks run <Event>` is the one hook runner. It reads the event JSON on stdin, loads the
+    sources, runs the matching hooks and prints the merged decision. Ram Code and the bridge
+    both use it, so the two agree. Ram Code runs its core events (5) in process, with the same
+    code.
+
+### Acceptance criteria
+
+- AC18: Given each row of 17, then `ramify classify` returns that action for each listed tool
+  call. A command that does none returns `[]`.
+- AC19: Given `cd wt && git commit -m x && git push origin HEAD`, then the actions are
+  `commit` then `push`, with `branch` in the `push` details when the command names one.
+- AC20: Given `gh pr create --draft --title x`, then the action is `pr.open` with
+  `draft: true`. Given `gh pr merge 50 --squash`, then it is `pr.merge` with `pr: 50`.
+- AC21: Given a PreWorkflow hook on `pr.merge` that denies, when Ram Code's model runs
+  `gh pr merge 50`, then the command does not run, and the result has the reason.
+- AC22: Given a PostWorkflow hook on `workitem.update`, when the model runs `ramify step done
+  build`, then the hook gets `details.step: "build"`, `succeeded`, and the command's output.
+- AC23: Given a PreWorkflow hook on `pr.open` in `~/.ram/settings.json`, when a Claude Code
+  session runs `gh pr create`, then the bridge runs it, and its deny reaches Claude Code as a
+  PreToolUse deny.
+- AC24: Given no PreWorkflow or PostWorkflow hook in any source, then neither Ram Code nor the
+  bridge runs the classifier.
+- AC25: Given a `read_file` of `.ramify/work/x/spec.md`, then the action is `workitem.read`
+  with `work_item` set to that path.
+- AC26: The README documents the actions, their details, `ramify classify`, `ramify hooks run`
+  and the bridge.
+
+### Out of scope
+
+- Events for actions that happen outside an agent, such as a merge on GitHub or a decision in
+  the approvals window.
+- Classifying commands hidden in scripts or aliases.
+
+### Lane
+
+Still standard. The bridge adds hooks to the Claude Code and Codex manifests. Their write set
+grows by `.claude-plugin/plugin.json`, `hooks/codex.json` and `cli/**`.
+
 ## Out of scope
 
 - Hook types other than `command`, such as `prompt` hooks.
