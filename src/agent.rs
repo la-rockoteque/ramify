@@ -8,6 +8,9 @@ pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 const MAX_TURNS: usize = 32;
 
+/// A `tool_use` input under this key holds arguments that did not parse as JSON.
+pub const INVALID_ARGUMENTS: &str = "__invalid_arguments";
+
 const SYSTEM_PROMPT: &str = "You are Ram Code, a coding agent working inside one git worktree. \
 Use the tools to inspect and change files. Keep changes small and focused on the task. \
 Every path is relative to the worktree root. When the task is done, reply with a short summary \
@@ -49,17 +52,7 @@ pub struct AgentConfig {
 impl AgentConfig {
     pub fn from_env(f: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let get = |key: &str| f(key).filter(|value| !value.trim().is_empty());
-        let credential = if let Some(key) = get("ANTHROPIC_API_KEY") {
-            Credential::ApiKey(key.trim().to_string())
-        } else if let Some(token) = get("ANTHROPIC_AUTH_TOKEN") {
-            Credential::AuthToken(token.trim().to_string())
-        } else if has_login(&get) {
-            Credential::Login
-        } else {
-            return Err("No credential found. Export ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, \
-or sign in with `ant auth login`, then start the task again."
-                .to_string());
-        };
+        let credential = credential_from_env(&get).ok_or_else(|| NO_CREDENTIAL.to_string())?;
         // A token usually points at a proxy; a key or a login points at Anthropic.
         let (default_base, default_model) = match credential {
             Credential::AuthToken(_) => (DEFAULT_BASE_URL, DEFAULT_MODEL),
@@ -71,9 +64,7 @@ or sign in with `ant auth login`, then start the task again."
             .or_else(|| get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
             .or_else(|| get("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"))
             .unwrap_or_else(|| default_model.to_string());
-        let max_tokens = get("RAM_CODE_MAX_TOKENS")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens = max_tokens_from_env(&get);
         Ok(Self {
             base_url,
             credential,
@@ -82,8 +73,44 @@ or sign in with `ant auth login`, then start the task again."
         })
     }
 
-    pub fn from_process_env() -> Result<Self, String> {
-        Self::from_env(|key| std::env::var(key).ok())
+}
+
+/// Remove thinking blocks from earlier turns. Their signatures are valid only for the model
+/// that wrote them, so another provider rejects them.
+pub fn strip_thinking(history: &mut [Value]) {
+    for message in history.iter_mut() {
+        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+            blocks.retain(|block| {
+                !matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            });
+        }
+    }
+}
+
+/// `RAM_CODE_MAX_TOKENS`, else the default.
+pub fn max_tokens_from_env(get: &dyn Fn(&str) -> Option<String>) -> u32 {
+    get("RAM_CODE_MAX_TOKENS")
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+}
+
+pub const NO_CREDENTIAL: &str = "No credential found. Export ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, \
+or sign in with `ant auth login`, then start the task again.";
+
+/// The first Anthropic credential found: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, then the login.
+pub fn credential_from_env(get: &dyn Fn(&str) -> Option<String>) -> Option<Credential> {
+    let get = |key: &str| get(key).filter(|value| !value.trim().is_empty());
+    if let Some(key) = get("ANTHROPIC_API_KEY") {
+        Some(Credential::ApiKey(key.trim().to_string()))
+    } else if let Some(token) = get("ANTHROPIC_AUTH_TOKEN") {
+        Some(Credential::AuthToken(token.trim().to_string()))
+    } else if has_login(&get) {
+        Some(Credential::Login)
+    } else {
+        None
     }
 }
 
@@ -175,39 +202,43 @@ impl AnthropicLlm {
     }
 }
 
+/// POST a JSON body and return the JSON reply. A 4xx or 5xx reply is an error.
+pub fn post_json(url: &str, headers: &[(&str, String)], request: &Value) -> Result<Value, String> {
+    let body = serde_json::to_string(request)
+        .map_err(|e| format!("could not encode the model request: {e}"))?;
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .build(),
+    );
+    let mut post = agent.post(url);
+    for (name, value) in headers {
+        post = post.header(*name, value);
+    }
+    let mut response = post
+        .header("content-type", "application/json")
+        .send(body.as_str())
+        .map_err(|e| format!("model API request to {url} failed: {e}"))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("could not read the model response: {e}"))?;
+    if status >= 400 {
+        return Err(format!(
+            "model API returned {status}: {}",
+            shorten(&text, 2000)
+        ));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("model API returned invalid JSON: {e}"))
+}
+
 impl Llm for AnthropicLlm {
     fn complete(&self, request: &Value) -> Result<Value, String> {
-        let url = messages_url(&self.config.base_url);
-        let body = serde_json::to_string(request)
-            .map_err(|e| format!("could not encode the model request: {e}"))?;
-        let agent = ureq::Agent::new_with_config(
-            ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .timeout_global(Some(std::time::Duration::from_secs(120)))
-                .build(),
-        );
-        let mut post = agent.post(&url);
-        for (name, value) in auth_headers(&self.config.credential)? {
-            post = post.header(name, value);
-        }
-        let mut response = post
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .send(body.as_str())
-            .map_err(|e| format!("model API request to {url} failed: {e}"))?;
-        let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| format!("could not read the model response: {e}"))?;
-        if status >= 400 {
-            return Err(format!(
-                "model API returned {status}: {}",
-                shorten(&text, 2000)
-            ));
-        }
-        serde_json::from_str(&text)
-            .map_err(|e| format!("model API returned invalid JSON: {e}"))
+        let mut headers = auth_headers(&self.config.credential)?;
+        headers.push(("anthropic-version", "2023-06-01".to_string()));
+        post_json(&messages_url(&self.config.base_url), &headers, request)
     }
 
     fn model(&self) -> &str {
@@ -292,9 +323,12 @@ pub fn run_turn(
                         name: name.clone(),
                         input: input.to_string(),
                     });
-                    let result = match tools.call(&name, &input) {
-                        Ok(output) => output,
-                        Err(error) => format!("error: {error}"),
+                    let result = match input.get(INVALID_ARGUMENTS) {
+                        Some(raw) => format!("error: the tool arguments are not valid JSON: {raw}"),
+                        None => match tools.call(&name, &input) {
+                            Ok(output) => output,
+                            Err(error) => format!("error: {error}"),
+                        },
                     };
                     on_event(AgentEvent::ToolResult(result.clone()));
                     assistant_blocks.push(block.clone());
