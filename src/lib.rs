@@ -16,6 +16,7 @@ pub mod shell;
 pub mod state;
 pub mod search;
 pub mod tools;
+pub mod write;
 pub mod update;
 
 pub use agent::{AgentConfig, AgentEvent};

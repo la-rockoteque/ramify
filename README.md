@@ -145,14 +145,23 @@ and files over 10 MB. They do not follow a symlink.
 
 `edit_file` changes part of a file, so the model does not rewrite the whole file.
 
-- `old_string` must occur once. With more matches, the error gives the count and the lines, and
-  `replace_all` replaces all of them.
-- A CRLF file keeps CRLF endings, even when the model sends LF. The trailing newline and the file
-  mode stay as they were.
-- It refuses a path under `.git`, a missing or binary file, a file that is not UTF-8, and a file
-  over 10 MB. An empty `old_string` is an error: `write_file` creates files.
-- It writes a temporary file next to the original, then renames it, so a failed write never
-  leaves half a file.
+- `old_string` must occur once. With more matches, the error gives the count and up to 10 lines,
+  and `replace_all` replaces all of them.
+- A CRLF file keeps CRLF endings, even when the model sends LF. In a file with mixed endings, the
+  new text takes the ending of the line where the match starts. The trailing newline and the
+  file mode stay as they were.
+- It refuses a missing or binary file, a file that is not UTF-8, and a file over 10 MB. An empty
+  `old_string` is an error: `write_file` creates files.
+
+`write_file` and `edit_file` share one write path:
+
+- They refuse Git metadata: a `.git` file or folder anywhere in the worktree, in any case, also
+  through a symlink.
+- A symlink in the path must lead to a place inside the worktree. A symlink whose target does
+  not exist is refused, because the write would create the target wherever it points.
+- A file with other hard links is refused, because one of its other names may be in `.git`.
+- They write a new temporary file with a random name next to the original, then rename it over
+  the original. A failed write never leaves half a file, and an existing file keeps its mode.
 
 Run one task without the interface:
 

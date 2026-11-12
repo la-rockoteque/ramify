@@ -308,3 +308,150 @@ fn edit_through_a_symlink_keeps_the_link() {
     assert!(fs::symlink_metadata(root.join("alias.txt")).unwrap().file_type().is_symlink());
     assert_eq!(fs::read_to_string(root.join("real.txt")).unwrap(), "two\n");
 }
+
+// ── review fixes ─────────────────────────────────────────────────────────────
+
+fn repo(name: &str) -> PathBuf {
+    let root = tmp(name);
+    fs::create_dir_all(root.join(".git/hooks")).unwrap();
+    root
+}
+
+#[test]
+fn write_through_a_dangling_symlink_is_refused() {
+    let root = repo("r1");
+    symlink(".git/hooks/pre-commit", root.join("innocent")).unwrap();
+    let out = write(&root, json!({"path": "innocent", "content": "#!/bin/sh\necho pwned\n"}));
+    assert!(out.is_err(), "{out:?}");
+    assert!(!root.join(".git/hooks/pre-commit").exists());
+    let edited = edit(&root, json!({"path": "innocent", "old_string": "a", "new_string": "b"}));
+    assert!(edited.is_err(), "{edited:?}");
+
+    let outside = std::env::temp_dir().join(format!("ramcode-edit-outside-{}", std::process::id()));
+    let _ = fs::remove_file(&outside);
+    symlink(&outside, root.join("x")).unwrap();
+    let out = write(&root, json!({"path": "x", "content": "escaped"}));
+    assert!(out.is_err(), "{out:?}");
+    assert!(!outside.exists(), "a file was written outside the worktree");
+
+    // A dangling link as a folder on the way.
+    symlink(".git/hooks", root.join("hooks-link-gone")).unwrap();
+    fs::remove_dir_all(root.join(".git/hooks")).unwrap();
+    let out = write(&root, json!({"path": "hooks-link-gone/pre-push", "content": "x"}));
+    assert!(out.is_err(), "{out:?}");
+    assert!(!root.join(".git/hooks").exists());
+}
+
+#[test]
+fn planted_symlink_at_the_temp_path_is_harmless() {
+    let root = repo("r2");
+    fs::write(root.join("run.sh"), "echo hi\n").unwrap();
+    fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let pid = std::process::id();
+    for seq in 0..64 {
+        let _ = symlink(
+            ".git/hooks/post-checkout",
+            root.join(format!(".run.sh.ram-edit-{pid}-{seq}")),
+        );
+    }
+    let out = edit(&root, json!({"path": "run.sh", "old_string": "hi", "new_string": "bye"}));
+    assert!(out.is_ok(), "{out:?}");
+    assert!(!root.join(".git/hooks/post-checkout").exists(), "the edit wrote through a planted link");
+    let meta = fs::symlink_metadata(root.join("run.sh")).unwrap();
+    assert!(meta.file_type().is_file(), "run.sh is no longer a regular file");
+    assert_eq!(fs::read_to_string(root.join("run.sh")).unwrap(), "echo bye\n");
+    assert_eq!(meta.permissions().mode() & 0o777, 0o755);
+}
+
+#[test]
+fn hard_linked_target_is_refused() {
+    let root = repo("r3");
+    fs::write(root.join(".git/config"), "[core]\n").unwrap();
+    fs::hard_link(root.join(".git/config"), root.join("cfg")).unwrap();
+    let out = write(&root, json!({"path": "cfg", "content": "[core]\n\tfsmonitor = evil\n"}));
+    assert!(out.is_err(), "{out:?}");
+    let edited = edit(
+        &root,
+        json!({"path": "cfg", "old_string": "[core]", "new_string": "[core]\n\tfsmonitor = evil"}),
+    );
+    assert!(edited.is_err(), "{edited:?}");
+    assert_eq!(fs::read_to_string(root.join(".git/config")).unwrap(), "[core]\n");
+}
+
+#[test]
+fn git_folder_name_is_matched_without_case() {
+    let root = tmp("r4");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    let out = write(&root, json!({"path": "sub/.GIT/config", "content": "x"}));
+    assert!(out.is_err(), "{out:?}");
+    assert!(!root.join("sub/.GIT").exists());
+}
+
+#[test]
+fn write_file_is_atomic() {
+    let root = tmp("r5");
+    let file = root.join("f.txt");
+    fs::write(&file, "old\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    let inode = fs::metadata(&file).unwrap().ino();
+    write(&root, json!({"path": "f.txt", "content": "new\n"})).unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
+    assert_ne!(fs::metadata(&file).unwrap().ino(), inode, "write_file wrote in place");
+    assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+
+    // A failed write leaves the old content and no temp file.
+    fs::create_dir_all(root.join("ro")).unwrap();
+    fs::write(root.join("ro/g.txt"), "keep\n").unwrap();
+    fs::set_permissions(root.join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+    let out = write(&root, json!({"path": "ro/g.txt", "content": "lost\n"}));
+    fs::set_permissions(root.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(out.is_err(), "{out:?}");
+    assert_eq!(fs::read_to_string(root.join("ro/g.txt")).unwrap(), "keep\n");
+    let left: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .chain(fs::read_dir(root.join("ro")).unwrap())
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert!(left.is_empty(), "temp files left: {left:?}");
+}
+
+#[test]
+fn mixed_endings_follow_the_line_around_the_match() {
+    let root = tmp("r6");
+    fs::write(root.join("m.txt"), "a\r\nb\r\nc\n").unwrap();
+    edit(&root, json!({"path": "m.txt", "old_string": "b", "new_string": "b1\nb2"})).unwrap();
+    assert_eq!(fs::read(root.join("m.txt")).unwrap(), b"a\r\nb1\r\nb2\r\nc\n");
+}
+
+#[test]
+fn line_range_for_trailing_newline() {
+    let root = tmp("r7");
+    fs::write(root.join("t.txt"), "a\nb\nc\n").unwrap();
+    let out = edit(&root, json!({"path": "t.txt", "old_string": "b\n", "new_string": "x\n"})).unwrap();
+    assert!(out.contains("lines 2-2"), "{out}");
+}
+
+#[test]
+fn ambiguous_error_lists_at_most_ten_lines() {
+    let root = tmp("r8");
+    fs::write(root.join("t.txt"), "x\n".repeat(25)).unwrap();
+    let error = edit(&root, json!({"path": "t.txt", "old_string": "x", "new_string": "y"})).unwrap_err();
+    assert!(error.contains("25"), "{error}");
+    assert!(error.contains("1, 2, 3, 4, 5, 6, 7, 8, 9, 10"), "{error}");
+    assert!(!error.contains("11,") && !error.contains(", 11"), "{error}");
+    assert!(error.contains("and 15 more"), "{error}");
+}
+
+#[test]
+fn replace_all_reports_first_and_last_line() {
+    let root = tmp("r9");
+    fs::write(root.join("t.txt"), "x\na\nx\nb\nx\n").unwrap();
+    let out = edit(
+        &root,
+        json!({"path": "t.txt", "old_string": "x", "new_string": "y", "replace_all": true}),
+    )
+    .unwrap();
+    assert!(out.contains("replaced 3 occurrences"), "{out}");
+    assert!(out.contains("lines 1-5"), "{out}");
+}
