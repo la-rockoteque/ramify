@@ -18,6 +18,6 @@
 | Q14 | pass | `code_map_survives_a_parse_error` |
 | Q15 | pass | `binary_files_are_skipped` |
 | Q16 | pass | `both_formats_get_the_new_tools` |
-| Q17 | waiting on the human | This shell has no provider key. |
+| Q17 | pass | The human ran the case live and approved it in the chat on 2026-11-12. |
 
-Yield: 17 cases. 16 ran and passed, 0 failed. Q17 waits on a live run.
+Yield: 17 cases. 17 ran and passed, 0 failed.
