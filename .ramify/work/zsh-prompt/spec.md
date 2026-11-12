@@ -38,8 +38,8 @@ This branch puts the segment into ramify.
 10. `--json` prints the `statusline --json` object, plus `sessions`: an array of `{name, agent,
     state, since}`.
 11. The prompt must stay fast. The command does not probe services over HTTP. It takes the
-    stack health from a cache that `statusline` and `card` write, and shows nothing for health
-    when the cache is older than 60 s. One run takes at most 50 ms in a repo with 20 worktrees.
+    stack health from a cache that `statusline` writes, and shows nothing for health when the
+    cache is older than 60 s. Ram Code runs `statusline` for its selected worktree every 30 s. One run takes at most 50 ms in a repo with 20 worktrees.
 
 ### zsh integration
 

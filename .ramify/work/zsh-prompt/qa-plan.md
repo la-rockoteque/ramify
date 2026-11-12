@@ -41,6 +41,7 @@ with oh-my-zsh and powerlevel10k.
 | Q31 | AC22 | high | `sessions_pane_lists_live_records`: two records, no pin, both rows with their marks, `⏸` on the idle one | build |
 | Q32 | AC23 | medium | `cargo test` at the root: every existing test passes | build |
 | Q33 | AC19 | medium | Live: open `ram` in a worktree where a Claude Code session runs. The header shows `✻ <name>`. Start a Ram Code task: a shell prompt in the same worktree shows `◆ ram`. | qa |
+| Q34 | Behaviour 11 | medium | `ram_code_refreshes_the_health_cache`: one `statusline` run for the selected worktree, and none again within 30 s | build |
 
 ## Write set
 

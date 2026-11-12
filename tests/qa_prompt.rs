@@ -189,3 +189,32 @@ fn sessions_pane_lists_live_records() {
     assert!(text.contains("✻ birch"), "{text}");
     assert!(text.contains("◇ codex") && text.contains("⏸"), "{text}");
 }
+
+#[test]
+fn ram_code_refreshes_the_health_cache() {
+    let _guard = serial();
+    let base = tmp("health");
+    std::env::set_var("RAMIFY_STATE_DIR", base.join("state"));
+    let runner = FakeRunner::new();
+    let mut app = app_with(runner.clone(), &base);
+    app.tick();
+    let ran = || {
+        runner
+            .specs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|spec| spec.args == ["statusline"] && spec.root == base.join("wt-1"))
+            .count()
+    };
+    for _ in 0..100 {
+        if ran() > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(ran(), 1, "statusline did not run for the selected worktree");
+    app.tick();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(ran(), 1, "statusline ran again before 30 seconds");
+}

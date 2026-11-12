@@ -114,6 +114,9 @@ pub struct App {
     /// This session's record, once a task has started: `ramify prompt` shows it as `◆ ram`.
     ram_record: Option<PathBuf>,
     ram_since: u64,
+    /// When `ramify statusline` last refreshed the health cache, and for which worktree.
+    health_root: Option<PathBuf>,
+    health_at: Option<Instant>,
 }
 
 impl App {
@@ -145,6 +148,8 @@ impl App {
             status_at: None,
             ram_record: None,
             ram_since: 0,
+            health_root: None,
+            health_at: None,
         }
     }
 
@@ -867,7 +872,33 @@ impl App {
             self.panel.set_worktree(Some(worktree.path.clone()));
         }
         self.panel.tick(&*self.runner, &self.root);
+        self.refresh_health();
         self.refresh_status();
+    }
+
+    /// `ramify prompt` makes no HTTP request: it shows the health that `ramify statusline` last
+    /// cached. Ram Code runs `statusline` every 30 seconds, off the drawing thread, so the
+    /// header and the shell prompts in that worktree show a live stack.
+    fn refresh_health(&mut self) {
+        let Some(root) = self.selected_worktree().map(|worktree| worktree.path.clone()) else {
+            return;
+        };
+        let fresh = self.health_root.as_ref() == Some(&root)
+            && self
+                .health_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(30));
+        if fresh {
+            return;
+        }
+        self.health_root = Some(root.clone());
+        self.health_at = Some(Instant::now());
+        let runner = self.runner.clone();
+        std::thread::spawn(move || {
+            let _ = runner.run(&CommandSpec {
+                root,
+                args: vec!["statusline".into()],
+            });
+        });
     }
 
     pub fn open_root(&mut self, root: PathBuf) {

@@ -47,7 +47,8 @@ Press any key to leave the splash. The interface is a chat:
 Under the worktree chips, the header shows the `ramify prompt` line of the selected worktree:
 its branch, stack, workflow step and the agent sessions that work in it (see
 [The zsh prompt](#the-zsh-prompt)). Ram Code reads it again when the selection changes, when a
-task ends, and every 5 seconds.
+task ends, and every 5 seconds. Every 30 seconds it also runs `ramify statusline` for that worktree in
+the background, which keeps the stack health fresh for the header and for shell prompts.
 
 The first message starts a task in the selected worktree. The transcript stays, and later
 messages carry the earlier turns to the model. Each task runs in a worker process, so the

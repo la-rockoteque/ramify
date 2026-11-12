@@ -20,7 +20,7 @@ part of this audit.
 | AC12 | met | `render` adds `sessions` in `Mode::Prompt`. Test `prompt_json_has_statusline_fields_and_sessions`. |
 | AC13 | met | In `Mode::Prompt`, `render` reads `cached_health` and never calls `http_status_path`. Test `prompt_makes_no_http_request`: a socket that accepts and never answers, and the prompt returns in under 1.5 s. A probe would wait 3 s. |
 | AC14 | met | Test `prompt_is_fast_with_twenty_worktrees`: the median of 10 debug-build runs is 50 ms or less. |
-| Behaviour 11 | partly met | `statusline` writes the health cache, but `card` does not. `card` runs per-service smoke checks, which measure something else than "`/` answers", so one cache file would mix two meanings. Raised for review: drop "and `card`" from the spec, or have `card` probe `/` too. |
+| Behaviour 11 | met | You chose Ram Code as the second writer, not `card`, and the spec now says so. `statusline` writes the cache in `render`. Ram Code's `refresh_health` runs `statusline` for the selected worktree every 30 s, on a background thread. Tests `prompt_reads_the_health_cache` and `ram_code_refreshes_the_health_cache`. |
 | AC15 | met | `shell/ramify.plugin.zsh`. Tests `zsh_plugin_prints_the_prompt_line` and `zsh_plugin_refreshes_on_cd`. |
 | AC16 | partly met | `shell/ramify.p10k.zsh`. Test `p10k_segment_draws_the_line_and_nothing_outside` uses a stand-in for `p10k segment`. A real powerlevel10k is QA case Q23. |
 | AC17 | met | `prompt.rs` `install`. Test `prompt_install_links_the_plugin`. |
