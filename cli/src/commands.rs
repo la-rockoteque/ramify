@@ -748,7 +748,7 @@ fn scan(directory: &Path) {
     let _ = std::fs::write(directory.join(".scanned"), "");
 }
 
-fn check(directory: &Path, path: &Path) {
+pub(crate) fn check(directory: &Path, path: &Path) {
     let Ok(real) = path.canonicalize() else {
         return;
     };
